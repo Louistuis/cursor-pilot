@@ -67,10 +67,20 @@ fi
 
 echo "Built: $BUNDLE"
 
-INSTALL_DIR="${INSTALL_DIR-$HOME/Applications}"
+# Installs into /Applications when Cursor Pilot is already there and you own
+# it (copy it in once, see the README), otherwise into ~/Applications.
+if [[ -z "${INSTALL_DIR+x}" ]]; then
+  if [[ -w "/Applications/Cursor Pilot.app/Contents" ]]; then INSTALL_DIR=/Applications; else INSTALL_DIR="$HOME/Applications"; fi
+fi
 if [[ -n "$INSTALL_DIR" ]]; then
+  DEST="$INSTALL_DIR/Cursor Pilot.app"
   mkdir -p "$INSTALL_DIR"
-  rm -rf "$INSTALL_DIR/Cursor Pilot.app"
-  ditto "$BUNDLE" "$INSTALL_DIR/Cursor Pilot.app"
-  echo "Installed: $INSTALL_DIR/Cursor Pilot.app"
+  if [[ -d "$DEST" && ! -w "$INSTALL_DIR" ]]; then
+    # The folder isn't ours (/Applications), but the app is: update it in place.
+    rsync -a --delete "$BUNDLE/" "$DEST/"
+  else
+    rm -rf "$DEST"
+    ditto "$BUNDLE" "$DEST"
+  fi
+  echo "Installed: $DEST"
 fi

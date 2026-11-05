@@ -100,7 +100,14 @@ scripts/build-app.sh
 ```
 
 The app lands in `build/Cursor Pilot.app` and is copied to
-`~/Applications` (`INSTALL_DIR=` skips that). Put build output elsewhere with
+`~/Applications` (`INSTALL_DIR=` skips that). To keep it in `/Applications`
+instead, copy it there once with your password and make it yours; later
+builds then update it in place:
+
+```bash
+sudo ditto ~/Applications/"Cursor Pilot.app" "/Applications/Cursor Pilot.app"
+sudo chown -R "$USER" "/Applications/Cursor Pilot.app"
+``` Put build output elsewhere with
 `BUILD_ROOT=/some/folder`.
 
 Signing uses `CODESIGN_IDENTITY`, else your first Apple Development or
@@ -151,6 +158,14 @@ ANTHROPIC_API_KEY=sk-ant-… cargo run --example ask -- "Why is the sky blue?"
 | Microphone, Speech Recognition | push-to-talk questions |
 | Screen Recording | screenshots sent with each question |
 | Accessibility | only for clicking and typing once you let Cursor Pilot work on your Mac |
+
+If a permission is switched on but Cursor Pilot still can't use it, the
+entry was made by an older build signed another way (for example ad hoc,
+before you ran `dev-signing-identity.sh`). Reset it and allow it again:
+
+```bash
+tccutil reset Accessibility com.louistuis.cursorpilot   # or ScreenCapture
+```
 
 Talking needs no Accessibility permission: the shortcut is a Carbon hot key
 and the buddy only reads the mouse position.

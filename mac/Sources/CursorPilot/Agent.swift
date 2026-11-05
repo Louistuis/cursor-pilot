@@ -146,7 +146,7 @@ final class ComputerControl {
                 askedForAccessibility = true
                 Self.requestAccessibility()
             }
-            return Result(content: "Cursor Pilot needs Accessibility permission to use the mouse and keyboard. Tell the user to allow it in System Settings › Privacy & Security › Accessibility, then try again.",
+            return Result(content: "Cursor Pilot needs Accessibility permission to use the mouse and keyboard. Tell the user to allow it in System Settings › Privacy & Security › Accessibility. If Cursor Pilot is already switched on there, that entry belongs to an older build: they should remove it with the minus button, then allow Cursor Pilot again. Then try again.",
                           isError: true)
         }
 
