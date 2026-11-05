@@ -1,0 +1,5 @@
+module CCursorPilotCore {
+    header "cursor_pilot_core.h"
+    link "cursor_pilot_core"
+    export *
+}

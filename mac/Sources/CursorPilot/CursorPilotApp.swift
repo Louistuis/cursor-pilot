@@ -1,0 +1,182 @@
+import AppKit
+import SwiftUI
+
+@main
+struct CursorPilotApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @ObservedObject private var model = AppModel.shared
+
+    var body: some Scene {
+        MenuBarExtra {
+            MenuContent(model: model)
+        } label: {
+            Image(systemName: model.phase == .idle ? "cursorarrow.rays"
+                  : model.backgroundWork ? "terminal" : "cursorarrow.motionlines")
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            if let path = UserDefaults.standard.string(forKey: "CPRenderInkPreview") {
+                let renderer = ImageRenderer(content: InkPreview())
+                renderer.scale = 2
+                if let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+                   let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+                return
+            }
+            if let path = UserDefaults.standard.string(forKey: "CPRenderArrowPreview") {
+                let view = HStack(spacing: 40) {
+                    PilotArrow(flipped: false).scaleEffect(6).frame(width: 200, height: 220)
+                    HStack(spacing: 24) {
+                        PilotArrow(flipped: false)
+                        PilotArrow(flipped: true)
+                    }
+                    .padding(30)
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .padding(40)
+                .background(Color(white: 0.16))
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 2
+                if let image = renderer.cgImage,
+                   let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+                return
+            }
+            if let path = UserDefaults.standard.string(forKey: "CPRenderGlowPreview") {
+                let size = CGSize(width: 1512, height: 982)
+                for mode in [GlowController.Mode.listening, .thinking, .sketching] {
+                    let file = path.replacingOccurrences(of: ".png", with: "-\(mode).png")
+                    if let image = GlowController.preview(size: size, mode: mode),
+                       let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: file))
+                    }
+                }
+                NSApp.terminate(nil)
+                return
+            }
+            let model = AppModel.shared
+            model.start()
+            Task {
+                await model.loadAPIKey()
+                // The menu bar icon is easy to miss (or hidden by the notch),
+                // so first run walks through setup and a missing key opens Home.
+                if !UserDefaults.standard.bool(forKey: "onboarded") {
+                    OnboardingWindow.shared.show()
+                } else if !model.hasAPIKey {
+                    HomeWindow.shared.show()
+                }
+                // `-CPAsk "question"` asks a typed question at launch (for testing the agent).
+                if let question = UserDefaults.standard.string(forKey: "CPAsk"), !question.isEmpty {
+                    await model.ask(question, includeScreen: false)
+                }
+            }
+            // `-CPBuddyDemo listening|thinking|answering` holds the buddy in that state (for UI work).
+            if let demo = UserDefaults.standard.string(forKey: "CPBuddyDemo") {
+                let buddy = model.overlay
+                buddy.autoHide = false
+                switch demo {
+                case "listening":
+                    buddy.state.mode = .listening
+                    buddy.state.level = 0.6
+                    buddy.state.caption = "What does this button do?"
+                case "thinking":
+                    buddy.state.mode = .thinking
+                case _:
+                    buddy.state.mode = .answering
+                    buddy.state.caption = "That's the export button. Click it, then pick PDF in the menu that opens."
+                }
+            }
+            // `-CPOpenHome settings|drawings|chat` opens Home on that page (for UI work).
+            switch UserDefaults.standard.string(forKey: "CPOpenHome") {
+            case "settings": HomeWindow.shared.show(.settings)
+            case "drawings": HomeWindow.shared.show(.drawings)
+            case "chat": HomeWindow.shared.show()
+            default: break
+            }
+            if UserDefaults.standard.bool(forKey: "CPShaderGallery") {
+                let w = NSWindow(contentViewController: NSHostingController(rootView: ShaderGallery()))
+                w.title = "Shader Gallery"
+                w.isReleasedWhenClosed = false
+                w.center()
+                w.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
+    /// Opening the app again (Finder, Spotlight, `open`) brings up Home.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MainActor.assumeIsolated { HomeWindow.shared.show() }
+        return true
+    }
+}
+
+/// The Home window, owned here rather than as a SwiftUI scene so the app can
+/// open it from anywhere. While it is open Cursor Pilot is a regular app
+/// (Dock icon, ⌘-Tab); when it closes it goes back to living in the menu bar.
+@MainActor
+final class HomeWindow: NSObject, NSWindowDelegate {
+    static let shared = HomeWindow()
+    private var window: NSWindow?
+
+    var isVisible: Bool { window?.isVisible ?? false }
+
+    func show(_ destination: HomeDestination? = nil) {
+        if let destination { HomeNavigation.shared.destination = destination }
+        if window == nil {
+            let host = NSHostingController(rootView: HomeView(model: .shared))
+            host.sceneBridgingOptions = [.toolbars, .title]
+            let w = NSWindow(contentViewController: host)
+            w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            w.toolbarStyle = .unified
+            w.title = "Cursor Pilot"
+            w.setContentSize(NSSize(width: 980, height: 660))
+            w.isReleasedWhenClosed = false
+            w.delegate = self
+            w.center()
+            w.setFrameAutosaveName("CursorPilotHome")
+            window = w
+        }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+}
+
+private struct MenuContent: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Button("Open Cursor Pilot") { HomeWindow.shared.show() }
+        .keyboardShortcut("o")
+        Button("Ask About My Screen") {
+            Task { await model.ask("", includeScreen: true) }
+        }
+        if model.phase != .idle {
+            Button("Stop") { model.interrupt() }
+        }
+        Button("Draw on Screen (⌃⌥D)") { model.toggleSketch() }
+        Button("New Chat") {
+            model.newConversation()
+            HomeWindow.shared.show(.chat(model.currentConversationID))
+        }
+        Divider()
+        Text("Hold \(model.talkDisplay) to talk")
+        Button("Settings…") { HomeWindow.shared.show(.settings) }
+            .keyboardShortcut(",")
+        Divider()
+        Button("Quit Cursor Pilot") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
+    }
+}

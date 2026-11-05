@@ -1,0 +1,291 @@
+//! Conversation state: the replayable API history for the live session and a
+//! lightweight transcript that is saved to disk for the Home window.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+/// Start a fresh conversation after this much silence.
+pub const IDLE_RESET_SECS: u64 = 15 * 60;
+/// History is append-only (thinking blocks must be replayed unchanged), so
+/// instead of trimming old turns we start over once a session gets long.
+/// Agent tasks add a message pair per tool round, so this is generous.
+pub const MAX_API_MESSAGES: usize = 160;
+/// Turns replayed when a saved conversation is resumed.
+const RESUME_TURNS: usize = 20;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Turn {
+    pub role: String,
+    pub text: String,
+    pub at: u64,
+    #[serde(default)]
+    pub screens: usize,
+    #[serde(default)]
+    pub points: Vec<String>,
+    /// What the agent did while answering ("Ran git status", "Clicked").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transcript {
+    pub id: String,
+    pub title: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub turns: Vec<Turn>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Summary {
+    pub id: String,
+    pub title: String,
+    pub updated_at: u64,
+    pub turn_count: usize,
+}
+
+pub struct Session {
+    pub api_messages: Vec<Value>,
+    pub transcript: Transcript,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Session {
+    pub fn new() -> Self {
+        let now = now();
+        Self {
+            api_messages: Vec::new(),
+            transcript: Transcript {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: String::new(),
+                created_at: now,
+                updated_at: now,
+                turns: Vec::new(),
+            },
+        }
+    }
+
+    /// Picks up a saved conversation. Only the text of each turn is
+    /// replayed (screenshots and thinking are not saved), and only the most
+    /// recent turns, so there is room to keep talking.
+    pub fn resume(mut transcript: Transcript) -> Self {
+        let keep = RESUME_TURNS;
+        let start = transcript.turns.len().saturating_sub(keep) & !1; // whole user/assistant pairs
+        let api_messages = transcript.turns[start..]
+            .iter()
+            .map(|t| {
+                let text = if !t.text.trim().is_empty() {
+                    t.text.clone()
+                } else if t.role == "user" {
+                    "(asked about the screen)".to_string()
+                } else {
+                    "(no reply)".to_string()
+                };
+                json!({"role": t.role, "content": [{"type": "text", "text": text}]})
+            })
+            .collect();
+        // Resuming is activity: don't let the idle reset throw it away.
+        transcript.updated_at = now();
+        Self {
+            api_messages,
+            transcript,
+        }
+    }
+
+    pub fn is_stale(&self) -> bool {
+        !self.transcript.turns.is_empty()
+            && (now().saturating_sub(self.transcript.updated_at) > IDLE_RESET_SECS
+                || self.api_messages.len() >= MAX_API_MESSAGES)
+    }
+
+    pub fn commit(
+        &mut self,
+        user_msg: Value,
+        assistant_content: Vec<Value>,
+        user_turn: Turn,
+        assistant_turn: Turn,
+    ) {
+        let assistant = json!({"role": "assistant", "content": assistant_content});
+        self.commit_messages(vec![user_msg, assistant], user_turn, assistant_turn);
+    }
+
+    /// Appends every message of one exchange (an agent task adds tool
+    /// rounds between the question and the answer) and its transcript turns.
+    pub fn commit_messages(&mut self, messages: Vec<Value>, user_turn: Turn, assistant_turn: Turn) {
+        self.api_messages.extend(messages);
+        self.record(user_turn, assistant_turn);
+    }
+
+    /// Adds turns to the transcript only, for an exchange that didn't finish
+    /// (its messages can't be replayed, but the user should see it).
+    pub fn record(&mut self, user_turn: Turn, assistant_turn: Turn) {
+        if self.transcript.title.is_empty() {
+            self.transcript.title = title_from(&user_turn.text);
+        }
+        self.transcript.updated_at = now();
+        self.transcript.turns.push(user_turn);
+        self.transcript.turns.push(assistant_turn);
+    }
+}
+
+pub struct Store {
+    dir: PathBuf,
+}
+
+impl Store {
+    pub fn new(data_dir: &Path) -> Self {
+        let dir = data_dir.join("conversations");
+        let _ = fs::create_dir_all(&dir);
+        Self { dir }
+    }
+
+    pub fn save(&self, t: &Transcript) -> std::io::Result<()> {
+        let path = self
+            .path(&t.id)
+            .ok_or_else(|| std::io::Error::other("bad id"))?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_vec_pretty(t)?)?;
+        fs::rename(tmp, path)
+    }
+
+    pub fn load(&self, id: &str) -> Option<Transcript> {
+        let bytes = fs::read(self.path(id)?).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Renames a saved conversation; false when it does not exist.
+    pub fn rename(&self, id: &str, title: &str) -> bool {
+        let Some(mut t) = self.load(id) else {
+            return false;
+        };
+        t.title = title.to_string();
+        self.save(&t).is_ok()
+    }
+
+    pub fn delete(&self, id: &str) {
+        if let Some(p) = self.path(id) {
+            let _ = fs::remove_file(p);
+        }
+    }
+
+    pub fn list(&self) -> Vec<Summary> {
+        let mut out: Vec<Summary> = fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .filter_map(|e| serde_json::from_slice::<Transcript>(&fs::read(e.path()).ok()?).ok())
+            .map(|t| Summary {
+                id: t.id,
+                title: t.title,
+                updated_at: t.updated_at,
+                turn_count: t.turns.len(),
+            })
+            .collect();
+        out.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+        out
+    }
+
+    /// Only plain UUID-like ids map to files, so an id can never escape the folder.
+    fn path(&self, id: &str) -> Option<PathBuf> {
+        let ok = !id.is_empty()
+            && id.len() <= 64
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        ok.then(|| self.dir.join(format!("{id}.json")))
+    }
+}
+
+pub fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn title_from(text: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return "Screen question".into();
+    }
+    let mut title: String = t.chars().take(60).collect();
+    if t.chars().count() > 60 {
+        title.push('…');
+    }
+    title
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_round_trip_and_rejects_bad_ids() {
+        let dir = std::env::temp_dir().join(format!("cp-test-{}", uuid::Uuid::new_v4()));
+        let store = Store::new(&dir);
+        let mut s = Session::new();
+        let turn = |role: &str| Turn {
+            role: role.into(),
+            text: "hello".into(),
+            at: 1,
+            screens: 0,
+            points: vec![],
+            steps: vec![],
+        };
+        s.commit(
+            json!({"role":"user","content":"hello"}),
+            vec![],
+            turn("user"),
+            turn("assistant"),
+        );
+        store.save(&s.transcript).unwrap();
+        assert_eq!(store.load(&s.transcript.id).unwrap().turns.len(), 2);
+        assert_eq!(store.list().len(), 1);
+        assert!(store.load("../etc/passwd").is_none());
+        assert!(store.rename(&s.transcript.id, "Renamed"));
+        assert_eq!(store.load(&s.transcript.id).unwrap().title, "Renamed");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resume_replays_whole_text_pairs() {
+        let turns: Vec<Turn> = (0..50)
+            .map(|i| Turn {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                text: if i == 48 {
+                    String::new()
+                } else {
+                    format!("t{i}")
+                },
+                at: 1,
+                screens: 0,
+                points: vec![],
+                steps: vec![],
+            })
+            .collect();
+        let s = Session::resume(Transcript {
+            id: "x".into(),
+            title: "T".into(),
+            created_at: 1,
+            updated_at: 1,
+            turns,
+        });
+        assert_eq!(s.api_messages.len(), RESUME_TURNS);
+        assert_eq!(s.api_messages[0]["role"], "user");
+        assert_eq!(s.api_messages.last().unwrap()["role"], "assistant");
+        assert_eq!(
+            s.api_messages[s.api_messages.len() - 2]["content"][0]["text"],
+            "(asked about the screen)"
+        );
+        assert!(!s.is_stale());
+        assert_eq!(s.transcript.turns.len(), 50);
+    }
+}

@@ -1,0 +1,289 @@
+import AVFoundation
+import Speech
+import SwiftUI
+
+/// Everything you can change, as a page in the Home window.
+struct SettingsView: View {
+    @ObservedObject var model: AppModel
+    @State private var keyDraft = ""
+    @State private var permissions = PermissionStatus.current()
+    @State private var voices: [AVSpeechSynthesisVoice] = []
+    @State private var languages: [(id: String, name: String)] = []
+    @State private var askingAccess = false
+    private let refresh = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("API key") {
+                    HStack {
+                        SecureField("API key", text: $keyDraft,
+                                    prompt: Text(model.hasAPIKey ? "Saved in your keychain" : "sk-ant-…"))
+                            .labelsHidden()
+                            .frame(minWidth: 240)
+                            .onSubmit(saveKey)
+                        Button("Save", action: saveKey).disabled(keyDraft.isEmpty)
+                        if model.hasAPIKey && keyDraft.isEmpty {
+                            Button("Remove", role: .destructive) { model.apiKey = "" }
+                        }
+                    }
+                }
+                Picker("Model", selection: $model.model) {
+                    ForEach(AppModel.models, id: \.self) { Text(Self.modelName($0)).tag($0) }
+                }
+                Picker("Effort", selection: $model.effort) {
+                    ForEach(AppModel.efforts, id: \.self) { Text($0.capitalized).tag($0) }
+                }
+            } header: {
+                Text("Claude")
+            } footer: {
+                Text("Lower effort answers faster; higher effort thinks longer about hard questions.")
+            }
+
+            Section {
+                Toggle("Let Cursor Pilot work on your Mac", isOn: Binding(
+                    get: { model.macAccess },
+                    set: { on in
+                        if on && !model.macAccess { askingAccess = true } else { model.macAccess = on }
+                    }
+                ))
+                Text(model.macAccess ? AccessInfo.on : AccessInfo.off)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Working on your Mac")
+            } footer: {
+                if model.macAccess {
+                    Text("Files it edits are backed up first (Show Data Folder › backups). Press Stop or hold ⌃⌥ to interrupt at any time.")
+                }
+            }
+
+            Section("Talking") {
+                Picker("Hold to talk", selection: $model.talkKey) {
+                    Text("Control + Option (⌃⌥)").tag(AppModel.TalkKey.controlOption)
+                    Text("Custom shortcut").tag(AppModel.TalkKey.custom)
+                }
+                if model.talkKey == .custom {
+                    LabeledContent("Shortcut") { ShortcutRecorder(model: model) }
+                }
+                Picker("Language you speak", selection: $model.listenLocale) {
+                    Text("Automatic (\(Locale.current.localizedString(forIdentifier: model.resolvedListenLocale.identifier) ?? model.resolvedListenLocale.identifier))").tag("")
+                    Divider()
+                    ForEach(languages, id: \.id) { Text($0.name).tag($0.id) }
+                }
+            }
+
+            Section("Spoken replies") {
+                Toggle("Read replies aloud", isOn: $model.speakReplies)
+                Picker("Voice", selection: $model.voiceID) {
+                    Text("Best available").tag("")
+                    Divider()
+                    ForEach(voices, id: \.identifier) { v in
+                        Text("\(v.name) · \(Self.quality(v)) · \(v.language)").tag(v.identifier)
+                    }
+                }
+                .disabled(!model.speakReplies)
+                LabeledContent("Speed") {
+                    HStack {
+                        Image(systemName: "tortoise").foregroundStyle(.secondary)
+                        Slider(value: $model.speechRate, in: 0.7...1.5)
+                        Image(systemName: "hare").foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!model.speakReplies)
+                if !Speaker.hasNaturalVoice(for: "en") {
+                    Label {
+                        Text("Only basic voices are installed. For natural speech, add a Premium voice such as Zoe or Ava in System Settings › Accessibility › Spoken Content › System Voice › Manage Voices, then pick it here.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "waveform.badge.exclamationmark").foregroundStyle(.orange)
+                    }
+                }
+                HStack {
+                    Button("Preview Voice") {
+                        model.speak("Hi! I'm Cursor Pilot. Hold Control and Option, ask me anything, and I'll show you where to click.")
+                    }
+                    Spacer()
+                    Button("Get More Voices…") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?SpokenContent")!)
+                    }
+                    .buttonStyle(.link)
+                }
+            }
+
+            Section("On screen") {
+                Toggle("Buddy next to the cursor", isOn: $model.showBuddy)
+                Toggle("Hide the buddy when idle", isOn: $model.hideBuddyWhenIdle)
+                    .disabled(!model.showBuddy)
+                Toggle("Notch panel", isOn: $model.showNotch)
+                Toggle("Glowing screen edges while working", isOn: $model.showGlow)
+            }
+
+            Section {
+                PermissionRow(name: "Microphone", detail: "To hear your questions", granted: permissions.microphone) {
+                    Task { _ = await VoiceInput.requestPermissions(); permissions = .current() }
+                }
+                PermissionRow(name: "Speech Recognition", detail: "To turn speech into text", granted: permissions.speech) {
+                    Task { _ = await VoiceInput.requestPermissions(); permissions = .current() }
+                }
+                PermissionRow(name: "Screen Recording", detail: "To see what you're asking about", granted: permissions.screen) {
+                    Permissions.openScreenRecording()
+                }
+                PermissionRow(name: "Accessibility", detail: "To use the mouse and keyboard when working on your Mac",
+                              granted: permissions.accessibility) {
+                    Permissions.openAccessibility()
+                }
+                if !permissions.screen {
+                    HStack {
+                        Text("Allowed it already? macOS applies it after a restart.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Restart Cursor Pilot") { Permissions.relaunch() }
+                    }
+                }
+            } header: {
+                Text("Permissions")
+            } footer: {
+                Text("Cursor Pilot only listens while you hold the talk key, and only looks at your screen when you ask something.")
+            }
+
+            Section {
+                LabeledContent("Version", value: "\(Bundle.main.shortVersion) (core \(Core.version))")
+                HStack {
+                    Button("Run Setup Again…") { OnboardingWindow.shared.show() }
+                    Button("Show Data Folder") {
+                        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                            .appendingPathComponent("Cursor Pilot", isDirectory: true)
+                        NSWorkspace.shared.activateFileViewerSelecting([dir])
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(maxWidth: 680)
+        .frame(maxWidth: .infinity)
+        .onAppear {
+            permissions = .current()
+            if voices.isEmpty { voices = Speaker.availableVoices() }
+            if languages.isEmpty { languages = VoiceInput.languages() }
+        }
+        .alert("Let Cursor Pilot work on your Mac?", isPresented: $askingAccess) {
+            Button("Allow") { model.macAccess = true }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(AccessInfo.consent)
+        }
+        .onReceive(refresh) { _ in
+            let now = PermissionStatus.current()
+            if now != permissions { permissions = now }
+        }
+    }
+
+    private func saveKey() {
+        guard !keyDraft.isEmpty else { return }
+        model.apiKey = keyDraft
+        keyDraft = ""
+    }
+
+    static func modelName(_ id: String) -> String {
+        switch id {
+        case "claude-opus-5-5": "Claude Opus 5.5"
+        case "claude-sonnet-5-5": "Claude Sonnet 5.5"
+        case "claude-haiku-5-5": "Claude Haiku 5.5 (fastest)"
+        case "claude-fable-5-1": "Claude Fable 5.1"
+        default: id
+        }
+    }
+
+    private static func quality(_ v: AVSpeechSynthesisVoice) -> String {
+        switch v.quality {
+        case .premium: "Premium"
+        case .enhanced: "Enhanced"
+        default: "Standard"
+        }
+    }
+}
+
+struct PermissionRow: View {
+    var name: String
+    var detail: String? = nil
+    var granted: Bool
+    var request: () -> Void
+
+    var body: some View {
+        LabeledContent {
+            if granted {
+                Label("Allowed", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else {
+                Button("Allow…", action: request)
+            }
+        } label: {
+            Text(name)
+            if let detail { Text(detail) }
+        }
+    }
+}
+
+struct PermissionStatus: Equatable {
+    var microphone: Bool
+    var speech: Bool
+    var screen: Bool
+    var accessibility: Bool
+
+    var all: Bool { microphone && speech && screen }
+
+    static func current() -> PermissionStatus {
+        PermissionStatus(
+            microphone: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+            speech: SFSpeechRecognizer.authorizationStatus() == .authorized,
+            screen: ScreenCapture.hasPermission,
+            accessibility: ComputerControl.hasAccessibility
+        )
+    }
+}
+
+enum Permissions {
+    /// Asks for everything in one go: microphone and speech first (their
+    /// dialogs appear in place), then Screen Recording.
+    @MainActor
+    static func requestAll() async {
+        _ = await VoiceInput.requestPermissions()
+        if !ScreenCapture.hasPermission { openScreenRecording() }
+    }
+
+    static func openScreenRecording() {
+        // The request adds Cursor Pilot to the list; the pane is where it's switched on.
+        ScreenCapture.requestPermission()
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+    }
+
+    @MainActor
+    static func openAccessibility() {
+        ComputerControl.requestAccessibility()
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
+    /// Screen Recording only takes effect in a new process.
+    static func relaunch() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 0.6; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
+        try? task.run()
+        NSApp.terminate(nil)
+    }
+}
+
+enum AccessInfo {
+    static let consent = "Cursor Pilot will run commands, read and change files, and use your mouse and keyboard to do what you ask, on its own and without asking each time, like a co-worker at your Mac. It tells you what it's doing as it goes. You can turn this off any time in Settings."
+    static let on = "Cursor Pilot works on its own in the background, with no prompts: it runs commands, edits files, scripts apps and, when it has to, uses the mouse and keyboard. It says what it's doing as it goes."
+    static let off = "Cursor Pilot answers, points and draws on your screen, but doesn't run anything on your Mac."
+}
+
+extension Bundle {
+    var shortVersion: String { infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev" }
+}

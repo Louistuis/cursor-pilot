@@ -1,0 +1,13 @@
+// Serves the landing page (site/) on cursorpilot.lou15.com as a static
+// Cloudflare Worker. Deploy from this folder with: npx wrangler@4 deploy
+{
+  "name": "cursor-pilot-site",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./site"
+  },
+  "routes": [
+    { "pattern": "cursorpilot.lou15.com", "custom_domain": true }
+  ],
+  "workers_dev": false
+}
