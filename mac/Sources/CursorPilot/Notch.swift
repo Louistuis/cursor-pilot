@@ -260,19 +260,29 @@ struct NotchRootView: View {
     }
 }
 
-/// Small live indicator: waveform while listening, dots while thinking,
-/// a speaker while answering.
+/// Small live indicator: the wave following your voice while listening,
+/// dots while thinking, the wave again while answering. The two crossfade,
+/// and the wave stays the same view from listening to answering so it eases
+/// from your level to its own instead of restarting.
 struct PhaseIndicator: View {
     var phase: AppModel.Phase
     var level: Float
 
     var body: some View {
-        switch phase {
-        case .idle: EmptyView()
-        case .listening: SpeakingWave(level: level).frame(width: 56, height: 24)
-        case .thinking: ThinkingBlobs(zoom: 2.4).frame(width: 34, height: 34).frame(height: 24)
-        case .answering: SpeakingWave().frame(width: 56, height: 24)
+        ZStack {
+            if phase == .listening || phase == .answering {
+                SpeakingWave(level: phase == .listening ? level : nil)
+                    .frame(width: 56, height: 24)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            }
+            if phase == .thinking {
+                ThinkingBlobs(zoom: 2.4)
+                    .frame(width: 34, height: 34).frame(height: 24)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            }
         }
+        .frame(width: 56, height: 24)
+        .animation(.easeInOut(duration: 0.4), value: phase)
     }
 }
 

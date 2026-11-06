@@ -266,12 +266,16 @@ private struct TryItOrb: View {
 
     var body: some View {
         ShaderTile {
-            switch model.phase {
-            case .thinking: ThinkingBlobs(zoom: 1.6)
-            case .listening: SpeakingWave(level: buddy.level)
-            case .answering: SpeakingWave()
-            case .idle: SpeakingWave(level: 0.15)
+            ZStack {
+                if model.phase == .thinking {
+                    ThinkingBlobs(zoom: 1.6).transition(.opacity.combined(with: .scale(scale: 0.85)))
+                } else {
+                    SpeakingWave(level: model.phase == .listening ? buddy.level
+                                      : model.phase == .idle ? 0.15 : nil)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                }
             }
+            .animation(.easeInOut(duration: 0.4), value: model.phase == .thinking)
         }
     }
 }

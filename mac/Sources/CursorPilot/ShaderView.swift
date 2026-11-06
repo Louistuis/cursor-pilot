@@ -124,6 +124,13 @@ private final class ShaderRenderer: NSObject, MTKViewDelegate {
     let kind: ShaderKind
     var inputs: ShaderInputs
     private let start = CACurrentMediaTime()
+    private var last: CFTimeInterval = 0
+    /// The level actually drawn, eased toward the input so the wave glides
+    /// between the voice and its own motion instead of jumping.
+    private var level: Float?
+
+    /// What the wave draws at with no level, as a level.
+    private static let ownLevel: Float = 0.8
 
     init(kind: ShaderKind, inputs: ShaderInputs) {
         self.kind = kind
@@ -142,10 +149,15 @@ private final class ShaderRenderer: NSObject, MTKViewDelegate {
         else { return }
 
         let now = CACurrentMediaTime()
+        let dt = Float(last == 0 ? 0 : min(0.05, now - last))
+        last = now
+        let target = inputs.level ?? Self.ownLevel
+        let eased = level.map { $0 + (target - $0) * (1 - exp(-dt * 10)) } ?? target
+        level = eased
         let size = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
 
         encoder.setRenderPipelineState(pipeline)
-        var u = BasicUniforms(a: SIMD4(size.x, size.y, Float(now - start) * inputs.speed, inputs.level ?? -1),
+        var u = BasicUniforms(a: SIMD4(size.x, size.y, Float(now - start) * inputs.speed, eased),
                               b: SIMD4(max(inputs.zoom, 0.01), 0, 0, 0))
         encoder.setFragmentBytes(&u, length: MemoryLayout<BasicUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
