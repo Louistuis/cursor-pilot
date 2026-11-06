@@ -8,10 +8,12 @@ struct CoreSettings: Encodable {
     var effort: String
     /// Mac access: "off" or "on".
     var access: String
+    /// How it works on the Mac: "person" or "background".
+    var input: String
 
     enum CodingKeys: String, CodingKey {
         case apiKey = "api_key"
-        case model, effort, access
+        case model, effort, access, input
     }
 }
 

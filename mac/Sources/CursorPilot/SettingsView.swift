@@ -62,13 +62,21 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if model.macAccess {
-                    Toggle("Borrow my pointer when an app ignores background clicks", isOn: $borrowPointer)
+                    Picker("It works", selection: $model.inputMode) {
+                        Text("Like a person, with my mouse and keyboard").tag("person")
+                        Text("In the background, with its own pointer").tag("background")
+                    }
+                    if model.inputMode == "background" {
+                        Toggle("Borrow my pointer when an app ignores background clicks", isOn: $borrowPointer)
+                    }
                 }
             } header: {
                 Text("Working on your Mac")
             } footer: {
                 if model.macAccess {
-                    Text("A few apps only react to the real pointer. Then it moves yours for a split second and puts it back. Files it edits are backed up first (Show Data Folder › backups). Press Stop or hold ⌃⌥ to interrupt at any time.")
+                    Text(model.inputMode == "background"
+                         ? "A few apps only react to the real pointer. Then it moves yours for a split second and puts it back. Files it edits are backed up first (Show Data Folder › backups). Press Stop or hold ⌃⌥ to interrupt at any time."
+                         : "It moves your pointer, clicks and types the way you would. Move the mouse to take over; it waits until you let go. Helpers always work in their own space. Files it edits are backed up first. Press Stop or hold ⌃⌥ to interrupt at any time.")
                 }
             }
 

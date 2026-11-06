@@ -95,7 +95,7 @@ user's tabs (set shared to true only when your task needs the user's signed-in b
 actions without an app work in your current window; prefer them (elements, then press or set_value): \
 they work even where the user's windows cover yours. Never bring windows to the front, and don't use \
 the user's own windows unless your task says so.{}",
-        system_addendum(settings, home, today)
+        system_addendum(settings, home, today, false)
     )
 }
 
@@ -158,10 +158,31 @@ fn app_control_tool() -> Value {
     })
 }
 
-pub fn system_addendum(settings: &Settings, home: &str, today: &str) -> String {
+/// The agent part of the system prompt. `person`: the main agent drives the
+/// user's own mouse and keyboard; otherwise it works with its own pointer.
+pub fn system_addendum(settings: &Settings, home: &str, today: &str, person: bool) -> String {
     if !mac_access(&settings.access) {
         return String::new();
     }
+    let pointer = if person {
+        "You use the user's own mouse and keyboard, like a person sitting at this Mac: the pointer \
+glides to where you click, apps come to the front as you use them, and typing goes to the app in front. \
+The user sees it all, and can take over by moving the mouse; then you wait until they stop. \
+app_control press and set_value also click and type on screen; listing, reading and menus work directly."
+    } else {
+        "You have your own pointer, shown to the user as a small glass cursor: your clicks, typing and \
+scrolling go straight to the app under it, in the background, and never move the user's pointer or take \
+their keyboard. Typing and keys go to the app you last clicked in. If a click had no visible effect, click \
+the same spot once more: the retry briefly borrows the user's real pointer for apps that ignore background \
+clicks. Drags use the real pointer for a moment."
+    };
+    let manner = if person {
+        "Work the way the user would: open apps in front and use them on screen, at an easy pace."
+    } else {
+        "Work quietly in the background: open apps in the background (app_control open, or `open -g`) and \
+only bring one to the front when the user should see it or the app needs it; never take over the user's \
+screen, pointer or keyboard when there's another way."
+    };
     format!(
         "\n\nYou can also work on this Mac yourself, like a capable co-worker sitting at it. \
 The user turned this on and consented to it: every tool runs right away, with no approval prompts, \
@@ -175,13 +196,8 @@ app_control for apps instead and keep AppleScript for what only it can do.\n\
 window's controls, press buttons, fill in fields, read text, choose menu items. It is exact and \
 never needs the app in front.\n\
 - The computer tools, when present, see the screen and act on it: take a screenshot, then click, \
-type, press keys and scroll. Coordinates are pixels in your latest screenshot. You have your own \
-pointer, shown to the user as a small glass cursor: your clicks, typing and scrolling go straight \
-to the app under it, in the background, and never move the user's pointer or take their keyboard. \
-Typing and keys go to the app you last clicked in. If a click had no visible effect, click the same \
-spot once more: the retry briefly borrows the user's real pointer for apps that ignore background \
-clicks. Drags use the real pointer for a moment. End each group of actions with a screenshot (or \
-an elements listing) to check the result.\n\
+type, press keys and scroll. Coordinates are pixels in your latest screenshot. {pointer} End each \
+group of actions with a screenshot (or an elements listing) to check the result.\n\
 - messages reads the user's Messages conversations and sends texts for them.\n\
 - web_search, when present, finds current information.\n\
 How to work: do what the user asked, completely, the way they asked, as an autonomous agent: \
@@ -191,10 +207,7 @@ you could do yourself, and don't ask for confirmation, preferences or details yo
 obvious reasonable option and mention it in your reply. Ask only when you truly can't go on: \
 something only the user knows, or before something risky that can't be undone. If a step fails, try \
 another way, and another, before giving up. Prefer, in order: app_control and the shell (fast, exact, \
-invisible), then the computer tools for what has no other way. Work quietly in the background: open \
-apps in the background (app_control open, or `open -g`) and only bring one to the front when the user \
-should see it or the app needs it; never take over the user's screen, pointer or keyboard when \
-there's another way.\n\
+invisible), then the computer tools for what has no other way. {manner}\n\
 Nobody reviews your actions before they run, so be careful with what can't be undone: never use sudo, \
 and never delete, overwrite, send, post or buy anything the user didn't ask for. Move files to the \
 Trash with /usr/bin/trash rather than deleting them with rm.\n\

@@ -143,6 +143,11 @@ final class ComputerControl {
     /// background clicks? (Settings › Working on your Mac.)
     static var mayBorrowPointer: Bool { UserDefaults.standard.object(forKey: "borrowPointer") as? Bool ?? true }
 
+    /// Does the main agent use the user's own mouse and keyboard, like a
+    /// person (Settings › Working on your Mac)? Helpers never do.
+    static var drivesLikePerson: Bool { UserDefaults.standard.string(forKey: "inputMode") != "background" }
+    private var person: Bool { agent == 0 && Self.drivesLikePerson }
+
     /// A new task works on the display the pointer is on, from the user's cursor.
     func beginTask() {
         screen = nil
@@ -151,6 +156,7 @@ final class ComputerControl {
         lastPosted = nil
         realPointerApps = []
         apps.reset()
+        if agent == 0 { HumanInput.reset() }
     }
 
     /// The task is over: the buddy goes back to the user's cursor.
@@ -254,6 +260,16 @@ final class ComputerControl {
         guard Self.hasAccessibility else { return accessibilityMissing() }
         // Windows a helper's keys or clicks open become part of its workspace.
         let before = workspace != nil ? Set(Workspace.allWindows().map(\.id)) : []
+        if person {
+            if HumanInput.userTookOver, !(await HumanInput.waitForUser()) {
+                return fail("The user has been using the mouse and keyboard for two minutes, so you stopped. Ask whether to go on.")
+            }
+            let point = (input["coordinate"] as? [Double]).flatMap { $0.count == 2 ? toGlobal($0[0], $0[1]) : nil }
+            if let result = await personAction(name, input: input, point: point) {
+                try? await Task.sleep(for: .milliseconds(140))
+                return result
+            }
+        }
 
         let point = (input["coordinate"] as? [Double]).flatMap { $0.count == 2 ? toGlobal($0[0], $0[1]) : nil }
         let mods = Self.flags(input["text"] as? String ?? "")
@@ -362,6 +378,61 @@ final class ComputerControl {
         return Result(content: note, isError: false, summary: summary)
     }
 
+    /// One action with the user's own mouse and keyboard, the way a person
+    /// does it. Nil for actions handled the usual way.
+    private func personAction(_ name: String, input: [String: Any], point: CGPoint?) async -> Result? {
+        let mods = Self.flags(input["text"] as? String ?? "")
+        switch name {
+        case "mouse_move":
+            guard let point else { return fail("mouse_move needs a coordinate.") }
+            await RealInput.exclusive { await HumanInput.move(to: point) }
+            pointer = point
+            return ok()
+        case "left_click", "right_click", "middle_click", "double_click", "triple_click":
+            let at = point ?? HumanInput.location
+            let app = BackgroundInput.window(at: at)?.appName
+            let button: CGMouseButton = name == "right_click" ? .right : name == "middle_click" ? .center : .left
+            let count = name == "double_click" ? 2 : name == "triple_click" ? 3 : 1
+            await RealInput.exclusive { await HumanInput.click(at: at, button: button, count: count, flags: mods) }
+            pointer = at
+            return Result(content: "Clicked\(app.map { " in \($0)" } ?? "") with the mouse.", isError: false,
+                          summary: app.map { "Clicked in \($0)" } ?? "Clicked")
+        case "left_click_drag":
+            guard let start = (input["start_coordinate"] as? [Double]).flatMap({ $0.count == 2 ? toGlobal($0[0], $0[1]) : nil }),
+                  let end = point
+            else { return fail("left_click_drag needs start_coordinate and coordinate.") }
+            await RealInput.exclusive { await HumanInput.drag(from: start, to: end, flags: mods) }
+            pointer = end
+            return Result(content: "Dragged with the mouse.", isError: false, summary: "Dragged")
+        case "scroll":
+            let at = point ?? HumanInput.location
+            let amount = min(max(input["scroll_amount"] as? Int ?? 3, 1), 30)
+            let dir = input["scroll_direction"] as? String ?? "down"
+            let dy = dir == "down" ? amount : dir == "up" ? -amount : 0
+            let dx = dir == "right" ? amount : dir == "left" ? -amount : 0
+            await RealInput.exclusive { await HumanInput.scroll(at: at, dx: dx, dy: dy, flags: mods) }
+            pointer = at
+            return Result(content: "Scrolled \(dir).", isError: false, summary: "Scrolled \(dir)")
+        case "type":
+            let text = input["text"] as? String ?? ""
+            await RealInput.exclusive { await HumanInput.type(text) }
+            let app = NSWorkspace.shared.frontmostApplication?.localizedName ?? "the app in front"
+            return Result(content: "Typed into \(app).", isError: false, summary: nil)
+        case "key", "hold_key":
+            let combo = input["text"] as? String ?? ""
+            let times = name == "key" ? min(max(input["repeat"] as? Int ?? 1, 1), 100) : 1
+            let hold = name == "hold_key" ? min(max(input["duration"] as? Double ?? 1, 0), 10) : 0
+            for i in 0..<times {
+                let pressed = await RealInput.exclusive { await Self.press(combo, hold: hold, pid: nil) }
+                guard pressed else { return fail("Unknown key: \(combo)") }
+                if i < times - 1 { try? await Task.sleep(for: .milliseconds(Int.random(in: 45...95))) }
+            }
+            return ok()
+        default:
+            return nil
+        }
+    }
+
     /// The `app_control` tool, with the buddy flying to what it used.
     func appControl(_ input: [String: Any]) async -> AppControl.Result {
         guard Self.hasAccessibility else {
@@ -392,6 +463,33 @@ final class ComputerControl {
                 ws.select(w.id)
             }
             before = Set(Workspace.allWindows().map(\.id))
+        }
+        if person {
+            // A person opens apps in front, and presses and types on screen.
+            if action == "open", input["front"] == nil { input["front"] = true }
+            if action == "press" || action == "set_value", let spot = apps.locate(input) {
+                if HumanInput.userTookOver, !(await HumanInput.waitForUser()) {
+                    return AppControl.Result(content: "The user has been using the mouse and keyboard for two minutes, so you stopped. Ask whether to go on.", isError: true)
+                }
+                await HumanInput.bringForward(spot.pid)
+                if BackgroundInput.window(at: spot.point)?.pid == spot.pid,
+                   action == "press" || BackgroundInput.textRoles.contains(spot.role) {
+                    await RealInput.exclusive {
+                        await HumanInput.click(at: spot.point)
+                        if action == "set_value" {
+                            try? await Task.sleep(for: .milliseconds(120))
+                            HumanInput.tap(kVK_ANSI_A, flags: .maskCommand)
+                            try? await Task.sleep(for: .milliseconds(90))
+                            await HumanInput.type(input["value"] as? String ?? "")
+                        }
+                    }
+                    pointer = spot.point
+                    try? await Task.sleep(for: .milliseconds(140))
+                    return action == "press"
+                        ? AppControl.Result(content: "Clicked the \(spot.name) with the mouse.", isError: false, summary: "Clicked the \(spot.name)")
+                        : AppControl.Result(content: "Clicked into the \(spot.name) and typed the text.", isError: false, summary: "Filled in the \(spot.name)")
+                }
+            }
         }
         if action == "open", (input["front"] as? Bool) != true {
             // Opened in the background means it stays there.

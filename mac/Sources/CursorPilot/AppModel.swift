@@ -75,6 +75,8 @@ final class AppModel: ObservableObject {
     @Published var backgroundWork = false { didSet { overlay.state.backgroundWork = backgroundWork } }
     /// Whether Cursor Pilot may work on the Mac by itself (consented in onboarding or Settings).
     @Published var macAccess: Bool { didSet { defaults.set(macAccess ? "on" : "off", forKey: "accessLevel"); configureCore() } }
+    /// "person": it uses your own mouse and keyboard. "background": its own pointer.
+    @Published var inputMode: String { didSet { defaults.set(inputMode, forKey: "inputMode"); configureCore() } }
     @Published var shortcut: Shortcut {
         didSet {
             defaults.set(try? JSONEncoder().encode(shortcut), forKey: "shortcut")
@@ -147,6 +149,7 @@ final class AppModel: ObservableObject {
         voiceID = defaults.string(forKey: "voiceID") ?? ""
         speechRate = defaults.object(forKey: "speechRate") as? Double ?? 1.0
         macAccess = (defaults.string(forKey: "accessLevel") ?? "off") != "off"
+        inputMode = defaults.string(forKey: "inputMode") ?? "person"
         shortcut = defaults.data(forKey: "shortcut").flatMap { try? JSONDecoder().decode(Shortcut.self, from: $0) }
             ?? .default
 
@@ -267,7 +270,7 @@ final class AppModel: ObservableObject {
     }
 
     private func configureCore() {
-        core.configure(CoreSettings(apiKey: apiKey, model: model, effort: effort, access: macAccess ? "on" : "off"))
+        core.configure(CoreSettings(apiKey: apiKey, model: model, effort: effort, access: macAccess ? "on" : "off", input: inputMode))
     }
 
     private func applyVoice() {

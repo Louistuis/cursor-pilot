@@ -32,6 +32,10 @@ pub struct Settings {
     pub max_tokens: u32,
     /// Mac access: "off" or "on" (see `agent::mac_access`).
     pub access: String,
+    /// How the main agent works on the Mac: "person" (the user's own mouse
+    /// and keyboard) or "background" (its own pointer).
+    #[serde(default)]
+    pub input: String,
 }
 
 impl Default for Settings {
@@ -44,6 +48,7 @@ impl Default for Settings {
             base_url: "https://api.anthropic.com".into(),
             max_tokens: 16_000,
             access: "off".into(),
+            input: "person".into(),
         }
     }
 }

@@ -45,9 +45,11 @@ enum BackgroundInput {
     static func window(at p: CGPoint) -> Target? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
         else { return nil }
-        let me = getpid()
+        // Ours, including other copies of the app, are never in the way.
+        let mine = Set(NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .map(\.processIdentifier) + [getpid()])
         for w in list {
-            guard let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid != me,
+            guard let pid = w[kCGWindowOwnerPID as String] as? pid_t, !mine.contains(pid),
                   let alpha = w[kCGWindowAlpha as String] as? Double, alpha > 0.01,
                   let boundsDict = w[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsDict), bounds.contains(p)
@@ -57,11 +59,23 @@ enum BackgroundInput {
                 guard let front = NSWorkspace.shared.frontmostApplication else { return nil }
                 return Target(pid: front.processIdentifier, windowID: 0, appName: front.localizedName ?? "the app")
             }
+            // The Dock keeps a clear window over the whole screen; it is only
+            // in the way where the Dock itself is.
+            if owner == "Dock", bounds.width >= 400, bounds.height >= 400, pidAt(p) != pid { continue }
             let id = w[kCGWindowNumber as String] as? CGWindowID ?? 0
             let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? owner
             return Target(pid: pid, windowID: id, appName: name)
         }
         return nil
+    }
+
+    /// The app whose element is at `p`, as Accessibility sees it.
+    static func pidAt(_ p: CGPoint) -> pid_t? {
+        var el: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(p.x), Float(p.y), &el) == .success,
+              let el else { return nil }
+        var pid: pid_t = 0
+        return AXUIElementGetPid(el, &pid) == .success ? pid : nil
     }
 
     static func app(_ pid: pid_t) -> AXUIElement {
@@ -684,6 +698,21 @@ final class AppControl {
                 .first { !$0.isEmpty }?.lowercased() ?? ""
         }
         return found.first { label($0.element) == wanted } ?? found.first
+    }
+
+    /// Where an element is, for clicking it on screen like a person.
+    struct Spot {
+        var point: CGPoint
+        var role: String
+        var name: String
+        var pid: pid_t
+    }
+
+    func locate(_ input: [String: Any]) -> Spot? {
+        guard let (el, _) = element(input), let c = center(el) else { return nil }
+        var pid: pid_t = 0
+        AXUIElementGetPid(el, &pid)
+        return Spot(point: c, role: BackgroundInput.role(el), name: BackgroundInput.describe(el), pid: pid)
     }
 
     private static let missing = Result(content: "No such element. List elements again (ids change with each listing), or name it with find.", isError: true)

@@ -3,9 +3,10 @@
 A small helper that lives next to your mouse cursor on macOS. Hold **⌃⌥** (Control + Option),
 ask a question out loud, and Cursor Pilot looks at your screens, answers in a
 spoken voice, and flies over to point at the thing you need. Give it access
-and it works on your Mac like a co-worker: runs shell commands, edits files,
-and works in your apps with its own pointer, in the background, while your
-mouse and keyboard stay yours.
+and it works on your Mac like a co-user: runs shell commands, edits files,
+and uses your apps with your own mouse and keyboard the way a person would,
+handing them back the moment you move the mouse. (Or, if you prefer, with its
+own pointer in the background.)
 
 Native Swift/SwiftUI app on top of a Rust core. Talks to Claude with your own
 Anthropic API key.
@@ -34,6 +35,7 @@ cursor-pilot/
 │       ├── Speaker.swift        spoken replies, best installed voice per sentence language
 │       ├── Agent.swift          screenshots and the computer tool's clicks, typing and keys
 │       ├── Pointer.swift        background input and the app_control tool (Accessibility)
+│       ├── CoUser.swift         the real mouse and keyboard, moved and typed like a person
 │       ├── Keychain.swift       API key in the login keychain, prompt-free across rebuilds
 │       ├── Sounds.swift         quiet system sounds for listen, send, done, error
 │       ├── TestHooks.swift      launch flags that test actions and speech without a person
@@ -110,7 +112,18 @@ until you turn it on. Tools, all run by the app on your Mac:
   your windows.
 - **web_search** on the models that support it.
 
-The agent has its own pointer: the buddy flies to where it clicks (with
+By default the agent works like a person sitting at your Mac (Settings ›
+Working on your Mac › It works). It moves your real pointer on a slightly
+curved path that speeds up and settles like a hand (Fitts-timed, with a small
+correction after long moves), presses and releases clicks, types with a human
+rhythm and brings an app forward before using it. app_control presses and
+fills in fields by clicking and typing on screen, and falls back to
+Accessibility for controls that are off screen. Move the mouse and it hands
+over: it notices the pointer isn't where it left it, says "You've got it",
+and waits until you have stopped for a moment. Helpers always work in their
+own space.
+
+In background mode the agent has its own pointer: the buddy flies to where it clicks (with
 motion blur when it moves fast and a ring when it clicks), and the click
 goes to the app under it without moving your pointer. Cursor Pilot first
 presses, focuses or selects the control there through Accessibility; if
@@ -303,6 +316,9 @@ Done:
   chats; Norwegian and English recognised automatically; double-tap ⌃ to
   type; buddy colours; sound effects; an option to keep Cursor Pilot out of
   screenshots and recordings; no keychain prompts after rebuilds.
+- **Co-user**: the agent uses your own mouse and keyboard like a person,
+  with natural pointer paths, click timing and typing rhythm, and waits when
+  you take over; background mode stays as an option.
 - **Visuals in chat**: replies can send charts (a ```chart JSON block, drawn
   with Swift Charts: bar, line, area, point and pie, growing in, hover for
   values), images (`![alt](path or URL)`, shown like photos in Messages) and
