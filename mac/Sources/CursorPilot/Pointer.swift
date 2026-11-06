@@ -80,6 +80,31 @@ enum BackgroundInput {
         return el
     }
 
+    /// The element under `p` in the target's own window. Accessibility hit
+    /// testing finds the app's top window there, which may be another of
+    /// its windows (the user's, over a helper's): then the target window is
+    /// searched instead.
+    static func element(at p: CGPoint, in target: Target) -> AXUIElement? {
+        let hit = element(at: p, pid: target.pid)
+        guard target.windowID != 0 else { return hit }
+        if let hit, let win: AXUIElement = attribute(hit, kAXWindowAttribute),
+           Workspace.windowID(of: win) == target.windowID {
+            return hit
+        }
+        guard let win = Workspace.axWindow(pid: target.pid, id: target.windowID) else { return hit }
+        return deepest(at: p, in: win, depth: 0)
+    }
+
+    /// The deepest element containing `p`, front-most children first.
+    private static func deepest(at p: CGPoint, in el: AXUIElement, depth: Int) -> AXUIElement {
+        guard depth < 30 else { return el }
+        let children: [AXUIElement] = attribute(el, "AXVisibleChildren") ?? attribute(el, kAXChildrenAttribute) ?? []
+        for child in children.reversed() where frame(child)?.contains(p) == true {
+            return deepest(at: p, in: child, depth: depth + 1)
+        }
+        return el
+    }
+
     static func attribute<T>(_ el: AXUIElement, _ name: String) -> T? {
         var v: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success else { return nil }
@@ -169,7 +194,7 @@ enum BackgroundInput {
     /// when the control under the point has one, events posted to the app
     /// otherwise. `semanticOnly` stops before posting events.
     static func click(at p: CGPoint, in target: Target, semanticOnly: Bool = false) -> Outcome? {
-        if let hit = element(at: p, pid: target.pid), let c = control(from: hit) {
+        if let hit = element(at: p, in: target), let c = control(from: hit) {
             let r = role(c)
             let name = describe(c)
             if textRoles.contains(r), isSettable(c, kAXFocusedAttribute) {
@@ -191,7 +216,7 @@ enum BackgroundInput {
 
     /// A right click: the control's own menu when it has one.
     static func rightClick(at p: CGPoint, in target: Target) -> Outcome {
-        if let hit = element(at: p, pid: target.pid) {
+        if let hit = element(at: p, in: target) {
             var el: AXUIElement? = hit
             for _ in 0..<3 {
                 guard let e = el else { break }
@@ -271,7 +296,7 @@ enum BackgroundInput {
     /// back to scroll-wheel events sent to the app. `lines` is signed: down
     /// and right are positive.
     static func scroll(at p: CGPoint, in target: Target, dx: Int, dy: Int) -> Bool {
-        if let hit = element(at: p, pid: target.pid) {
+        if let hit = element(at: p, in: target) {
             var el: AXUIElement? = hit
             for _ in 0..<12 {
                 guard let e = el else { break }
@@ -551,15 +576,23 @@ final class AppControl {
         kAXStaticTextRole, "AXHeading", kAXImageRole, "AXSegment", "AXColorWell",
     ]
 
-    private func listElements(_ input: [String: Any]) -> Result {
+    /// The app an action is about: a helper's own window's app (`_pid`, set
+    /// by its workspace), the named app, or else the frontmost one.
+    private func resolveApp(_ input: [String: Any]) -> NSRunningApplication? {
+        if let pid = input["_pid"] as? Int { return NSRunningApplication(processIdentifier: pid_t(pid)) }
         let appName = input["app"] as? String ?? ""
-        guard let app = appName.isEmpty ? NSWorkspace.shared.frontmostApplication : runningApp(appName) else {
+        return appName.isEmpty ? NSWorkspace.shared.frontmostApplication : runningApp(appName)
+    }
+
+    private func listElements(_ input: [String: Any]) -> Result {
+        guard let app = resolveApp(input) else {
             return Result(content: "That app isn't running. Check apps, or open it first.", isError: true)
         }
         let ax = BackgroundInput.app(app.processIdentifier)
         let windows: [AXUIElement] = BackgroundInput.attribute(ax, kAXWindowsAttribute) ?? []
         let wanted = (input["window"] as? String ?? "").lowercased()
-        let window = windows.first { wanted.isEmpty == false && ((BackgroundInput.attribute($0, kAXTitleAttribute) as String?)?.lowercased().contains(wanted) ?? false) }
+        let own = (input["_window"] as? Int).flatMap { id in windows.first { Workspace.windowID(of: $0) == CGWindowID(id) } }
+        let window = own ?? windows.first { wanted.isEmpty == false && ((BackgroundInput.attribute($0, kAXTitleAttribute) as String?)?.lowercased().contains(wanted) ?? false) }
             ?? (BackgroundInput.attribute(ax, kAXFocusedWindowAttribute) as AXUIElement?)
             ?? (BackgroundInput.attribute(ax, kAXMainWindowAttribute) as AXUIElement?)
             ?? windows.first
@@ -726,8 +759,7 @@ final class AppControl {
 
     private func menu(_ input: [String: Any]) -> Result {
         let path = (input["path"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        let appName = input["app"] as? String ?? ""
-        guard let app = appName.isEmpty ? NSWorkspace.shared.frontmostApplication : runningApp(appName) else {
+        guard let app = resolveApp(input) else {
             return Result(content: "That app isn't running.", isError: true)
         }
         guard path.count >= 2 else {

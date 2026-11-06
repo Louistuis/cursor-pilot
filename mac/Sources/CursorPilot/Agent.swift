@@ -96,6 +96,7 @@ final class ComputerControl {
     /// The task is over: every pointer goes home and the helpers' cursors leave.
     static func endAll() {
         shared.endTask()
+        for c in helpers.values { c.workspace?.close() }
         helpers.removeAll()
         HelperCursors.shared.dismissAll()
     }
@@ -104,10 +105,17 @@ final class ComputerControl {
     /// This agent's own app_control listing, so helpers' element numbers
     /// don't clash.
     let apps: AppControl
+    /// A helper's own windows and browser (nil for the main agent, which
+    /// works on the user's screen).
+    let workspace: Workspace?
+    /// The helper's window its latest screenshot showed, and that image's
+    /// size: its coordinates are pixels of that window, wherever it moves.
+    private var windowShot: (id: CGWindowID, size: CGSize)?
 
     private init(agent: Int) {
         self.agent = agent
         apps = AppControl(agent: agent)
+        workspace = agent > 0 ? Workspace(agent: agent, name: helperNames[min(agent - 1, helperNames.count - 1)]) : nil
     }
 
     /// Longest edge of screenshots sent to Claude.
@@ -186,7 +194,17 @@ final class ComputerControl {
     }
 
     /// Screenshot pixels → global Quartz points (top-left origin).
+    /// The helper's window its coordinates are in, where it is now.
+    private func windowView() -> (frame: CGRect, size: CGSize)? {
+        guard let shot = windowShot, let w = Workspace.window(shot.id) else { return nil }
+        return (w.frame, shot.size)
+    }
+
     private func toGlobal(_ x: Double, _ y: Double) -> CGPoint {
+        if let (frame, size) = windowView() {
+            let cx = min(max(x, 0), Double(size.width - 1)), cy = min(max(y, 0), Double(size.height - 1))
+            return CGPoint(x: frame.minX + cx * frame.width / size.width, y: frame.minY + cy * frame.height / size.height)
+        }
         let s = activeScreen()
         let size = imageSize(s)
         let primaryHeight = NSScreen.screens.first?.frame.height ?? s.frame.height
@@ -200,6 +218,10 @@ final class ComputerControl {
     func imagePoint(_ p: CGPoint) -> CGPoint { toImage(p) }
 
     private func toImage(_ p: CGPoint) -> CGPoint {
+        if let (frame, size) = windowView() {
+            return CGPoint(x: ((p.x - frame.minX) * size.width / frame.width).rounded(),
+                           y: ((p.y - frame.minY) * size.height / frame.height).rounded())
+        }
         let s = activeScreen()
         let size = imageSize(s)
         let primaryHeight = NSScreen.screens.first?.frame.height ?? s.frame.height
@@ -230,6 +252,8 @@ final class ComputerControl {
         }
 
         guard Self.hasAccessibility else { return accessibilityMissing() }
+        // Windows a helper's keys or clicks open become part of its workspace.
+        let before = workspace != nil ? Set(Workspace.allWindows().map(\.id)) : []
 
         let point = (input["coordinate"] as? [Double]).flatMap { $0.count == 2 ? toGlobal($0[0], $0[1]) : nil }
         let mods = Self.flags(input["text"] as? String ?? "")
@@ -250,8 +274,8 @@ final class ComputerControl {
                   let end = point
             else { return fail("left_click_drag needs start_coordinate and coordinate.") }
             await fly(to: start)
-            if let win = BackgroundInput.window(at: start) { target = win }
-            if Self.mayBorrowPointer {
+            if let win = window(at: start) { target = win }
+            if let win = target, mayUseRealPointer(at: start, in: win) {
                 // Drags rarely work in the background: borrow the pointer briefly.
                 async let flight: Void = cursorMove(end)
                 await BackgroundInput.withRealPointer(at: start) { await Self.drag(from: start, to: end, flags: mods) }
@@ -279,16 +303,25 @@ final class ComputerControl {
             let dir = input["scroll_direction"] as? String ?? "down"
             let dy = dir == "down" ? amount : dir == "up" ? -amount : 0
             let dx = dir == "right" ? amount : dir == "left" ? -amount : 0
-            guard let win = BackgroundInput.window(at: at) else { return fail("Nothing to scroll there.") }
+            guard let win = window(at: at) else { return fail("Nothing to scroll there.") }
             target = win
             if Self.mayBorrowPointer, BackgroundInput.needsRealPointer(win.pid) { realPointerApps.insert(win.pid) }
-            if !mods.isEmpty || realPointerApps.contains(win.pid) {
+            if (!mods.isEmpty || realPointerApps.contains(win.pid)) && mayUseRealPointer(at: at, in: win) {
                 await BackgroundInput.withRealPointer(at: at) {
                     let e = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2,
                                     wheel1: Int32(-dy * 3), wheel2: Int32(-dx * 3), wheel3: 0)
                     e?.flags = mods
                     Self.post(e)
                 }
+            } else if windowShot != nil, BackgroundInput.needsRealPointer(win.pid) {
+                // Browsers ignore wheel events sent to a window in the
+                // background, but take arrow keys: about three per notch.
+                let code = dy > 0 ? kVK_DownArrow : dy < 0 ? kVK_UpArrow : dx > 0 ? kVK_RightArrow : kVK_LeftArrow
+                for _ in 0..<min(abs(dy != 0 ? dy : dx) * 3, 90) {
+                    BackgroundInput.postKey(code, flags: [], pid: win.pid)
+                    try? await Task.sleep(for: .milliseconds(8))
+                }
+                note = "Scrolled your window with the arrow keys (\(win.appName) ignores background scroll wheels). If it didn't move, click on the page first, away from links, then scroll."
             } else if !BackgroundInput.scroll(at: at, in: win, dx: dx, dy: dy) {
                 note = "Scrolled in the background with wheel events; check with a screenshot that it moved."
             }
@@ -322,6 +355,10 @@ final class ComputerControl {
         }
         // Let the app react before the next action or screenshot.
         try? await Task.sleep(for: .milliseconds(140))
+        if let ws = workspace, let pid = target?.pid,
+           await ws.claimNew(since: before, wait: 0.3, accept: { $0 == pid }) {
+            note += " A new window opened; it is now your current window, so take a screenshot."
+        }
         return Result(content: note, isError: false, summary: summary)
     }
 
@@ -332,11 +369,49 @@ final class ComputerControl {
             return AppControl.Result(content: r.content as? String ?? "", isError: true)
         }
         if NSApp.isActive || HomeWindow.shared.isVisible { NSApp.hide(nil) }
+        var input = input
+        let action = input["action"] as? String ?? ""
+        var before: Set<CGWindowID> = []
+        if let ws = workspace {
+            // Web pages open in the helper's own browser, not the user's.
+            let app = input["app"] as? String ?? ""
+            if action == "open", (input["shared"] as? Bool) != true,
+               let t = input["target"] as? String, let url = URL(string: t),
+               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+               app.isEmpty || ["chrome", "brave", "edge", "chromium", "vivaldi"].contains(where: app.lowercased().contains),
+               let opened = await ws.openInOwnBrowser(url) {
+                windowShot = nil
+                if let w = ws.currentWindow { target = BackgroundInput.Target(pid: w.pid, windowID: w.id, appName: w.appName) }
+                return opened
+            }
+            // Without another app named, actions are about its own window.
+            if ["elements", "press", "set_value", "read", "menu"].contains(action),
+               let w = app.isEmpty ? ws.currentWindow : ws.window(ofApp: app) {
+                input["_pid"] = Int(w.pid)
+                input["_window"] = Int(w.id)
+                ws.select(w.id)
+            }
+            before = Set(Workspace.allWindows().map(\.id))
+        }
+        if action == "open", (input["front"] as? Bool) != true {
+            // Opened in the background means it stays there.
+            let app = input["app"] as? String ?? "", target = input["target"] as? String ?? ""
+            Workspace.keepFront(NSWorkspace.shared.frontmostApplication) { Self.pid($0, isApp: app, orOpens: target) }
+        }
         let result = await apps.perform(input)
+        if let ws = workspace, !result.isError {
+            if action == "open" {
+                let app = input["app"] as? String ?? ""
+                let target = input["target"] as? String ?? ""
+                await ws.claimNew(since: before, wait: 5) { Self.pid($0, isApp: app, orOpens: target) }
+            } else if let pid = input["_pid"] as? Int {
+                await ws.claimNew(since: before, wait: 0.3) { $0 == pid_t(pid) }
+            }
+        }
         if let p = result.point, NSScreen.screens.contains(where: { $0.frame.insetBy(dx: -2, dy: -2).contains(NSPoint(x: p.x, y: (NSScreen.screens.first?.frame.height ?? 0) - p.y)) }) {
             await fly(to: p)
             if !result.isError { cursorClicked() }
-            if let win = BackgroundInput.window(at: p) { target = win }
+            if let win = window(at: p) { target = win }
         }
         return result
     }
@@ -355,6 +430,39 @@ final class ComputerControl {
         if pointer == nil { pointer = Self.mouseLocation() }
         await cursorMove(p)
         pointer = p
+        if agent > 0 {
+            // Working in its window under the user's: the cursor fades back.
+            let behind = windowShot.map { !Workspace.isUncovered($0.id, at: p) } ?? false
+            HelperCursors.shared.setBehind(agent: agent, behind)
+        }
+    }
+
+    /// The window a point is in: a helper's own window while it works in
+    /// one (even under the user's windows), else whatever is on top there.
+    private func window(at p: CGPoint) -> BackgroundInput.Target? {
+        if let shot = windowShot, let w = Workspace.window(shot.id) {
+            return BackgroundInput.Target(pid: w.pid, windowID: w.id, appName: w.appName)
+        }
+        return BackgroundInput.window(at: p)
+    }
+
+    /// May the real pointer be borrowed here? Never where a helper's window
+    /// is covered: the click would land in the user's window.
+    private func mayUseRealPointer(at p: CGPoint, in win: BackgroundInput.Target) -> Bool {
+        Self.mayBorrowPointer && (windowShot == nil || Workspace.isUncovered(win.windowID, at: p))
+    }
+
+    /// Is `pid` the app called `name`, or the one that opens `target`?
+    private static func pid(_ pid: pid_t, isApp name: String, orOpens target: String) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        let n = name.lowercased()
+        if !n.isEmpty {
+            return app.localizedName?.lowercased().contains(n) == true || app.bundleIdentifier?.lowercased() == n
+                || app.bundleURL?.deletingPathExtension().lastPathComponent.lowercased().contains(n) == true
+        }
+        let url = target.contains("://") ? URL(string: target) : URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
+        guard let url, let opener = NSWorkspace.shared.urlForApplication(toOpen: url) else { return true }
+        return Bundle(url: opener)?.bundleIdentifier == app.bundleIdentifier
     }
 
     /// Where typing goes: the app the agent works in, in the background.
@@ -369,7 +477,7 @@ final class ComputerControl {
     /// the control, or events sent to the app. A repeat at the same spot
     /// after posted events (which an app may ignore) borrows the real pointer.
     private func click(_ name: String, at p: CGPoint, flags: CGEventFlags) async -> (String, String?) {
-        guard let win = BackgroundInput.window(at: p) else {
+        guard let win = window(at: p) else {
             await realClick(name, at: p, flags: flags)
             return ("Clicked with the real pointer (no app window there).", "Clicked")
         }
@@ -378,11 +486,17 @@ final class ComputerControl {
         let repeated = lastPosted.map { hypot($0.point.x - p.x, $0.point.y - p.y) < 8 && Date().timeIntervalSince($0.time) < 45 } ?? false
         let plain = name == "left_click" && flags.isEmpty
 
-        if plain, !realPointerApps.contains(win.pid), let outcome = BackgroundInput.click(at: p, in: win, semanticOnly: true) {
+        let covered = windowShot != nil && !Workspace.isUncovered(win.windowID, at: p)
+        if plain, !realPointerApps.contains(win.pid) || covered,
+           let outcome = BackgroundInput.click(at: p, in: win, semanticOnly: true) {
             lastPosted = nil
             return describe(outcome, in: win)
         }
-        if Self.mayBorrowPointer && (repeated || realPointerApps.contains(win.pid)) {
+        if covered, realPointerApps.contains(win.pid) {
+            return ("Not clicked: the user's windows cover your window at that spot, and \(win.appName) ignores clicks sent in the background. Use app_control instead: elements (no app needed) lists your window's links, buttons and fields; then press or set_value.",
+                    "Couldn't click in \(win.appName)")
+        }
+        if mayUseRealPointer(at: p, in: win) && (repeated || realPointerApps.contains(win.pid)) {
             if repeated { realPointerApps.insert(win.pid) }
             lastPosted = nil
             await realClick(name, at: p, flags: flags)
@@ -444,6 +558,24 @@ final class ComputerControl {
         guard ScreenCapture.hasPermission else {
             return fail("Cursor Pilot doesn't have Screen Recording permission. Tell the user to allow it in Cursor Pilot's Settings › Permissions.")
         }
+        if let ws = workspace, let w = ws.currentWindow {
+            do {
+                guard let image = try await ScreenCapture.captureWindow(w.id, maxEdge: Self.maxEdge) else {
+                    return fail("Couldn't see your window \(w.appName) \u{201C}\(w.title)\u{201D}: it may be minimised or on another desktop.")
+                }
+                windowShot = (w.id, CGSize(width: image.width, height: image.height))
+                var header = "Your own window: \(w.appName) \u{201C}\(w.title)\u{201D}. This shows only your window, not the user's screen, even where their windows cover it; coordinates are pixels in this image."
+                let others = ws.all.filter { $0.id != w.id }
+                if !others.isEmpty {
+                    header += " Your other windows: " + others.map { "\($0.appName) \u{201C}\($0.title)\u{201D}" }.joined(separator: ", ")
+                        + " (switch with app_control elements and that app)."
+                }
+                return Result(content: [["type": "text", "text": header], Self.imageBlock(image)], isError: false)
+            } catch {
+                return fail("Couldn't capture your window: \(error.localizedDescription)")
+            }
+        }
+        windowShot = nil
         let s = activeScreen()
         do {
             try? await Task.sleep(for: .milliseconds(60)) // let a hide/animation finish
@@ -458,6 +590,18 @@ final class ComputerControl {
     private func zoom(_ region: [Double]) async -> Result {
         guard region.count == 4, region[2] > region[0], region[3] > region[1] else {
             return fail("zoom needs region [x0, y0, x1, y1] with x1 > x0 and y1 > y0.")
+        }
+        if let shot = windowShot {
+            do {
+                guard let full = try await ScreenCapture.captureWindow(shot.id, maxEdge: 6000) else { return fail("Couldn't capture your window.") }
+                let k = CGFloat(full.width) / shot.size.width
+                let rect = CGRect(x: region[0] * k, y: region[1] * k, width: (region[2] - region[0]) * k, height: (region[3] - region[1]) * k)
+                    .intersection(CGRect(x: 0, y: 0, width: full.width, height: full.height))
+                guard let crop = full.cropping(to: rect.integral) else { return fail("That region is outside your window.") }
+                return Result(content: [Self.imageBlock(Self.fit(crop, maxEdge: Self.maxEdge))], isError: false)
+            } catch {
+                return fail("Couldn't capture your window: \(error.localizedDescription)")
+            }
         }
         let s = activeScreen()
         let size = imageSize(s)

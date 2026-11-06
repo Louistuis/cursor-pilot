@@ -59,8 +59,9 @@ pub fn delegate_tool() -> Value {
         "name": "delegate",
         "description": "Send a helper agent off to do a self-contained part of the task on its own, in \
     parallel with you and other helpers. Each helper has its own pointer (a coloured cursor the user sees), \
-    its own shell and the same tools as you except delegate, and works in the background until its part \
-    is done; then you get its report. Call delegate several times in one turn to run up to five helpers at \
+    its own shell and the same tools as you except delegate, and its own workspace: the windows it opens \
+    and a private browser of its own, separate from the user's screen and tabs. It works in the background \
+    until its part is done; then you get its report. Call delegate several times in one turn to run up to five helpers at \
     once, for work that splits into independent parts: researching several things, preparing files while \
     something else is set up, working in different apps. Don't delegate a single quick step or parts that \
     depend on each other's results; do those yourself. A helper can't see this conversation, so give it \
@@ -85,7 +86,15 @@ agent gave you one part of a bigger task, and works on other parts at the same t
 to the user: work through your part on your own, from start to finish, without asking anyone anything, \
 and then reply with a short report for the agent that sent you: what you did, what you found (with the \
 exact details it needs: names, numbers, paths, links), and anything you couldn't do and why. While you \
-work, keep any text between tool calls to a few words about the next step; it shows next to your cursor.{}",
+work, keep any text between tool calls to a few words about the next step; it shows next to your cursor.\n\n\
+You have your own workspace, apart from the user's screen, and the user keeps working while you do. \
+Windows you open are yours: your screenshots show only your current window, even where the user's \
+windows cover it, and your clicks and typing go to it. A web page you open with app_control open (the \
+URL as target) opens in your own browser: a private copy only you use, with no sign-ins, never the \
+user's tabs (set shared to true only when your task needs the user's signed-in browser). app_control \
+actions without an app work in your current window; prefer them (elements, then press or set_value): \
+they work even where the user's windows cover yours. Never bring windows to the front, and don't use \
+the user's own windows unless your task says so.{}",
         system_addendum(settings, home, today)
     )
 }
@@ -141,7 +150,8 @@ fn app_control_tool() -> Value {
                 "value": {"type": "string", "description": "set_value: the new text or value."},
                 "path": {"type": "array", "items": {"type": "string"}, "description": "menu: titles from the menu bar down, e.g. [\"File\", \"Export as PDF…\"]."},
                 "target": {"type": "string", "description": "open: a file path or URL to open (in app, if given)."},
-                "front": {"type": "boolean", "description": "open: bring the app to the front (default false)."}
+                "front": {"type": "boolean", "description": "open: bring the app to the front (default false)."},
+                "shared": {"type": "boolean", "description": "open, for helpers: open a web page in the user's own browser instead of your private one."}
             },
             "required": ["action"]
         }

@@ -94,6 +94,20 @@ until you turn it on. Tools, all run by the app on your Mac:
   saying what it's doing. Their steps stay out of the chat; each shows as one
   step until it reports back. They take turns with the real pointer and
   keyboard when an app needs them.
+
+  Each helper has its own workspace. macOS doesn't let apps make desktops
+  (Spaces) of their own, so a workspace is the set of windows the helper
+  opened. Its screenshots show only its current window, captured even where
+  your windows cover it, with coordinates tied to that window; its clicks,
+  typing and scrolling go to that window (Accessibility hit tests are checked
+  against it), and the real pointer is only borrowed where the window is
+  uncovered. Web pages open in a browser of its own: a separate copy of
+  Chrome (or Brave, Edge, Chromium, Vivaldi) with a private profile in
+  `~/Library/Application Support/Cursor Pilot/Helpers/<name>`, kept drawing
+  while covered, quit when the task ends; `shared: true` uses your browser
+  instead. If an app opened in the background brings itself forward, your
+  app is put back in front. A helper's cursor fades while it works under
+  your windows.
 - **web_search** on the models that support it.
 
 The agent has its own pointer: the buddy flies to where it clicks (with

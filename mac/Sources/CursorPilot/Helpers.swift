@@ -19,6 +19,8 @@ final class HelperCursorState: ObservableObject {
     @Published var flipped = false
     /// nil while working, then whether it finished its part.
     @Published var finished: Bool?
+    /// Working in its own window under the user's windows.
+    @Published var behind = false
 
     init(name: String, status: String) {
         self.name = name
@@ -51,6 +53,13 @@ final class HelperCursors {
 
     func clicked(agent: Int) {
         cursor(agent).click()
+    }
+
+    /// The helper works in its own window under the user's windows there:
+    /// its cursor fades back so it doesn't sit on top of what they're doing.
+    func setBehind(agent: Int, _ behind: Bool) {
+        let c = cursor(agent)
+        if c.state.behind != behind { c.state.behind = behind }
     }
 
     func finish(agent: Int, ok: Bool) {
@@ -220,6 +229,8 @@ struct HelperCursorView: View {
                 .frame(width: 230, alignment: state.flipped ? .trailing : .leading)
                 .offset(x: state.flipped ? -238 : 14, y: 20)
         }
+        .opacity(state.behind ? 0.4 : 1)
+        .animation(.easeInOut(duration: 0.3), value: state.behind)
         .offset(x: HelperLayout.side, y: HelperLayout.margin)
         .frame(width: HelperLayout.size.width, height: HelperLayout.size.height, alignment: .topLeading)
     }

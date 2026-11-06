@@ -68,6 +68,24 @@ enum ScreenCapture {
         return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
     }
 
+    /// One window on its own, even while other windows cover it, at up to
+    /// `maxEdge` pixels. Nil when it can't be captured (closed, minimised,
+    /// or on another desktop).
+    static func captureWindow(_ id: CGWindowID, maxEdge: CGFloat) async throws -> CGImage? {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard let window = content.windows.first(where: { $0.windowID == id }) else { return nil }
+        let scale = (NSScreen.screens.first { $0.frame.intersects(window.frame) } ?? NSScreen.main)?.backingScaleFactor ?? 2
+        let pixels = CGSize(width: window.frame.width * scale, height: window.frame.height * scale)
+        let k = min(1, maxEdge / max(pixels.width, pixels.height, 1))
+        let config = SCStreamConfiguration()
+        config.width = max(1, Int((pixels.width * k).rounded()))
+        config.height = max(1, Int((pixels.height * k).rounded()))
+        config.showsCursor = false
+        config.ignoreShadowsSingleWindow = true
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+    }
+
     private static func jpegData(_ image: CGImage) -> Data? {
         NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.7])
     }
