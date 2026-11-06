@@ -49,6 +49,47 @@ pub fn tool_definitions(settings: &Settings) -> Vec<Value> {
     tools
 }
 
+/// Names of the helpers the main agent can send off, in order; each is also
+/// the colour of its cursor in the app.
+pub const HELPERS: &[&str] = &["Mint", "Sunset", "Rose", "Violet", "Ocean"];
+
+/// The tool that sends a helper agent off on part of a task.
+pub fn delegate_tool() -> Value {
+    json!({
+        "name": "delegate",
+        "description": "Send a helper agent off to do a self-contained part of the task on its own, in \
+    parallel with you and other helpers. Each helper has its own pointer (a coloured cursor the user sees), \
+    its own shell and the same tools as you except delegate, and works in the background until its part \
+    is done; then you get its report. Call delegate several times in one turn to run up to five helpers at \
+    once, for work that splits into independent parts: researching several things, preparing files while \
+    something else is set up, working in different apps. Don't delegate a single quick step or parts that \
+    depend on each other's results; do those yourself. A helper can't see this conversation, so give it \
+    everything it needs: the goal, names, paths, and what to report back.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "What the helper should do and report, complete and specific."},
+                "title": {"type": "string", "description": "Three to six words for the user, e.g. \"finding train times\"."}
+            },
+            "required": ["task"]
+        }
+    })
+}
+
+/// The system prompt for a helper: it works alone and reports back to the
+/// agent that sent it, not to the user.
+pub fn helper_prompt(name: &str, settings: &Settings, home: &str, today: &str) -> String {
+    format!(
+        "You are {name}, a helper agent inside Cursor Pilot, an assistant on the user's Mac. Another \
+agent gave you one part of a bigger task, and works on other parts at the same time. You are not talking \
+to the user: work through your part on your own, from start to finish, without asking anyone anything, \
+and then reply with a short report for the agent that sent you: what you did, what you found (with the \
+exact details it needs: names, numbers, paths, links), and anything you couldn't do and why. While you \
+work, keep any text between tool calls to a few words about the next step; it shows next to your cursor.{}",
+        system_addendum(settings, home, today)
+    )
+}
+
 /// Our tool for the user's iMessages and texts.
 fn messages_tool() -> Value {
     json!({
@@ -133,16 +174,25 @@ clicks. Drags use the real pointer for a moment. End each group of actions with 
 an elements listing) to check the result.\n\
 - messages reads the user's Messages conversations and sends texts for them.\n\
 - web_search, when present, finds current information.\n\
-How to work: do what the user asked, completely, the way they asked. Prefer, in order: app_control \
-and the shell (fast, exact, invisible), then the computer tools for what has no other way. Open apps in the background (app_control open, or `open -g`) and only bring one to the front \
-when the user should see it or the app needs it. Don't stop to ask unless something is truly \
-ambiguous or risky; if a step fails, try another way before giving up.\n\
+How to work: do what the user asked, completely, the way they asked, as an autonomous agent: \
+the user wants it done, not a list of steps for them to do. Never hand a step back to the user that \
+you could do yourself, and don't ask for confirmation, preferences or details you can find out \
+(look on the screen, in files, apps, Messages or memory) or choose sensibly yourself; pick the \
+obvious reasonable option and mention it in your reply. Ask only when you truly can't go on: \
+something only the user knows, or before something risky that can't be undone. If a step fails, try \
+another way, and another, before giving up. Prefer, in order: app_control and the shell (fast, exact, \
+invisible), then the computer tools for what has no other way. Work quietly in the background: open \
+apps in the background (app_control open, or `open -g`) and only bring one to the front when the user \
+should see it or the app needs it; never take over the user's screen, pointer or keyboard when \
+there's another way.\n\
 Nobody reviews your actions before they run, so be careful with what can't be undone: never use sudo, \
 and never delete, overwrite, send, post or buy anything the user didn't ask for. Move files to the \
 Trash with /usr/bin/trash rather than deleting them with rm.\n\
-Say what you're doing as you go, like texting a co-worker: before a step or group of steps, write a \
-few words about it (\"Checking your Downloads.\"), each as its own short message. When you're done, \
-reply with the result in a sentence or two. Don't add pointing tags for things you click yourself.\n\
+Start a task with a few words saying what you'll do (\"On it, checking your Downloads.\"); that is \
+read aloud. After that, any text between tool calls is shown silently, so keep it to a few words now \
+and then, not after every step. When you're done, reply with the result in a sentence or two; that is \
+read aloud too. Don't add pointing tags for things you click yourself, but do use them in your final \
+reply to show the user where a result is when that helps.\n\
 Today is {today}."
     )
 }
@@ -302,6 +352,8 @@ impl<'a> Call<'a> {
             "memory"
         } else if self.name == "messages" {
             "messages"
+        } else if self.name == "delegate" {
+            "agent"
         } else {
             "file"
         }
@@ -612,6 +664,16 @@ pub fn cap(s: &str) -> String {
         "{head}\n\n[… {} characters cut …]\n\n{tail}",
         s.len() - MAX_OUTPUT
     )
+}
+
+/// The first `n` words of `s` on one line, with an ellipsis when cut.
+pub fn clip_words(s: &str, n: usize) -> String {
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.len() <= n {
+        words.join(" ")
+    } else {
+        format!("{}\u{2026}", words[..n].join(" "))
+    }
 }
 
 fn clip(s: &str, n: usize) -> String {

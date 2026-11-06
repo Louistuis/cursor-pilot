@@ -14,11 +14,56 @@ enum TestHooks {
             await runActions(from: steps, to: defaults.string(forKey: "CPOut") ?? steps + ".out.json")
             return true
         }
+        if let question = defaults.string(forKey: "CPAsk") {
+            await ask(question, to: defaults.string(forKey: "CPOut") ?? "/dev/stdout")
+            return true
+        }
         if let files = defaults.string(forKey: "CPHear") {
             await hear(files.components(separatedBy: "|"), to: defaults.string(forKey: "CPOut") ?? "/dev/stdout")
             return true
         }
         return false
+    }
+
+    /// `-CPAsk "question"` sends one typed question through the whole agent
+    /// (without the screen, and without speaking) and writes what happened:
+    /// text, steps, helpers and timings in seconds.
+    private static func ask(_ question: String, to out: String) async {
+        let model = AppModel.shared
+        // Tests run before the app reads its key from the Keychain.
+        if !model.hasAPIKey { await model.loadAPIKey() }
+        ComputerControl.shared.beginTask()
+        var log: [[String: Any]] = []
+        let started = Date()
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            model.core.send(CoreRequest(text: question, screens: [])) { event in
+                var entry: [String: Any] = ["t": (Date().timeIntervalSince(started) * 10).rounded() / 10]
+                switch event {
+                case .text(let s):
+                    if let last = log.last?["text"] as? String {
+                        log[log.count - 1]["text"] = last + s
+                        return
+                    }
+                    entry["text"] = s
+                case .speak(let s): entry["speak"] = s
+                case .tool(let step): entry["tool"] = [step.phase, step.kind, step.summary, step.ok] as [Any]
+                case .helper(let e):
+                    model.handle(helper: e)
+                    entry["helper"] = [e.phase, e.agent, e.name, e.text, e.ok] as [Any]
+                case .done(let s): entry["done"] = s
+                case .error(let kind, let message): entry["error"] = "\(kind): \(message)"
+                case .finished:
+                    done.resume()
+                    return
+                default: return
+                }
+                log.append(entry)
+            }
+        }
+        // Let the helpers' cursors finish and fade.
+        try? await Task.sleep(for: .seconds(2.5))
+        ComputerControl.endAll()
+        write(["question": question, "events": log], to: out)
     }
 
     /// `-CPRunActions steps.json` runs the agent's computer and app actions

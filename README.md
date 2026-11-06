@@ -88,6 +88,12 @@ until you turn it on. Tools, all run by the app on your Mac:
   clicks, typing, keys, scrolling and drags. Needs Accessibility.
 - **memory** (ours, also without Mac access): remembers short facts about you
   between chats.
+- **delegate** (ours): sends a helper agent off on part of the task. Up to
+  five helpers (Mint, Sunset, Rose, Violet, Ocean) work at once, each with
+  its own loop, shell and pointer: a small cursor in its colour with a tag
+  saying what it's doing. Their steps stay out of the chat; each shows as one
+  step until it reports back. They take turns with the real pointer and
+  keyboard when an app needs them.
 - **web_search** on the models that support it.
 
 The agent has its own pointer: the buddy flies to where it clicks (with
@@ -166,6 +172,8 @@ Debug launch flags, for design work:
 | `-CPRenderGlowPreview file.png` | renders the screen glow (listening, thinking, sketching) to `file-<mode>.png`, then quits |
 | `-CPRenderTrailPreview file.png` | renders the buddy still and moving ever faster, plus its click ring, in every colour, then quits |
 | `-CPRunActions steps.json` | runs agent actions (`apps`, `computer`, `wait` steps) like the agent would, writes what each returned to `-CPOut` (default `steps.json.out.json`), then quits |
+| `-CPAsk "question"` | sends one typed question through the whole agent (helpers included, no screen, nothing spoken), writes the text, steps, helper events and timings to `-CPOut`, then quits |
+| `-CPRenderHelperPreview out.png` | renders the helpers' cursors and tags |
 | `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, writes what each heard to `-CPOut`, then quits |
 
 Test flags run best in a second copy, so the one you use keeps running:
@@ -280,6 +288,10 @@ Done:
   chats; Norwegian and English recognised automatically; double-tap ⌃ to
   type; buddy colours; sound effects; an option to keep Cursor Pilot out of
   screenshots and recordings; no keychain prompts after rebuilds.
+- **Helpers**: the agent sends helper agents off in parallel, each with its
+  own coloured cursor; works on its own without asking for what it can find
+  out; notes while working are shown quietly and only the first line and the
+  answer are read aloud; a calm glow during long tasks.
 
 Next phases:
 

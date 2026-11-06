@@ -420,6 +420,8 @@ final class AppModel: ObservableObject {
                 // Only work in apps shows next to the cursor, as the agent's
                 // own pointer; shell, file and web work stays out of sight.
                 backgroundWork = step.kind != "computer" && step.kind != "app"
+                // A task at work glows calmly instead of pulsing for minutes.
+                if glow.mode == .thinking { glow.mode = .answering }
             default:
                 if let i = liveSteps.lastIndex(where: { $0.phase == "start" && ($0.callID.isEmpty ? $0.summary == step.summary : $0.callID == step.callID) }) {
                     liveSteps[i] = step
@@ -428,6 +430,8 @@ final class AppModel: ObservableObject {
                 }
                 overlay.state.activity = nil
             }
+        case .helper(let e):
+            handle(helper: e)
         case .done(let text):
             replyText = text
             overlay.state.caption = text
@@ -435,7 +439,7 @@ final class AppModel: ObservableObject {
             if kind != "cancelled" { showError(message) }
         case .finished:
             if !speaker.isSpeaking { releaseVisuals(upTo: .max) }
-            ComputerControl.shared.endTask()
+            ComputerControl.endAll()
             if lastError == nil, !liveSteps.isEmpty { Sounds.play(.done) }
             requestFinished = true
             activeRequest = nil
@@ -444,6 +448,22 @@ final class AppModel: ObservableObject {
             refreshMemory()
             settleIfDone()
             if ink.hasStrokes { ink.fadeStrokes(after: 20) }
+        }
+    }
+
+    /// A helper agent's progress: its cursor shows what it's doing, and its
+    /// step in the chat says it too until it reports back.
+    func handle(helper e: HelperEvent) {
+        let cursors = HelperCursors.shared
+        switch e.phase {
+        case "start": cursors.start(agent: e.agent, name: e.name, status: e.text)
+        case "end": cursors.finish(agent: e.agent, ok: e.ok)
+        default:
+            cursors.update(agent: e.agent, status: e.text)
+            if !e.text.isEmpty,
+               let i = liveSteps.lastIndex(where: { $0.callID == e.callID && $0.phase == "start" }) {
+                liveSteps[i].summary = "\(e.name): \(e.text)"
+            }
         }
     }
 
@@ -485,7 +505,7 @@ final class AppModel: ObservableObject {
         overlay.state.spoken = nil
         resetTask?.cancel()
         if let id = activeRequest { core.cancel(id) }
-        ComputerControl.shared.endTask()
+        ComputerControl.endAll()
         overlay.state.activity = nil
         activeRequest = nil
         speaker.stop()

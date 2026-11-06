@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -86,7 +88,16 @@ pub struct Request {
 }
 
 /// Tool rounds one request may take before it is stopped.
-const MAX_ROUNDS: usize = 60;
+const MAX_ROUNDS: usize = 120;
+/// Tool rounds a helper may take for its part.
+const HELPER_ROUNDS: usize = 80;
+
+/// Who is acting: the main agent (0) or one of its helpers, each with its
+/// own shell. The app gives each its own pointer by `id`.
+struct Worker<'a> {
+    id: usize,
+    shell: &'a Mutex<Option<Shell>>,
+}
 
 pub struct Engine {
     pub settings: Mutex<Settings>,
@@ -220,6 +231,9 @@ impl Engine {
         let access = agent::mac_access(&settings.access);
         let mut tools = agent::tool_definitions(&settings);
         tools.push(memory::tool());
+        if access {
+            tools.push(agent::delegate_tool());
+        }
         let system = format!(
             "{SYSTEM_PROMPT}{}{}",
             self.memory.prompt(),
@@ -255,7 +269,8 @@ impl Engine {
                     cancel,
                     |claude::StreamEvent::TextDelta(t)| out.push(t, &mut *emit),
                 )?;
-                out.end_segment(&mut *emit);
+                let more = matches!(reply.stop_reason.as_deref(), Some("tool_use" | "pause_turn"));
+                out.end_segment(!more, &mut *emit);
                 for b in reply
                     .content
                     .iter()
@@ -284,9 +299,19 @@ impl Engine {
                         if calls.is_empty() {
                             break;
                         }
-                        let results =
-                            self.run_calls(&calls, access, cancel, &mut steps, &mut *emit)?;
+                        let main = Worker { id: 0, shell: &self.shell };
+                        let results = self.run_calls(
+                            &main,
+                            &settings,
+                            &calls,
+                            access,
+                            cancel,
+                            &mut steps,
+                            &mut *emit,
+                        )?;
                         messages.push(json!({"role": "user", "content": results}));
+                        // Narration while working is shown, not read aloud.
+                        out.quiet = true;
                     }
                     // A server tool (web search) paused a long turn: send it back to continue.
                     "pause_turn" => {}
@@ -348,10 +373,15 @@ impl Engine {
         Ok(())
     }
 
-    /// Runs one round of tool calls in order, without asking: the user
-    /// consented once. Returns one `tool_result` per call.
+    /// Runs one round of tool calls, without asking: the user consented
+    /// once. Calls run in order, except that helpers sent off with
+    /// `delegate` all run at once, after the rest. Returns one `tool_result`
+    /// per call, in the order of the calls.
+    #[allow(clippy::too_many_arguments)]
     fn run_calls(
         &self,
+        worker: &Worker,
+        settings: &Settings,
         calls: &[Call],
         access: bool,
         cancel: &AtomicBool,
@@ -359,16 +389,17 @@ impl Engine {
         emit: Emit,
     ) -> Result<Vec<Value>, ApiError> {
         let host = self.host.lock().unwrap().clone();
-        let mut results = Vec::new();
+        let mut results: Vec<Option<Value>> = vec![None; calls.len()];
+        let mut helpers = Vec::new();
         let mut computer_failed = false;
-        for call in calls {
+        for (index, call) in calls.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ApiError::Cancelled);
             }
             let summary = call.summary();
             let kind = call.kind();
             if call.is_computer() && computer_failed {
-                results.push(tool_result(
+                results[index] = Some(tool_result(
                     call,
                     json!("Not executed: an earlier computer action in this turn failed."),
                     true,
@@ -376,31 +407,55 @@ impl Engine {
                 continue;
             }
             if !access && call.name != "memory" {
-                results.push(tool_result(
+                results[index] = Some(tool_result(
                     call,
                     json!("Mac access is off in Cursor Pilot's settings."),
                     true,
                 ));
                 continue;
             }
+            if call.name == "delegate" {
+                if worker.id != 0 {
+                    results[index] = Some(tool_result(
+                        call,
+                        json!("Helpers can't send off helpers of their own; do this part yourself."),
+                        true,
+                    ));
+                } else if helpers.len() >= agent::HELPERS.len() {
+                    results[index] = Some(tool_result(
+                        call,
+                        json!(format!(
+                            "At most {} helpers can work at once; do this part yourself or delegate it after the others report.",
+                            agent::HELPERS.len()
+                        )),
+                        true,
+                    ));
+                } else {
+                    helpers.push(index);
+                }
+                continue;
+            }
 
             emit(
-                json!({"type": "tool", "phase": "start", "id": call.id, "kind": kind, "summary": summary}),
+                json!({"type": "tool", "phase": "start", "id": call.id, "kind": kind, "summary": summary, "agent": worker.id}),
             );
             // The app may name what it did more precisely ("Clicked the
             // \u{201C}Save\u{201D} button"); that becomes the step's label.
             let mut label = summary.clone();
-            let mut from_host = |request: Value| match host.as_ref().and_then(|h| h.call(request)) {
-                Some(v) => {
-                    if let Some(s) = v["summary"].as_str().filter(|s| !s.is_empty()) {
-                        label = s.to_string();
+            let mut from_host = |mut request: Value| {
+                request["agent"] = json!(worker.id);
+                match host.as_ref().and_then(|h| h.call(request)) {
+                    Some(v) => {
+                        if let Some(s) = v["summary"].as_str().filter(|s| !s.is_empty()) {
+                            label = s.to_string();
+                        }
+                        (
+                            v["content"].clone(),
+                            v["is_error"].as_bool().unwrap_or(false),
+                        )
                     }
-                    (
-                        v["content"].clone(),
-                        v["is_error"].as_bool().unwrap_or(false),
-                    )
+                    None => (json!("The app couldn't run this action."), true),
                 }
-                None => (json!("The app couldn't run this action."), true),
             };
             let (content, is_error) = match (call.is_computer(), call.name) {
                 (true, _) => {
@@ -409,7 +464,7 @@ impl Engine {
                 (false, "app_control") => from_host(json!({"type": "apps", "input": call.input})),
                 (false, "messages") => from_host(json!({"type": "messages", "input": call.input})),
                 (false, "memory") => self.memory.run(call.input, &agent::date_string(now())),
-                (false, "bash") => self.run_bash(call.input, cancel),
+                (false, "bash") => self.run_bash(worker.shell, call.input, cancel),
                 (false, "str_replace_based_edit_tool") => match self.editor.run(call.input) {
                     Ok(s) => (json!(s), false),
                     Err(e) => (json!(e), true),
@@ -422,18 +477,181 @@ impl Engine {
             }
             computer_failed |= call.is_computer() && is_error;
             emit(
-                json!({"type": "tool", "phase": "end", "id": call.id, "kind": kind, "summary": summary, "ok": !is_error}),
+                json!({"type": "tool", "phase": "end", "id": call.id, "kind": kind, "summary": summary, "ok": !is_error, "agent": worker.id}),
             );
             if steps.last() != Some(&summary) {
                 steps.push(summary);
             }
-            results.push(tool_result(call, content, is_error));
+            results[index] = Some(tool_result(call, content, is_error));
         }
-        Ok(results)
+
+        if !helpers.is_empty() {
+            let sent: Vec<&Call> = helpers.iter().map(|&i| &calls[i]).collect();
+            let reports = self.run_helpers(settings, &sent, cancel, steps, &mut *emit);
+            for (&index, (content, is_error)) in helpers.iter().zip(reports) {
+                results[index] = Some(tool_result(&calls[index], json!(content), is_error));
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return Err(ApiError::Cancelled);
+            }
+        }
+        Ok(results.into_iter().flatten().collect())
     }
 
-    fn run_bash(&self, input: &Value, cancel: &AtomicBool) -> (Value, bool) {
-        let mut shell = self.shell.lock().unwrap();
+    /// Runs helpers side by side, one thread each, and waits for all of
+    /// them. Their events come back here to be passed on in order. Returns
+    /// each helper's report and whether it failed.
+    fn run_helpers(
+        &self,
+        settings: &Settings,
+        calls: &[&Call],
+        cancel: &AtomicBool,
+        steps: &mut Vec<String>,
+        emit: Emit,
+    ) -> Vec<(String, bool)> {
+        let (tx, rx) = mpsc::channel::<Value>();
+        let mut reports = Vec::new();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = calls
+                .iter()
+                .enumerate()
+                .map(|(i, call)| {
+                    let name = agent::HELPERS[i];
+                    let task = call.input["task"].as_str().unwrap_or("").trim().to_string();
+                    let title = call.input["title"].as_str().unwrap_or("").trim().to_string();
+                    let title = if title.is_empty() {
+                        agent::clip_words(&task, 6)
+                    } else {
+                        title
+                    };
+                    let summary = format!("{name}: {title}");
+                    emit(json!({"type": "tool", "phase": "start", "id": call.id, "kind": "agent", "summary": summary, "agent": 0}));
+                    emit(json!({"type": "agent", "phase": "start", "agent": i + 1, "id": call.id, "name": name, "text": title}));
+                    let tx = tx.clone();
+                    let id = call.id.to_string();
+                    let handle = scope.spawn(move || {
+                        let report = self.run_helper(i + 1, name, &id, &task, settings, cancel, &tx);
+                        let _ = tx.send(json!({"type": "agent", "phase": "end", "agent": i + 1, "id": id, "name": name, "ok": report.is_ok()}));
+                        report
+                    });
+                    (handle, summary)
+                })
+                .collect();
+            drop(tx);
+            // Pass the helpers' events on until every helper has hung up.
+            loop {
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(event) => emit(event),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            for ((handle, summary), call) in handles.into_iter().zip(calls) {
+                let report = handle
+                    .join()
+                    .unwrap_or_else(|_| Err("the helper stopped unexpectedly".into()));
+                let ok = report.is_ok();
+                emit(json!({"type": "tool", "phase": "end", "id": call.id, "kind": "agent", "summary": summary, "ok": ok, "agent": 0}));
+                steps.push(summary);
+                reports.push(match report {
+                    Ok(text) => (text, false),
+                    Err(e) => (format!("The helper couldn't finish: {e}"), true),
+                });
+            }
+        });
+        reports
+    }
+
+    /// One helper's own agent loop: it works on its task with its own shell
+    /// and pointer and returns its report. Its tool steps and notes go to
+    /// `tx` as `agent` events, for its cursor, not into the chat.
+    #[allow(clippy::too_many_arguments)]
+    fn run_helper(
+        &self,
+        n: usize,
+        name: &str,
+        call_id: &str,
+        task: &str,
+        settings: &Settings,
+        cancel: &AtomicBool,
+        tx: &mpsc::Sender<Value>,
+    ) -> Result<String, String> {
+        if task.is_empty() {
+            return Err("no task was given".into());
+        }
+        let shell = Mutex::new(None);
+        let worker = Worker { id: n, shell: &shell };
+        let tools = agent::tool_definitions(settings);
+        let system = agent::helper_prompt(
+            name,
+            settings,
+            &self.home.display().to_string(),
+            &agent::date_string(now()),
+        );
+        let mut messages = vec![json!({"role": "user", "content": task})];
+        let mut steps = Vec::new();
+        let mut emit = |event: Value| {
+            // The helper's own steps label its cursor; the chat only shows
+            // the helper as one step.
+            if event["type"] == "tool" && event["phase"] == "start" {
+                let _ = tx.send(json!({"type": "agent", "phase": "step", "agent": n, "id": call_id, "name": name, "text": event["summary"], "kind": event["kind"]}));
+            }
+        };
+        for _ in 0..HELPER_ROUNDS {
+            let body = claude::build_body(settings, &system, &messages, &tools);
+            let reply = claude::stream(settings, &body, cancel, |_| {}).map_err(|e| e.message())?;
+            let text: String = reply
+                .content
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let stop = reply.stop_reason.clone().unwrap_or_default();
+            messages.push(json!({"role": "assistant", "content": reply.content}));
+            match stop.as_str() {
+                "tool_use" => {
+                    let note = text.trim();
+                    if !note.is_empty() {
+                        let _ = tx.send(json!({"type": "agent", "phase": "note", "agent": n, "id": call_id, "name": name, "text": agent::clip_words(note, 14)}));
+                    }
+                    let blocks = messages.last().unwrap()["content"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    let calls: Vec<Call> = blocks.iter().filter_map(Call::from_block).collect();
+                    if calls.is_empty() {
+                        return Ok(text.trim().to_string());
+                    }
+                    let results = self
+                        .run_calls(&worker, settings, &calls, true, cancel, &mut steps, &mut emit)
+                        .map_err(|e| e.message())?;
+                    messages.push(json!({"role": "user", "content": results}));
+                }
+                "pause_turn" => {}
+                _ => {
+                    let report = text.trim();
+                    return Ok(if report.is_empty() {
+                        format!("Done. Steps: {}", steps.join("; "))
+                    } else {
+                        report.to_string()
+                    });
+                }
+            }
+        }
+        Err(format!(
+            "it ran out of steps after {HELPER_ROUNDS}; it got this far: {}",
+            steps.join("; ")
+        ))
+    }
+
+    fn run_bash(
+        &self,
+        shell: &Mutex<Option<Shell>>,
+        input: &Value,
+        cancel: &AtomicBool,
+    ) -> (Value, bool) {
+        let mut shell = shell.lock().unwrap();
         if input["restart"] == true {
             *shell = None;
             return (json!("The shell was restarted."), false);
@@ -528,6 +746,10 @@ struct ReplyStream {
     screens: Vec<(Rect, f64, f64)>,
     visible: String,
     labels: Vec<String>,
+    /// While an agent task works, its notes are shown but not read aloud:
+    /// sentences wait in `held` until the round turns out to be the answer.
+    quiet: bool,
+    held: Vec<String>,
 }
 
 impl ReplyStream {
@@ -541,6 +763,16 @@ impl ReplyStream {
                 .collect(),
             visible: String::new(),
             labels: Vec::new(),
+            quiet: false,
+            held: Vec::new(),
+        }
+    }
+
+    fn speak(&mut self, sentence: String, emit: Emit) {
+        if self.quiet {
+            self.held.push(sentence);
+        } else {
+            emit(json!({"type": "speak", "text": sentence}));
         }
     }
 
@@ -553,14 +785,20 @@ impl ReplyStream {
         let pieces = self.filter.finish();
         self.handle(pieces, emit);
         if let Some(s) = self.chunker.finish() {
-            emit(json!({"type": "speak", "text": s}));
+            self.speak(s, emit);
         }
     }
 
     /// Ends one reply of an agent task: flushes what's pending and starts a
-    /// new paragraph, so text from the next round doesn't run on.
-    fn end_segment(&mut self, emit: Emit) {
+    /// new paragraph, so text from the next round doesn't run on. `last` is
+    /// the answer: held sentences are read aloud then, and dropped otherwise.
+    fn end_segment(&mut self, last: bool, emit: Emit) {
         self.finish(&mut *emit);
+        for s in std::mem::take(&mut self.held) {
+            if last {
+                emit(json!({"type": "speak", "text": s}));
+            }
+        }
         self.filter = MarkupFilter::new();
         if !self.visible.trim().is_empty() && !self.visible.ends_with("\n\n") {
             self.visible.push_str("\n\n");
@@ -575,7 +813,7 @@ impl ReplyStream {
                     self.visible.push_str(&t);
                     emit(json!({"type": "text", "text": t}));
                     for s in self.chunker.push(&t) {
-                        emit(json!({"type": "speak", "text": s}));
+                        self.speak(s, &mut *emit);
                     }
                 }
                 Piece::Mark(m) => {
@@ -665,6 +903,26 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e["type"] == "speak" && e["text"] == "Click  here."));
+    }
+
+    #[test]
+    fn notes_while_working_are_silent_but_the_answer_is_spoken() {
+        let mut rs = ReplyStream::new(&[]);
+        let mut events = Vec::new();
+        rs.push("On it, checking.", &mut |e| events.push(e));
+        rs.end_segment(false, &mut |e| events.push(e));
+        rs.quiet = true;
+        rs.push("Opening Safari now.", &mut |e| events.push(e));
+        rs.end_segment(false, &mut |e| events.push(e));
+        rs.push("Done, it's booked.", &mut |e| events.push(e));
+        rs.end_segment(true, &mut |e| events.push(e));
+        let spoken: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "speak")
+            .map(|e| e["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(spoken, ["On it, checking.", "Done, it's booked."]);
+        assert!(rs.visible.contains("Opening Safari now."));
     }
 
     #[test]

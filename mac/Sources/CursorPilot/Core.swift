@@ -63,9 +63,24 @@ enum CoreEvent {
     case mark(InkShape, label: String)
     /// An agent step: "start" or "end".
     case tool(AgentStep)
+    /// A helper agent started, did a step, left a note or finished.
+    case helper(HelperEvent)
     case done(text: String)
     case error(kind: String, message: String)
     case finished
+}
+
+struct HelperEvent {
+    /// "start", "step", "note" or "end".
+    var phase: String
+    /// 1 for the first helper; each has its own pointer.
+    var agent: Int
+    /// The `delegate` call that sent it, which is its step in the chat.
+    var callID: String
+    /// "Mint", "Sunset"…: also the colour of its cursor.
+    var name: String
+    var text: String
+    var ok: Bool
 }
 
 struct AgentStep: Identifiable, Equatable {
@@ -87,6 +102,7 @@ struct AgentStep: Identifiable, Equatable {
         case "memory": "brain"
         case "messages": "message"
         case "web": "globe"
+        case "agent": "person.2"
         default: "sparkles"
         }
     }
@@ -94,6 +110,7 @@ struct AgentStep: Identifiable, Equatable {
     /// The icon for a saved step, from its wording.
     static func icon(forSummary s: String) -> String {
         if s.hasPrefix("Texted") || s.hasPrefix("Read messages") || s.hasSuffix("your messages") { return "message" }
+        if helperNames.contains(where: { s.hasPrefix($0 + ":") }) { return "person.2" }
         let app = ["Pressed", "Chose", "Opened", "Looked", "Filled", "Brought", "Checked", "Focused", "Selected",
                    "Used", "Read text"]
         if app.contains(where: s.hasPrefix) { return "macwindow" }
@@ -299,6 +316,9 @@ private func parseEvent(_ json: String) -> CoreEvent? {
     case "tool":
         return .tool(AgentStep(callID: str("id"), phase: str("phase"), kind: str("kind"), summary: str("summary"),
                                ok: obj["ok"] as? Bool ?? true))
+    case "agent":
+        return .helper(HelperEvent(phase: str("phase"), agent: obj["agent"] as? Int ?? 0, callID: str("id"),
+                                   name: str("name"), text: str("text"), ok: obj["ok"] as? Bool ?? true))
     case "done": return .done(text: str("text"))
     case "error": return .error(kind: str("kind"), message: str("message"))
     case "finished": return .finished

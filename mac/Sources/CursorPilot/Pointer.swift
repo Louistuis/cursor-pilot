@@ -369,6 +369,8 @@ enum BackgroundInput {
     /// Runs `body` with the user's real pointer at `p`, then puts the pointer
     /// back where it was. For the rare app that ignores background input.
     static func withRealPointer(at p: CGPoint, _ body: () async -> Void) async {
+        await RealInput.acquire()
+        defer { RealInput.release() }
         let home = CGEvent(source: nil)?.location ?? p
         CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?
             .post(tap: .cghidEventTap)
@@ -380,6 +382,32 @@ enum BackgroundInput {
     }
 }
 
+/// The user's one real pointer and keyboard, taken in turn: helpers working
+/// at the same time must not borrow them over each other.
+@MainActor
+enum RealInput {
+    private static var busy = false
+    private static var waiting: [CheckedContinuation<Void, Never>] = []
+
+    static func acquire() async {
+        if !busy {
+            busy = true
+            return
+        }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    static func release() {
+        if waiting.isEmpty { busy = false } else { waiting.removeFirst().resume() }
+    }
+
+    static func exclusive<T>(_ body: () async -> T) async -> T {
+        await acquire()
+        defer { release() }
+        return await body()
+    }
+}
+
 // MARK: - App control tool
 
 /// The `app_control` tool: works with apps through their accessibility
@@ -387,7 +415,10 @@ enum BackgroundInput {
 /// by name, in the background, without the screen or the mouse.
 @MainActor
 final class AppControl {
-    static let shared = AppControl()
+    /// The agent this belongs to, whose screen its positions are given in.
+    private let agent: Int
+
+    init(agent: Int) { self.agent = agent }
 
     struct Result {
         var content: String
@@ -596,7 +627,7 @@ final class AppControl {
         if (BackgroundInput.attribute(el, kAXEnabledAttribute) as Bool?) == false { line += " (disabled)" }
         if (BackgroundInput.attribute(el, kAXFocusedAttribute) as Bool?) == true { line += " (focused)" }
         if (BackgroundInput.attribute(el, kAXSelectedAttribute) as Bool?) == true { line += " (selected)" }
-        let c = ComputerControl.shared.imagePoint(CGPoint(x: frame.midX, y: frame.midY))
+        let c = ComputerControl.forAgent(agent).imagePoint(CGPoint(x: frame.midX, y: frame.midY))
         line += " at [\(Int(c.x)), \(Int(c.y))]"
         return line
     }

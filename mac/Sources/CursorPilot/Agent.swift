@@ -16,11 +16,13 @@ final class AgentHost: @unchecked Sendable {
         guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
               let type = obj["type"] as? String
         else { return "{}" }
+        // 0 is the main agent; helpers have their own pointers.
+        let agent = obj["agent"] as? Int ?? 0
         switch type {
         case "computer":
             let name = obj["name"] as? String ?? ""
             let input = obj["input"] as? [String: Any] ?? [:]
-            let result = waitOnMain { await ComputerControl.shared.perform(name, input: input) }
+            let result = waitOnMain { await ComputerControl.forAgent(agent).perform(name, input: input) }
             var reply: [String: Any] = ["content": result.content, "is_error": result.isError]
             if let summary = result.summary { reply["summary"] = summary }
             return encode(reply)
@@ -32,7 +34,7 @@ final class AgentHost: @unchecked Sendable {
             return encode(reply)
         case "apps":
             let input = obj["input"] as? [String: Any] ?? [:]
-            let result = waitOnMain { await ComputerControl.shared.appControl(input) }
+            let result = waitOnMain { await ComputerControl.forAgent(agent).appControl(input) }
             var reply: [String: Any] = ["content": result.content, "is_error": result.isError]
             if let summary = result.summary { reply["summary"] = summary }
             return encode(reply)
@@ -75,9 +77,38 @@ let coreHostCallback: CPHostCallback = { _, json in
 /// to each point and clicks, typing and scrolling go straight to the app
 /// there (`BackgroundInput`), so the user's pointer and keyboard stay theirs.
 /// Coordinates are pixels of the screenshots it returns.
+///
+/// Each agent has one: the main agent's pointer is the buddy, and every
+/// helper it sends off gets its own coloured cursor (`HelperCursors`).
 @MainActor
 final class ComputerControl {
-    static let shared = ComputerControl()
+    static let shared = ComputerControl(agent: 0)
+    private static var helpers: [Int: ComputerControl] = [:]
+
+    static func forAgent(_ n: Int) -> ComputerControl {
+        if n == 0 { return shared }
+        if let c = helpers[n] { return c }
+        let c = ComputerControl(agent: n)
+        helpers[n] = c
+        return c
+    }
+
+    /// The task is over: every pointer goes home and the helpers' cursors leave.
+    static func endAll() {
+        shared.endTask()
+        helpers.removeAll()
+        HelperCursors.shared.dismissAll()
+    }
+
+    let agent: Int
+    /// This agent's own app_control listing, so helpers' element numbers
+    /// don't clash.
+    let apps: AppControl
+
+    private init(agent: Int) {
+        self.agent = agent
+        apps = AppControl(agent: agent)
+    }
 
     /// Longest edge of screenshots sent to Claude.
     static let maxEdge: CGFloat = 1456
@@ -111,12 +142,25 @@ final class ComputerControl {
         target = nil
         lastPosted = nil
         realPointerApps = []
-        AppControl.shared.reset()
+        apps.reset()
     }
 
     /// The task is over: the buddy goes back to the user's cursor.
     func endTask() {
-        AppModel.shared.overlay.agentRelease()
+        if agent == 0 { AppModel.shared.overlay.agentRelease() }
+    }
+
+    /// Moves this agent's cursor: the buddy, or the helper's own.
+    private func cursorMove(_ p: CGPoint) async {
+        if agent == 0 {
+            await AppModel.shared.overlay.agentMove(toTopLeft: p)
+        } else {
+            await HelperCursors.shared.move(agent: agent, toTopLeft: p)
+        }
+    }
+
+    private func cursorClicked() {
+        if agent == 0 { AppModel.shared.overlay.agentClicked() } else { HelperCursors.shared.clicked(agent: agent) }
     }
 
     nonisolated static var hasAccessibility: Bool { AXIsProcessTrusted() }
@@ -189,7 +233,6 @@ final class ComputerControl {
 
         let point = (input["coordinate"] as? [Double]).flatMap { $0.count == 2 ? toGlobal($0[0], $0[1]) : nil }
         let mods = Self.flags(input["text"] as? String ?? "")
-        let overlay = AppModel.shared.overlay
         var summary: String?
         var note = "OK"
         switch name {
@@ -200,7 +243,7 @@ final class ComputerControl {
         case "left_click", "right_click", "middle_click", "double_click", "triple_click":
             let at = point ?? pointer ?? Self.mouseLocation()
             await fly(to: at)
-            overlay.agentClicked()
+            cursorClicked()
             (note, summary) = await click(name, at: at, flags: mods)
         case "left_click_drag":
             guard let start = (input["start_coordinate"] as? [Double]).flatMap({ $0.count == 2 ? toGlobal($0[0], $0[1]) : nil }),
@@ -210,12 +253,12 @@ final class ComputerControl {
             if let win = BackgroundInput.window(at: start) { target = win }
             if Self.mayBorrowPointer {
                 // Drags rarely work in the background: borrow the pointer briefly.
-                async let flight: Void = overlay.agentMove(toTopLeft: end)
+                async let flight: Void = cursorMove(end)
                 await BackgroundInput.withRealPointer(at: start) { await Self.drag(from: start, to: end, flags: mods) }
                 await flight
                 note = "Dragged using the real pointer for a moment; it is back where the user left it."
             } else if let win = target {
-                async let flight: Void = overlay.agentMove(toTopLeft: end)
+                async let flight: Void = cursorMove(end)
                 await BackgroundInput.postDrag(from: start, to: end, flags: mods, to: win)
                 await flight
                 note = "Dragged in the background. Check with a screenshot; some apps ignore background drags."
@@ -256,7 +299,7 @@ final class ComputerControl {
                 await BackgroundInput.type(text, pid: pid)
                 note = "Typed into \(target?.appName ?? "the app") in the background."
             } else {
-                await Self.type(text)
+                await RealInput.exclusive { await Self.type(text) }
             }
         case "key", "hold_key":
             let combo = input["text"] as? String ?? ""
@@ -266,7 +309,13 @@ final class ComputerControl {
             // belong to macOS, not the app: they need the real keyboard.
             let pid = Self.isSystemShortcut(combo) ? nil : keyboardTarget()
             for _ in 0..<times {
-                guard await Self.press(combo, hold: hold, pid: pid) else { return fail("Unknown key: \(combo)") }
+                let pressed: Bool
+                if let pid {
+                    pressed = await Self.press(combo, hold: hold, pid: pid)
+                } else {
+                    pressed = await RealInput.exclusive { await Self.press(combo, hold: hold, pid: nil) }
+                }
+                guard pressed else { return fail("Unknown key: \(combo)") }
             }
         default:
             return fail("Unknown computer action: \(name)")
@@ -283,10 +332,10 @@ final class ComputerControl {
             return AppControl.Result(content: r.content as? String ?? "", isError: true)
         }
         if NSApp.isActive || HomeWindow.shared.isVisible { NSApp.hide(nil) }
-        let result = await AppControl.shared.perform(input)
+        let result = await apps.perform(input)
         if let p = result.point, NSScreen.screens.contains(where: { $0.frame.insetBy(dx: -2, dy: -2).contains(NSPoint(x: p.x, y: (NSScreen.screens.first?.frame.height ?? 0) - p.y)) }) {
             await fly(to: p)
-            if !result.isError { AppModel.shared.overlay.agentClicked() }
+            if !result.isError { cursorClicked() }
             if let win = BackgroundInput.window(at: p) { target = win }
         }
         return result
@@ -304,7 +353,7 @@ final class ComputerControl {
     /// Moves the agent's pointer (the buddy) to `p`.
     private func fly(to p: CGPoint) async {
         if pointer == nil { pointer = Self.mouseLocation() }
-        await AppModel.shared.overlay.agentMove(toTopLeft: p)
+        await cursorMove(p)
         pointer = p
     }
 

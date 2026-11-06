@@ -108,6 +108,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
                 return
             }
+            // `-CPRenderHelperPreview out.png`: each helper's cursor at work,
+            // one finished and one near the right edge.
+            if let path = UserDefaults.standard.string(forKey: "CPRenderHelperPreview") {
+                let steps = ["Opened Safari", "Reading the timetable", "Filled in a field in Numbers",
+                             "Searching for hotels in Bergen", "Done"]
+                let view = VStack(alignment: .leading, spacing: 0) {
+                    ForEach(helperNames.indices, id: \.self) { i in
+                        let state = HelperCursorState(name: helperNames[i], status: steps[i])
+                        let _ = { if i == 4 { state.finished = true }; if i == 3 { state.flipped = true } }()
+                        HelperCursorView(state: state)
+                            .frame(width: HelperLayout.size.width, height: 70, alignment: .topLeading)
+                    }
+                }
+                .background(Color(white: 0.55))
+                .environment(\.colorScheme, .dark)
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 2
+                if let image = renderer.cgImage,
+                   let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+                return
+            }
             if let path = UserDefaults.standard.string(forKey: "CPRenderGlowPreview") {
                 let size = CGSize(width: 1512, height: 982)
                 for mode in [GlowController.Mode.listening, .thinking, .sketching] {
