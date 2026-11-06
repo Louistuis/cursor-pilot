@@ -18,6 +18,7 @@ pub mod conversation;
 pub mod drawings;
 pub mod engine;
 pub mod markup;
+pub mod memory;
 pub mod speech;
 
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -267,6 +268,37 @@ pub unsafe extern "C" fn cp_core_list_drawings(core: *mut CPCore) -> *mut c_char
 pub unsafe extern "C" fn cp_core_delete_drawing(core: *mut CPCore, id: *const c_char) {
     if let (Some(core), Some(id)) = (core.as_ref(), str_arg(id)) {
         core.engine.drawings().delete(id);
+    }
+}
+
+/// Opens a connection to the API in the background, ahead of a request.
+#[no_mangle]
+pub unsafe extern "C" fn cp_core_warm(core: *mut CPCore) {
+    if let Some(core) = core.as_ref() {
+        claude::warm(&core.engine.base_url());
+    }
+}
+
+/// JSON array of facts Claude remembers about the user, oldest first.
+#[no_mangle]
+pub unsafe extern "C" fn cp_core_list_memory(core: *mut CPCore) -> *mut c_char {
+    match core.as_ref() {
+        Some(core) => into_c(
+            serde_json::to_string(&core.engine.memory().list()).unwrap_or_else(|_| "[]".into()),
+        ),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Forgets the fact `id`, or every fact when `id` is null.
+#[no_mangle]
+pub unsafe extern "C" fn cp_core_forget_memory(core: *mut CPCore, id: *const c_char) {
+    let Some(core) = core.as_ref() else { return };
+    match str_arg(id) {
+        Some(id) => {
+            core.engine.memory().forget(id);
+        }
+        None => core.engine.memory().clear(),
     }
 }
 

@@ -44,7 +44,44 @@ pub fn tool_definitions(settings: &Settings) -> Vec<Value> {
     if WEB_SEARCH_MODELS.contains(&settings.model.as_str()) {
         tools.push(json!({"type": "web_search_20260209", "name": "web_search", "max_uses": 5}));
     }
+    tools.push(app_control_tool());
     tools
+}
+
+/// Our own tool for working with apps through their accessibility trees, in
+/// the background, by name instead of by pixel.
+fn app_control_tool() -> Value {
+    json!({
+        "name": "app_control",
+        "description": "Work with the user's Mac apps directly through macOS Accessibility, in the background: \
+    list apps, open them without bringing them to the front, list a window's controls, press buttons, \
+    fill in fields, read text and choose menu items by name. Nothing here moves the user's pointer or \
+    needs the app in front, and it is more exact than clicking pixels, so prefer it for buttons, \
+    fields, checkboxes, lists and menus. Typical flow: elements (optionally with find) to get numbered \
+    controls, then press / set_value / read with an id; or skip the listing and name the control with \
+    app and find (\"press\", app \"Calculator\", find \"7\"). Ids are only valid until the next elements call. \
+    If an app lists nothing useful (games, canvases, some cross-platform apps), use the computer tools.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["apps", "open", "activate", "elements", "press", "set_value", "read", "menu"],
+                    "description": "apps: running apps and their windows. open: launch an app and/or open a file or URL, in the background unless front is true. activate: bring an app to the front. elements: numbered controls and text of an app's window, with positions in screenshot pixels. press: press, focus or select element id. set_value: replace the text or value of element id. read: full text of element id. menu: choose a menu bar item by path."
+                },
+                "app": {"type": "string", "description": "App name or bundle id. Defaults to the frontmost app for elements and menu."},
+                "window": {"type": "string", "description": "elements: part of the window title, when the app has several."},
+                "find": {"type": "string", "description": "elements: only list controls whose text or role contains this. press, set_value, read without an id: use the control in app with exactly this text (or else the first containing it)."},
+                "limit": {"type": "integer", "description": "elements: how many to list (default 120)."},
+                "id": {"type": "integer", "description": "press, set_value, read: the element number from the latest elements listing (or give find instead)."},
+                "value": {"type": "string", "description": "set_value: the new text or value."},
+                "path": {"type": "array", "items": {"type": "string"}, "description": "menu: titles from the menu bar down, e.g. [\"File\", \"Export as PDF…\"]."},
+                "target": {"type": "string", "description": "open: a file path or URL to open (in app, if given)."},
+                "front": {"type": "boolean", "description": "open: bring the app to the front (default false)."}
+            },
+            "required": ["action"]
+        }
+    })
 }
 
 pub fn system_addendum(settings: &Settings, home: &str, today: &str) -> String {
@@ -56,23 +93,32 @@ pub fn system_addendum(settings: &Settings, home: &str, today: &str) -> String {
 The user turned this on and consented to it: every tool runs right away, with no approval prompts, \
 so act on your own judgement and keep going until the task is done. Tools:\n\
 - bash runs commands in a persistent zsh shell as the user, starting in their home folder ({home}). \
-Use it for files, apps, system information, git, scripts, and AppleScript or JXA through osascript.\n\
+Use it for files, system information, git and scripts. AppleScript that controls another app \
+(osascript tell application …) makes macOS ask the user for permission the first time, so use \
+app_control for apps instead and keep AppleScript for what only it can do.\n\
 - str_replace_based_edit_tool views, creates and edits files. Use absolute paths.\n\
-- The computer tools, when present, see and control the screen: take a screenshot, then click, type, \
-press keys and scroll. Coordinates are pixels in your latest screenshot. They move the user's own \
-pointer, so use them only for what can't be done otherwise, and end each group of actions with a \
-screenshot to check the result.\n\
+- app_control works with apps by name through Accessibility: open apps in the background, list a \
+window's controls, press buttons, fill in fields, read text, choose menu items. It is exact and \
+never needs the app in front.\n\
+- The computer tools, when present, see the screen and act on it: take a screenshot, then click, \
+type, press keys and scroll. Coordinates are pixels in your latest screenshot. You have your own \
+pointer, shown to the user as a small glass cursor: your clicks, typing and scrolling go straight \
+to the app under it, in the background, and never move the user's pointer or take their keyboard. \
+Typing and keys go to the app you last clicked in. If a click had no visible effect, click the same \
+spot once more: the retry briefly borrows the user's real pointer for apps that ignore background \
+clicks. Drags use the real pointer for a moment. End each group of actions with a screenshot (or \
+an elements listing) to check the result.\n\
 - web_search, when present, finds current information.\n\
-Work in the background where you can, so the user can keep using their Mac: prefer the shell, \
-osascript (scripting apps directly, without clicking), `open -g` (opens without stealing focus), \
-`defaults`, `mdfind` and app command-line tools over the mouse and keyboard.\n\
+How to work: do what the user asked, completely, the way they asked. Prefer, in order: app_control \
+and the shell (fast, exact, invisible), then the computer tools for what has no other way. Open apps in the background (app_control open, or `open -g`) and only bring one to the front \
+when the user should see it or the app needs it. Don't stop to ask unless something is truly \
+ambiguous or risky; if a step fails, try another way before giving up.\n\
 Nobody reviews your actions before they run, so be careful with what can't be undone: never use sudo, \
-and never delete, overwrite, send, post or buy anything the user didn't ask for. Prefer moving files \
-to the Trash (osascript -e 'tell application \"Finder\" to delete POSIX file \"…\"') over rm.\n\
+and never delete, overwrite, send, post or buy anything the user didn't ask for. Move files to the \
+Trash with /usr/bin/trash rather than deleting them with rm.\n\
 Say what you're doing as you go, like texting a co-worker: before a step or group of steps, write a \
 few words about it (\"Checking your Downloads.\"), each as its own short message. When you're done, \
-reply with the result in a sentence or two. Don't add pointing \
-tags for things you click yourself.\n\
+reply with the result in a sentence or two. Don't add pointing tags for things you click yourself.\n\
 Today is {today}."
     )
 }
@@ -169,6 +215,46 @@ impl<'a> Call<'a> {
                     _ => format!("Edited {path}"),
                 }
             }
+            "app_control" => {
+                let app = i["app"].as_str().unwrap_or("");
+                let in_app = if app.is_empty() {
+                    String::new()
+                } else {
+                    format!(" in {app}")
+                };
+                match i["action"].as_str().unwrap_or("") {
+                    "apps" => "Checked the open apps".into(),
+                    "open" => format!(
+                        "Opened {}",
+                        if app.is_empty() {
+                            short_path(i["target"].as_str().unwrap_or("it"))
+                        } else {
+                            app.to_string()
+                        }
+                    ),
+                    "activate" => format!("Brought {app} to the front"),
+                    "elements" => format!("Looked{in_app}"),
+                    "press" => format!("Pressed a control{in_app}"),
+                    "set_value" => format!("Filled in a field{in_app}"),
+                    "read" => format!("Read text{in_app}"),
+                    "menu" => {
+                        let path: Vec<&str> = i["path"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(Value::as_str).collect())
+                            .unwrap_or_default();
+                        format!("Chose {}", path.join(" \u{203A} "))
+                    }
+                    other => format!("Used {other}{in_app}"),
+                }
+            }
+            "memory" => {
+                let text = clip(i["text"].as_str().unwrap_or(""), 60);
+                match i["action"].as_str().unwrap_or("") {
+                    "remember" => format!("Remembered \u{201C}{text}\u{201D}"),
+                    _ if text.is_empty() => "Forgot something".into(),
+                    _ => format!("Forgot \u{201C}{text}\u{201D}"),
+                }
+            }
             other => other.replace('_', " "),
         }
     }
@@ -178,6 +264,10 @@ impl<'a> Call<'a> {
             "computer"
         } else if self.name == "bash" {
             "shell"
+        } else if self.name == "app_control" {
+            "app"
+        } else if self.name == "memory" {
+            "memory"
         } else {
             "file"
         }

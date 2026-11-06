@@ -29,6 +29,7 @@ let package = Package(
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("Security"),
                 .linkedFramework("Speech"),
+                .linkedFramework("WebKit"),
             ]
         ),
     ]

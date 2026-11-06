@@ -13,6 +13,7 @@ use crate::claude::{self, ApiError, Settings};
 use crate::conversation::{now, Session, Store, Turn};
 use crate::drawings::Drawings;
 use crate::markup::{MarkupFilter, Piece, Shape};
+use crate::memory::{self, Memory};
 use crate::speech::SentenceChunker;
 
 pub const SYSTEM_PROMPT: &str = "\
@@ -21,7 +22,10 @@ The user talks to you by voice or texts you from a chat that looks like Messages
 is read aloud. Write like a capable friend texting back: short, warm and natural, usually one or two \
 short sentences, with no markdown, lists or headings, and no code blocks unless the user asks for code. \
 Skip preambles and pleasantries. A blank line between thoughts sends them as separate messages, so use \
-one only where a real texter would. Go longer only when the user asks for detail.
+one only where a real texter would. Go longer only when the user asks for detail. \
+Reply in the language the user just used; they may switch languages between messages. Spoken \
+questions come through speech recognition and can contain misheard words, so go with the most \
+likely meaning instead of the literal text.
 
 You may receive screenshots of the user's displays. Each one is introduced by a line such as \
 \"Screen 0 (Built-in Display, cursor is here): 1280x800\" that gives its index and pixel size. \
@@ -88,6 +92,7 @@ pub struct Engine {
     pub host: Mutex<Option<Arc<Host>>>,
     shell: Mutex<Option<Shell>>,
     editor: Editor,
+    memory: Memory,
     home: PathBuf,
 }
 
@@ -111,6 +116,7 @@ impl Engine {
                 home: home.clone(),
                 backups: data_dir.join("backups"),
             },
+            memory: Memory::new(&data_dir),
             home,
         }
     }
@@ -121,6 +127,14 @@ impl Engine {
 
     pub fn drawings(&self) -> &Drawings {
         &self.drawings
+    }
+
+    pub fn memory(&self) -> &Memory {
+        &self.memory
+    }
+
+    pub fn base_url(&self) -> String {
+        self.settings.lock().unwrap().base_url.clone()
     }
 
     pub fn next_request_id(&self) -> (u64, Arc<AtomicBool>) {
@@ -197,9 +211,11 @@ impl Engine {
     ) -> Result<(), ApiError> {
         let settings = self.settings.lock().unwrap().clone();
         let access = agent::mac_access(&settings.access);
-        let tools = agent::tool_definitions(&settings);
+        let mut tools = agent::tool_definitions(&settings);
+        tools.push(memory::tool());
         let system = format!(
-            "{SYSTEM_PROMPT}{}",
+            "{SYSTEM_PROMPT}{}{}",
+            self.memory.prompt(),
             agent::system_addendum(
                 &settings,
                 &self.home.display().to_string(),
@@ -352,7 +368,7 @@ impl Engine {
                 ));
                 continue;
             }
-            if !access {
+            if !access && call.name != "memory" {
                 results.push(tool_result(
                     call,
                     json!("Mac access is off in Cursor Pilot's settings."),
@@ -361,17 +377,30 @@ impl Engine {
                 continue;
             }
 
-            emit(json!({"type": "tool", "phase": "start", "kind": kind, "summary": summary}));
-            let (content, is_error) = match (call.is_computer(), call.name) {
-                (true, _) => match host.as_ref().and_then(|h| {
-                    h.call(json!({"type": "computer", "name": call.name, "input": call.input}))
-                }) {
-                    Some(v) => (
+            emit(
+                json!({"type": "tool", "phase": "start", "id": call.id, "kind": kind, "summary": summary}),
+            );
+            // The app may name what it did more precisely ("Clicked the
+            // \u{201C}Save\u{201D} button"); that becomes the step's label.
+            let mut label = summary.clone();
+            let mut from_host = |request: Value| match host.as_ref().and_then(|h| h.call(request)) {
+                Some(v) => {
+                    if let Some(s) = v["summary"].as_str().filter(|s| !s.is_empty()) {
+                        label = s.to_string();
+                    }
+                    (
                         v["content"].clone(),
                         v["is_error"].as_bool().unwrap_or(false),
-                    ),
-                    None => (json!("The app couldn't run this action."), true),
-                },
+                    )
+                }
+                None => (json!("The app couldn't run this action."), true),
+            };
+            let (content, is_error) = match (call.is_computer(), call.name) {
+                (true, _) => {
+                    from_host(json!({"type": "computer", "name": call.name, "input": call.input}))
+                }
+                (false, "app_control") => from_host(json!({"type": "apps", "input": call.input})),
+                (false, "memory") => self.memory.run(call.input, &agent::date_string(now())),
                 (false, "bash") => self.run_bash(call.input, cancel),
                 (false, "str_replace_based_edit_tool") => match self.editor.run(call.input) {
                     Ok(s) => (json!(s), false),
@@ -379,12 +408,13 @@ impl Engine {
                 },
                 (false, other) => (json!(format!("Unknown tool: {other}")), true),
             };
+            let summary = label;
             if cancel.load(Ordering::Relaxed) {
                 return Err(ApiError::Cancelled);
             }
             computer_failed |= call.is_computer() && is_error;
             emit(
-                json!({"type": "tool", "phase": "end", "kind": kind, "summary": summary, "ok": !is_error}),
+                json!({"type": "tool", "phase": "end", "id": call.id, "kind": kind, "summary": summary, "ok": !is_error}),
             );
             if steps.last() != Some(&summary) {
                 steps.push(summary);

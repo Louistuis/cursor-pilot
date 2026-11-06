@@ -43,6 +43,10 @@ mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 cp "$BIN" "$BUNDLE/Contents/MacOS/CursorPilot"
 cp "$APP_DIR/mac/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
 [[ -f "$APP_DIR/mac/Resources/AppIcon.icns" ]] && cp "$APP_DIR/mac/Resources/AppIcon.icns" "$BUNDLE/Contents/Resources/"
+# The melted "cursorpilot" wordmark for Home's header is a licensed component
+# kept outside this repository; without it Home shows the name as text.
+BRAND_MARK="${BRAND_MARK:-$APP_DIR/../brand/melt-mark.html}"
+[[ -f "$BRAND_MARK" ]] && cp "$BRAND_MARK" "$BUNDLE/Contents/Resources/melt-mark.html"
 
 echo "==> Sign"
 IDENTITY="${CODESIGN_IDENTITY:-}"

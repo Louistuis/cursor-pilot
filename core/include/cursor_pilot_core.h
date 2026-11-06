@@ -36,6 +36,14 @@ char *cp_core_save_drawing(CPCore *core, const uint8_t *png, size_t len, const c
 char *cp_core_list_drawings(CPCore *core);
 void cp_core_delete_drawing(CPCore *core, const char *drawing_id);
 
+/* Opens a connection to the API in the background, ahead of a request. */
+void cp_core_warm(CPCore *core);
+
+/* What Claude remembers about the user: a JSON array of
+ * {"id","text","date"}, oldest first. Forgetting with a null id clears it. */
+char *cp_core_list_memory(CPCore *core);
+void cp_core_forget_memory(CPCore *core, const char *fact_id);
+
 void cp_string_free(char *s);
 const char *cp_core_version(void);
 

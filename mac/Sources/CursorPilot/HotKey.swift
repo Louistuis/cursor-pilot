@@ -148,3 +148,68 @@ final class ModifierHold {
         return false
     }
 }
+
+/// Notices Control pressed and released twice in quick succession, on its
+/// own, to open the ask field for typing.
+@MainActor
+final class DoubleTapControl {
+    var onDoubleTap: () -> Void = {}
+
+    private static let tapLength: CFTimeInterval = 0.3
+    private static let gap: CFTimeInterval = 0.35
+    private var timer: Timer?
+    private var downAt: CFTimeInterval?
+    private var lastTap: CFTimeInterval?
+    private var spoiled = false
+
+    func start() {
+        guard timer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        downAt = nil
+        lastTap = nil
+    }
+
+    private func tick() {
+        let flags = NSEvent.modifierFlags.intersection([.control, .option, .shift, .command])
+        let now = CACurrentMediaTime()
+        if let down = downAt {
+            if flags.isEmpty {
+                downAt = nil
+                guard !spoiled, now - down <= Self.tapLength else {
+                    lastTap = nil
+                    return
+                }
+                if let last = lastTap, now - last <= Self.gap + Self.tapLength {
+                    lastTap = nil
+                    onDoubleTap()
+                } else {
+                    lastTap = now
+                }
+            } else if flags != .control || Self.somethingElsePressed() {
+                spoiled = true
+            }
+        } else if flags == .control {
+            downAt = now
+            spoiled = Self.somethingElsePressed()
+        } else if !flags.isEmpty {
+            lastTap = nil
+        }
+    }
+
+    private static func somethingElsePressed() -> Bool {
+        if NSEvent.pressedMouseButtons != 0 { return true }
+        for code in 0..<0x7F where !(0x36...0x3F).contains(code) {
+            if CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(code)) { return true }
+        }
+        return false
+    }
+}

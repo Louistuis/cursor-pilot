@@ -18,6 +18,11 @@ final class OverlayState: ObservableObject {
     /// The agent is working in the background (shell, files, web), so the
     /// buddy stays out of the way. It comes back for mouse and keyboard work.
     @Published var backgroundWork = false
+    /// How fast the buddy is moving, in view points per second (y down);
+    /// drives the motion blur.
+    @Published var motion: CGVector = .zero
+    /// When the agent last clicked, for the ring at the tip.
+    @Published var clickAt: Date?
     /// Bubble sits left of the buddy when the cursor is near the right edge.
     @Published var flipped = false
 }
@@ -33,8 +38,12 @@ final class OverlayController: NSObject {
     private var lastFrame: CFTimeInterval = 0
     private var stateChanges: AnyCancellable?
 
-    static let size = CGSize(width: 380, height: 200)
-    /// Inset of the buddy's tip from the panel's top corner.
+    /// The buddy and its bubble.
+    static let content = CGSize(width: 380, height: 200)
+    /// Room around them for motion trails and click rings.
+    static let margin: CGFloat = 72
+    static let size = CGSize(width: content.width + 2 * margin, height: content.height + 2 * margin)
+    /// Inset of the buddy's tip from the content's top corner.
     private static let tipInset: CGFloat = 6
     /// Where the buddy rests relative to the real cursor.
     private static let followOffset = CGPoint(x: 18, y: -20)
@@ -62,6 +71,11 @@ final class OverlayController: NSObject {
     private var isPointing = false
     private var lastActive: CFTimeInterval = 0
     private var alpha: CGFloat = 0
+    /// The agent is moving the buddy as its own pointer, so it stays where
+    /// the agent put it instead of following the user's cursor.
+    private var agentDriving = false
+    private var lastAnchor = CGPoint.zero
+    private var velocity = CGVector.zero
 
     override init() {
         panel = NSPanel(
@@ -80,6 +94,7 @@ final class OverlayController: NSObject {
         panel.canHide = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.contentView = NSHostingView(rootView: OverlayView(state: state))
+        panel.applyRecordingVisibility()
         // Anything the buddy has to show counts as activity.
         stateChanges = state.objectWillChange.sink { [weak self] in
             MainActor.assumeIsolated { self?.wake() }
@@ -111,6 +126,43 @@ final class OverlayController: NSObject {
         holdUntil = 0
     }
 
+    // MARK: The agent's pointer
+
+    /// Flies the buddy to `p` (global top-left points) as the agent's own
+    /// pointer, and returns once it's there. The user's cursor doesn't move.
+    func agentMove(toTopLeft p: CGPoint) async {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let target = CGPoint(x: p.x, y: primaryHeight - p.y)
+        agentDriving = true
+        targets.removeAll()
+        isPointing = false
+        state.pointLabel = nil
+        wake()
+        let distance = hypot(target.x - anchor.x, target.y - anchor.y)
+        guard distance > 1.5 else { return }
+        let duration = min(0.6, 0.16 + Double(distance) / 3400)
+        fly(to: target, duration: duration)
+        try? await Task.sleep(for: .seconds(duration + 0.02))
+    }
+
+    /// A ring at the tip where the agent clicked.
+    func agentClicked() {
+        let at = Date()
+        state.clickAt = at
+        wake()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(0.7))
+            if self?.state.clickAt == at { self?.state.clickAt = nil }
+        }
+    }
+
+    /// The agent is done with its pointer: back to the user's cursor.
+    func agentRelease() {
+        guard agentDriving else { return }
+        agentDriving = false
+        if link != nil, flight == nil, targets.isEmpty { fly(to: followPoint(), duration: 0.45) }
+    }
+
     /// Brings the buddy back (or keeps it) and restarts the idle countdown.
     private func wake() {
         guard enabled else { return }
@@ -124,6 +176,8 @@ final class OverlayController: NSObject {
         lastFrame = 0
         let p = followPoint()
         anchor = p
+        lastAnchor = p
+        velocity = .zero
         followX = Spring(p.x)
         followY = Spring(p.y)
         place()
@@ -154,19 +208,22 @@ final class OverlayController: NSObject {
         } else if isPointing, now >= holdUntil {
             isPointing = false
             state.pointLabel = nil
-            fly(to: followPoint(), duration: 0.35)
+            if !agentDriving { fly(to: followPoint(), duration: 0.35) }
+        } else if agentDriving {
+            // Stay where the agent left its pointer.
         } else if !isPointing {
             let p = followPoint()
             followX.step(to: p.x, dt: dt, omega: 38)
             followY.step(to: p.y, dt: dt, omega: 38)
             anchor = CGPoint(x: followX.x, y: followY.x)
         }
-        if flight != nil || isPointing {
+        if flight != nil || isPointing || agentDriving {
             followX = Spring(anchor.x)
             followY = Spring(anchor.y)
         }
+        trackMotion(dt: dt)
 
-        let busy = state.mode != .idle || state.notice != nil || isPointing || flight != nil || !targets.isEmpty
+        let busy = state.mode != .idle || state.notice != nil || isPointing || flight != nil || !targets.isEmpty || agentDriving
         if busy { lastActive = now }
         let visible = !state.backgroundWork && (!autoHide || now - lastActive < Self.idleHide)
         // Quick to appear, slow to leave.
@@ -182,6 +239,22 @@ final class OverlayController: NSObject {
         place()
     }
 
+    /// Measures how fast the buddy moves and publishes it (sparingly) for
+    /// the motion blur.
+    private func trackMotion(dt: CGFloat) {
+        let raw = CGVector(dx: (anchor.x - lastAnchor.x) / dt, dy: (anchor.y - lastAnchor.y) / dt)
+        lastAnchor = anchor
+        velocity = CGVector(dx: velocity.dx * 0.55 + raw.dx * 0.45, dy: velocity.dy * 0.55 + raw.dy * 0.45)
+        let view = CGVector(dx: velocity.dx, dy: -velocity.dy)
+        let speed = hypot(view.dx, view.dy)
+        let shown = state.motion
+        if speed < 140 {
+            if shown != .zero { state.motion = .zero }
+        } else if hypot(view.dx - shown.dx, view.dy - shown.dy) > 45 {
+            state.motion = view
+        }
+    }
+
     private func fly(to target: CGPoint, duration: CFTimeInterval) {
         flight = Flight(from: anchor, to: target, start: CACurrentMediaTime(), duration: duration)
     }
@@ -195,10 +268,11 @@ final class OverlayController: NSObject {
     private func place() {
         let screen = NSScreen.screens.first { $0.frame.insetBy(dx: -1, dy: -1).contains(anchor) } ?? NSScreen.main
         let visible = screen?.visibleFrame ?? .zero
-        let flipped = anchor.x + Self.size.width > visible.maxX
+        let flipped = anchor.x + Self.content.width > visible.maxX
         if state.flipped != flipped { state.flipped = flipped }
-        let x = flipped ? anchor.x - Self.size.width + Self.tipInset : anchor.x - Self.tipInset
-        let y = anchor.y - Self.size.height + Self.tipInset
+        let inset = Self.tipInset + Self.margin
+        let x = flipped ? anchor.x + inset - Self.size.width : anchor.x - inset
+        let y = anchor.y + inset - Self.size.height
         let origin = CGPoint(x: x.rounded(), y: y.rounded())
         if panel.frame.origin != origin { panel.setFrameOrigin(origin) }
     }
@@ -230,6 +304,34 @@ let pilotRainbow: [Color] = [
     Color(red: 0.35, green: 0.88, blue: 1.0),
 ]
 
+/// Colours for the buddy (Settings › On screen › Buddy colour); the rainbow
+/// matches the screen glow.
+enum BuddyTint: String, CaseIterable, Identifiable {
+    case rainbow, ocean, violet, rose, sunset, mint, graphite
+
+    var id: String { rawValue }
+    var name: String { rawValue.capitalized }
+
+    /// Looping: the last colour is the first, for angular gradients.
+    var colors: [Color] {
+        func rgb(_ r: Double, _ g: Double, _ b: Double) -> Color { Color(red: r, green: g, blue: b) }
+        let c: [Color] = switch self {
+        case .rainbow: Array(pilotRainbow.dropLast())
+        case .ocean: [rgb(0.35, 0.88, 1), rgb(0.25, 0.55, 1), rgb(0.3, 0.35, 0.95)]
+        case .violet: [rgb(0.78, 0.6, 1), rgb(0.55, 0.38, 1), rgb(0.88, 0.4, 0.95)]
+        case .rose: [rgb(1, 0.55, 0.75), rgb(1, 0.4, 0.55), rgb(1, 0.62, 0.5)]
+        case .sunset: [rgb(1, 0.72, 0.3), rgb(1, 0.48, 0.38), rgb(1, 0.86, 0.4)]
+        case .mint: [rgb(0.45, 0.95, 0.75), rgb(0.25, 0.8, 0.6), rgb(0.35, 0.85, 0.95)]
+        case .graphite: [rgb(0.92, 0.92, 0.95), rgb(0.55, 0.57, 0.62), rgb(0.75, 0.76, 0.8)]
+        }
+        return c + [c[0]]
+    }
+
+    static var current: BuddyTint {
+        UserDefaults.standard.string(forKey: "buddyTint").flatMap(BuddyTint.init(rawValue:)) ?? .rainbow
+    }
+}
+
 struct OverlayView: View {
     @ObservedObject var state: OverlayState
 
@@ -237,19 +339,30 @@ struct OverlayView: View {
         HStack(alignment: .top, spacing: 6) {
             if state.flipped {
                 bubble
-                PilotArrow(flipped: true, active: state.mode != .idle)
+                buddy
             } else {
-                PilotArrow(flipped: false, active: state.mode != .idle)
+                buddy
                 bubble
             }
         }
         .padding(8)
-        .frame(width: OverlayController.size.width, height: OverlayController.size.height,
+        .frame(width: OverlayController.content.width, height: OverlayController.content.height,
                alignment: state.flipped ? .topTrailing : .topLeading)
+        .padding(OverlayController.margin)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: state.mode)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: state.pointLabel)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: state.notice)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: state.activity)
+    }
+
+    /// The arrow with its motion trail behind it and the click ring at its tip.
+    private var buddy: some View {
+        ZStack(alignment: state.flipped ? .topTrailing : .topLeading) {
+            MotionTrail(motion: state.motion, flipped: state.flipped)
+            PilotArrow(flipped: state.flipped, active: state.mode != .idle)
+            ClickRing(at: state.clickAt)
+        }
+        .frame(width: 20, height: 23, alignment: state.flipped ? .topTrailing : .topLeading)
     }
 
     @ViewBuilder private var bubble: some View {
@@ -373,11 +486,14 @@ struct ShimmerText: View {
 struct PilotArrow: View {
     var flipped: Bool
     var active: Bool = false
+    /// Overrides the colour from Settings (previews).
+    var tint: BuddyTint?
+    @AppStorage("buddyTint") private var savedTint = BuddyTint.rainbow
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1 / 60, paused: !active)) { tl in
             let spin = active ? tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 3) / 3 * 360 : 200
-            let rim = AngularGradient(colors: pilotRainbow, center: .center, angle: .degrees(spin))
+            let rim = AngularGradient(colors: (tint ?? savedTint).colors, center: .center, angle: .degrees(spin))
             ZStack {
                 // Frosted body: what's behind, blurred, under a milky tint.
                 ArrowShape().fill(.ultraThinMaterial)
@@ -399,6 +515,61 @@ struct PilotArrow: View {
         }
         .scaleEffect(x: flipped ? -1 : 1, y: 1)
         .animation(.easeInOut(duration: 0.3), value: active)
+    }
+}
+
+/// Motion blur for the buddy: fading, softening copies of the arrow along
+/// the way it came, the faster it moves the longer.
+struct MotionTrail: View {
+    var motion: CGVector
+    var flipped: Bool
+    var tint: BuddyTint?
+    @AppStorage("buddyTint") private var savedTint = BuddyTint.rainbow
+
+    var body: some View {
+        let speed = hypot(motion.dx, motion.dy)
+        // 0 at a stroll, 1 when it flies across the screen.
+        let strength = min(1, max(0, (speed - 140) / 2600))
+        ZStack {
+            if strength > 0 {
+                ForEach(1...14, id: \.self) { i in
+                    let k = Double(i) / 14
+                    // About 30 ms of travel behind the arrow.
+                    ArrowShape()
+                        .fill(LinearGradient(colors: (tint ?? savedTint).colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 20, height: 23)
+                        .scaleEffect(x: flipped ? -1 : 1, y: 1)
+                        .offset(x: -motion.dx * 0.03 * k, y: -motion.dy * 0.03 * k)
+                        .opacity(strength * 0.26 * (1 - k * 0.85))
+                        .blur(radius: 0.8 + 3.2 * k * strength)
+                }
+            }
+        }
+        .frame(width: 20, height: 23)
+        .animation(.easeOut(duration: 0.12), value: strength > 0)
+        .allowsHitTesting(false)
+    }
+}
+
+/// A rainbow ring that pops out from the tip when the agent clicks.
+struct ClickRing: View {
+    var at: Date?
+    var tint: BuddyTint?
+    @AppStorage("buddyTint") private var savedTint = BuddyTint.rainbow
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 120, paused: at == nil)) { tl in
+            let t = at.map { min(1, tl.date.timeIntervalSince($0) / 0.5) } ?? 1
+            let eased = 1 - pow(1 - t, 3)
+            let r = 5 + 21 * eased
+            Circle()
+                .strokeBorder(AngularGradient(colors: (tint ?? savedTint).colors, center: .center), lineWidth: 0.6 + 2.6 * (1 - t))
+                .frame(width: r * 2, height: r * 2)
+                .opacity(t < 1 ? 1 - t * t : 0)
+                .offset(x: -r + 1, y: -r + 1)
+        }
+        .frame(width: 0, height: 0, alignment: .topLeading)
+        .allowsHitTesting(false)
     }
 }
 
@@ -426,5 +597,14 @@ struct ArrowShape: Shape {
         }
         p.closeSubpath()
         return p
+    }
+}
+
+extension NSWindow {
+    /// Cursor Pilot's floating windows (buddy, notch, glow) leave screenshots
+    /// and screen recordings when Settings says so. Ink stays: it's yours,
+    /// and Claude has to see it.
+    func applyRecordingVisibility() {
+        sharingType = UserDefaults.standard.bool(forKey: "hideFromRecordings") ? .none : .readOnly
     }
 }

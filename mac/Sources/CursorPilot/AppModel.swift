@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
     /// Bumped whenever a saved transcript may have changed.
     @Published private(set) var historyRevision = 0
     @Published private(set) var drawings: [DrawingRecord] = []
+    /// What Claude remembers about the user (Settings › Memory).
+    @Published private(set) var memory: [MemoryFact] = []
     /// The conversation open in Home, cached so typing and streaming never
     /// re-read it from disk.
     @Published private(set) var openTranscript: Transcript?
@@ -29,7 +31,10 @@ final class AppModel: ObservableObject {
     // Settings
     @Published var apiKey: String {
         didSet {
-            if !isLoadingKey { Keychain.saveAPIKey(apiKey) }
+            if !isLoadingKey {
+                let key = apiKey
+                Task.detached { Keychain.saveAPIKey(key) }
+            }
             configureCore()
         }
     }
@@ -40,6 +45,15 @@ final class AppModel: ObservableObject {
     @Published var showBuddy: Bool { didSet { defaults.set(showBuddy, forKey: "showBuddy"); applyBuddyVisibility() } }
     @Published var showNotch: Bool { didSet { defaults.set(showNotch, forKey: "showNotch"); applyNotchVisibility() } }
     @Published var showGlow: Bool { didSet { defaults.set(showGlow, forKey: "showGlow"); glow.enabled = showGlow } }
+    @Published var hideFromRecordings: Bool {
+        didSet {
+            defaults.set(hideFromRecordings, forKey: "hideFromRecordings")
+            for w in NSApp.windows where w is NSPanel && !(w is InkPanel) { w.applyRecordingVisibility() }
+        }
+    }
+    @Published var doubleTapToType: Bool {
+        didSet { defaults.set(doubleTapToType, forKey: "doubleTapToType"); applyDoubleTap() }
+    }
     @Published var hideBuddyWhenIdle: Bool {
         didSet { defaults.set(hideBuddyWhenIdle, forKey: "hideBuddyWhenIdle"); overlay.autoHide = hideBuddyWhenIdle }
     }
@@ -51,7 +65,8 @@ final class AppModel: ObservableObject {
     }
     /// The language actually listened for (the choice, or the best match
     /// for the user's languages).
-    @Published private(set) var resolvedListenLocale = Locale(identifier: "en-US")
+    /// The languages "Automatic" listens for, at once.
+    @Published private(set) var resolvedListenLocales = [Locale(identifier: "en-US")]
     /// Spoken-reply voice identifier; empty picks the best installed voice.
     @Published var voiceID: String { didSet { defaults.set(voiceID, forKey: "voiceID"); applyVoice() } }
     @Published var speechRate: Double { didSet { defaults.set(speechRate, forKey: "speechRate"); applyVoice() } }
@@ -94,6 +109,7 @@ final class AppModel: ObservableObject {
     private let defaults = UserDefaults.standard
     private var hotKey: HotKey?
     private let modifierHold = ModifierHold()
+    private let doubleTap = DoubleTapControl()
     /// Screen Recording is requested once per launch; after that a missing
     /// permission is explained instead of prompting on every question.
     private var askedForScreen = false
@@ -118,6 +134,8 @@ final class AppModel: ObservableObject {
         showBuddy = defaults.object(forKey: "showBuddy") as? Bool ?? true
         showNotch = defaults.object(forKey: "showNotch") as? Bool ?? true
         showGlow = defaults.object(forKey: "showGlow") as? Bool ?? true
+        hideFromRecordings = defaults.bool(forKey: "hideFromRecordings")
+        doubleTapToType = defaults.object(forKey: "doubleTapToType") as? Bool ?? true
         hideBuddyWhenIdle = defaults.object(forKey: "hideBuddyWhenIdle") as? Bool ?? true
         talkKey = defaults.string(forKey: "talkKey").flatMap(TalkKey.init(rawValue:)) ?? .controlOption
         listenLocale = defaults.string(forKey: "listenLocale") ?? ""
@@ -141,6 +159,8 @@ final class AppModel: ObservableObject {
         glow.enabled = showGlow
         overlay.autoHide = hideBuddyWhenIdle
         applyVoice()
+        doubleTap.onDoubleTap = { [weak self] in self?.openTyping() }
+        applyDoubleTap()
         modifierHold.onPress = { [weak self] in self?.beginListening() }
         modifierHold.onRelease = { [weak self] in Task { await self?.endListening() } }
         modifierHold.onCancel = { [weak self] in self?.cancelListening() }
@@ -178,10 +198,10 @@ final class AppModel: ObservableObject {
 
     private func refreshVoiceLanguage() {
         Task {
-            let locale = await VoiceInput.resolvedLocale(listenLocale)
-            resolvedListenLocale = locale
-            speaker.fallbackLanguage = locale.language.languageCode?.identifier ?? "en"
-            await voice.prepare(locale: locale)
+            let locales = await VoiceInput.resolvedLocales(listenLocale)
+            resolvedListenLocales = locales
+            speaker.fallbackLanguage = voice.lastLanguage ?? locales.first?.language.languageCode?.identifier ?? "en"
+            await voice.prepare(locales: locales)
         }
     }
 
@@ -207,6 +227,19 @@ final class AppModel: ObservableObject {
         if showNotch { notch?.show() } else { notch?.hide() }
     }
 
+    private func applyDoubleTap() {
+        if doubleTapToType { doubleTap.start() } else { doubleTap.stop() }
+    }
+
+    /// Double-tap Control: type a question instead of saying it.
+    func openTyping() {
+        if showNotch, let notch {
+            notch.openForTyping()
+        } else {
+            HomeWindow.shared.show()
+        }
+    }
+
     private func configureCore() {
         core.configure(CoreSettings(apiKey: apiKey, model: model, effort: effort, access: macAccess ? "on" : "off"))
     }
@@ -222,8 +255,16 @@ final class AppModel: ObservableObject {
 
     // MARK: Voice flow
 
+    /// Screens captured the moment the talk key went down, so the question
+    /// leaves the instant you let go instead of waiting for a capture.
+    private var precapture: (task: Task<[ScreenShotPayload], Never>, at: Date)?
+
     func beginListening() {
         interrupt()
+        core.warm()
+        if ScreenCapture.hasPermission, !ink.hasStrokes {
+            precapture = (Task { (try? await ScreenCapture.captureAll(includingWindows: [])) ?? [] }, Date())
+        }
         Task {
             guard await VoiceInput.requestPermissions() else {
                 showError("Cursor Pilot needs Microphone and Speech Recognition access. Turn them on in System Settings › Privacy & Security.")
@@ -231,8 +272,9 @@ final class AppModel: ObservableObject {
             }
             do {
                 heardText = ""
-                try voice.start(locale: resolvedListenLocale)
+                try voice.start(locales: resolvedListenLocales)
                 setPhase(.listening)
+                Sounds.play(.listen)
             } catch {
                 showError(error.localizedDescription)
             }
@@ -258,6 +300,7 @@ final class AppModel: ObservableObject {
     func endListening() async {
         guard phase == .listening else { return }
         let text = await voice.stop()
+        if let language = voice.lastLanguage { speaker.fallbackLanguage = language }
         guard !text.isEmpty else {
             setPhase(.idle)
             return
@@ -274,6 +317,7 @@ final class AppModel: ObservableObject {
             showError("Add your Anthropic API key in Cursor Pilot's Settings first.")
             return
         }
+        Sounds.play(.send)
         heardText = text
         replyText = ""
         lastError = nil
@@ -291,8 +335,15 @@ final class AppModel: ObservableObject {
         }
 
         var screens: [ScreenShotPayload] = []
+        let early = precapture
+        precapture = nil
         if includeScreen {
-            if ScreenCapture.hasPermission {
+            if !sketch, let early, Date().timeIntervalSince(early.at) < 25 {
+                screens = await early.task.value
+            }
+            if !screens.isEmpty {
+                // Captured when you pressed the talk key.
+            } else if ScreenCapture.hasPermission {
                 do {
                     screens = try await ScreenCapture.captureAll(includingWindows: sketch ? ink.windowNumbers : [])
                 } catch {
@@ -336,10 +387,11 @@ final class AppModel: ObservableObject {
             case "start":
                 liveSteps.append(step)
                 overlay.state.activity = step.summary
-                // Only mouse and keyboard work shows next to the cursor.
-                backgroundWork = step.kind != "computer"
+                // Only work in apps shows next to the cursor, as the agent's
+                // own pointer; shell, file and web work stays out of sight.
+                backgroundWork = step.kind != "computer" && step.kind != "app"
             default:
-                if let i = liveSteps.lastIndex(where: { $0.phase == "start" && $0.summary == step.summary }) {
+                if let i = liveSteps.lastIndex(where: { $0.phase == "start" && ($0.callID.isEmpty ? $0.summary == step.summary : $0.callID == step.callID) }) {
                     liveSteps[i] = step
                 } else {
                     liveSteps.append(step)
@@ -352,10 +404,13 @@ final class AppModel: ObservableObject {
         case .error(let kind, let message):
             if kind != "cancelled" { showError(message) }
         case .finished:
+            ComputerControl.shared.endTask()
+            if lastError == nil, !liveSteps.isEmpty { Sounds.play(.done) }
             requestFinished = true
             activeRequest = nil
             refreshConversations()
             reloadOpenTranscript()
+            refreshMemory()
             settleIfDone()
             if ink.hasStrokes { ink.fadeStrokes(after: 20) }
         }
@@ -377,6 +432,7 @@ final class AppModel: ObservableObject {
     func interrupt() {
         resetTask?.cancel()
         if let id = activeRequest { core.cancel(id) }
+        ComputerControl.shared.endTask()
         overlay.state.activity = nil
         activeRequest = nil
         speaker.stop()
@@ -427,6 +483,16 @@ final class AppModel: ObservableObject {
     func deleteDrawing(_ id: String) {
         core.deleteDrawing(id: id)
         refreshDrawings()
+    }
+
+    func refreshMemory() {
+        memory = core.memory()
+    }
+
+    /// Forgets one fact, or everything when `id` is nil.
+    func forgetMemory(_ id: String?) {
+        core.forgetMemory(id: id)
+        refreshMemory()
     }
 
     /// Reads a message aloud on request (the speaker button in Home).
@@ -480,6 +546,7 @@ final class AppModel: ObservableObject {
     }
 
     private func showError(_ message: String) {
+        Sounds.play(.error)
         lastError = message
         phase = .answering
         requestFinished = true

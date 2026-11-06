@@ -4,7 +4,8 @@ A small helper that lives next to your mouse cursor on macOS. Hold **⌃⌥** (C
 ask a question out loud, and Cursor Pilot looks at your screens, answers in a
 spoken voice, and flies over to point at the thing you need. Give it access
 and it works on your Mac like a co-worker: runs shell commands, edits files,
-and clicks and types in apps, asking first when you want it to.
+and works in your apps with its own pointer, in the background, while your
+mouse and keyboard stay yours.
 
 Native Swift/SwiftUI app on top of a Rust core. Talks to Claude with your own
 Anthropic API key.
@@ -16,7 +17,8 @@ cursor-pilot/
 ├── core/                 Rust: everything that is not UI
 │   ├── src/claude.rs        streaming Messages API client (raw HTTP + SSE)
 │   ├── src/engine.rs        one request: prompt, screenshots, the agent loop, reply routing
-│   ├── src/agent.rs         tools: persistent shell, file editor, risk rules, approvals
+│   ├── src/agent.rs         tools: persistent shell, file editor, app control; the agent prompt
+│   ├── src/memory.rs        facts Claude remembers about you between chats
 │   ├── src/markup.rs        pulls <point/circle/arrow/box …/> tags out of the reply
 │   ├── src/drawings.rs      saved drawings (PNG + JSON)
 │   ├── src/speech.rs        splits the reply into sentences to speak early
@@ -27,11 +29,15 @@ cursor-pilot/
 │   └── Sources/CursorPilot/
 │       ├── AppModel.swift       hotkey → voice → screenshots → core → speech/overlay
 │       ├── Overlay.swift        click-through buddy panel that follows the cursor
-│       ├── VoiceInput.swift     push-to-talk speech recognition (SpeechAnalyzer on macOS 26)
+│       ├── VoiceInput.swift     push-to-talk speech recognition, two languages at once
 │       ├── ScreenCapture.swift  ScreenCaptureKit, every display, downscaled JPEG
 │       ├── Speaker.swift        spoken replies, best installed voice per sentence language
-│       ├── Agent.swift          approval panel, mouse/keyboard/screenshot actions for Claude
-│       ├── HotKey.swift         Carbon hot key, no Accessibility permission needed
+│       ├── Agent.swift          screenshots and the computer tool's clicks, typing and keys
+│       ├── Pointer.swift        background input and the app_control tool (Accessibility)
+│       ├── Keychain.swift       API key in the login keychain, prompt-free across rebuilds
+│       ├── Sounds.swift         quiet system sounds for listen, send, done, error
+│       ├── TestHooks.swift      launch flags that test actions and speech without a person
+│       ├── HotKey.swift         Carbon hot key, hold ⌃⌥, double-tap ⌃
 │       ├── Shortcut.swift       user-chosen shortcut + recorder
 │       ├── Notch.swift          panel that drops out of the notch
 │       ├── Onboarding.swift     first-run setup
@@ -73,16 +79,39 @@ until you turn it on. Tools, all run by the app on your Mac:
   carry over), 3-minute timeout per command, stopped when you interrupt.
 - **str_replace_based_edit_tool**: view, create and edit files; every edit
   keeps a backup under the app's data folder in `backups/`.
+- **app_control** (ours): works with apps by name through Accessibility, in
+  the background: list apps, open them without bringing them forward, list
+  a window's controls, press buttons, fill in fields, read text, choose menu
+  items. A control can be named directly (`press`, app `Calculator`,
+  find `7`), so most steps need no screenshot at all.
 - **computer** (`computer_toolset_20260801` on the 5.5 models): screenshots,
-  clicks, typing, keys, scrolling and drags through CGEvent. Needs
-  Accessibility. Cursor Pilot hides its own windows while it works.
+  clicks, typing, keys, scrolling and drags. Needs Accessibility.
+- **memory** (ours, also without Mac access): remembers short facts about you
+  between chats.
 - **web_search** on the models that support it.
 
+The agent has its own pointer: the buddy flies to where it clicks (with
+motion blur when it moves fast and a ring when it clicks), and the click
+goes to the app under it without moving your pointer. Cursor Pilot first
+presses, focuses or selects the control there through Accessibility; if
+there is none it posts the click to that app's process. Typing goes to the
+app it last clicked in, as text inserted through Accessibility or as key
+events sent to that app, so you can keep typing elsewhere. A few apps only
+react to the real pointer: when a click at the same spot is repeated, and for
+drags, Cursor Pilot moves your pointer there for a split second and puts it
+back (Settings › Working on your Mac turns that off).
+
 Shell, file and web work happens out of sight: the buddy hides and the menu
-bar and notch show a terminal. The buddy comes back next to the cursor only
-when Claude uses the mouse and keyboard. In Home the current step shows
-under the typing bubble, and a folded "n steps" line stays under the reply.
-Up to 60 tool rounds per request.
+bar and notch show a terminal. The buddy comes back only for work in apps.
+In Home the current step shows under the typing bubble, and a folded
+"n steps" line stays under the reply. Up to 60 tool rounds per request.
+
+### Memory
+
+When you tell Cursor Pilot something worth keeping ("I'm on a German
+keyboard", "keep answers short") or say "remember that…", it saves one short
+fact to `memory.json` in its data folder and gets those facts in every later
+chat. Settings › Memory lists them; remove one or forget everything there.
 
 Home's chat reads like a text thread: your messages on the right, Cursor
 Pilot's short replies on the left, one bubble per thought.
@@ -107,13 +136,14 @@ builds then update it in place:
 ```bash
 sudo ditto ~/Applications/"Cursor Pilot.app" "/Applications/Cursor Pilot.app"
 sudo chown -R "$USER" "/Applications/Cursor Pilot.app"
-``` Put build output elsewhere with
-`BUILD_ROOT=/some/folder`.
+```
+
+Put build output elsewhere with `BUILD_ROOT=/some/folder`.
 
 Signing uses `CODESIGN_IDENTITY`, else your first Apple Development or
 Developer ID identity, else a local "Cursor Pilot Development" identity.
 Without any of them it signs ad hoc, and macOS asks for Microphone, Speech,
-Screen Recording and keychain access again after every rebuild. To stop
+Screen Recording and Accessibility again after every rebuild. To stop
 that, run this once (it adds a self-signed code-signing certificate to your
 login keychain; no admin password, no trust changes):
 
@@ -134,15 +164,29 @@ Debug launch flags, for design work:
 | `-CPRenderArrowPreview file.png` | renders the buddy arrow large and at real size to a PNG, then quits |
 | `-CPRenderInkPreview file.png` | renders sample ink marks and the sketch toolbar to a PNG, then quits |
 | `-CPRenderGlowPreview file.png` | renders the screen glow (listening, thinking, sketching) to `file-<mode>.png`, then quits |
+| `-CPRenderTrailPreview file.png` | renders the buddy still and moving ever faster, plus its click ring, in every colour, then quits |
+| `-CPRunActions steps.json` | runs agent actions (`apps`, `computer`, `wait` steps) like the agent would, writes what each returned to `-CPOut` (default `steps.json.out.json`), then quits |
+| `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, writes what each heard to `-CPOut`, then quits |
+
+Test flags run best in a second copy, so the one you use keeps running:
+
+```bash
+open -n "/Applications/Cursor Pilot.app" --args -CPRunActions ~/steps.json
+```
 
 ```bash
 open "build/Cursor Pilot.app" --args -CPShaderGallery YES
 ```
 
 With ad-hoc signing every rebuild is a new app to macOS, so it asks again
-for keychain access and privacy permissions. A free Apple Development
-certificate (Xcode › Settings › Accounts › Manage Certificates) gives builds
-a stable identity; the build script uses it automatically.
+for privacy permissions. A free Apple Development certificate (Xcode ›
+Settings › Accounts › Manage Certificates) gives builds a stable identity;
+the build script uses it automatically.
+
+The API key is saved in the login keychain through `/usr/bin/security`,
+which owns the item, so the keychain never asks to allow access, not even
+after a rebuild. (Keys saved by older builds move over once, with one last
+prompt.)
 
 Rust tests and a command-line check of the core:
 
@@ -157,7 +201,7 @@ ANTHROPIC_API_KEY=sk-ant-… cargo run --example ask -- "Why is the sky blue?"
 |---|---|
 | Microphone, Speech Recognition | push-to-talk questions |
 | Screen Recording | screenshots sent with each question |
-| Accessibility | only for clicking and typing once you let Cursor Pilot work on your Mac |
+| Accessibility | only for working in apps (pressing controls, clicking, typing) once you let Cursor Pilot work on your Mac |
 
 If a permission is switched on but Cursor Pilot still can't use it, the
 entry was made by an older build signed another way (for example ad hoc,
@@ -172,10 +216,16 @@ and the buddy only reads the mouse position.
 
 ## Voice
 
-- Speech recognition uses Apple's SpeechAnalyzer model on macOS 26 (fast,
-  on-device, punctuated), falling back to SFSpeechRecognizer for languages it
-  does not cover. With the language on Automatic, Cursor Pilot listens in the
-  first of your preferred languages the new model supports.
+- Speech recognition uses Apple's on-device SpeechAnalyzer models on macOS 26
+  (SpeechTranscriber, or DictationTranscriber for languages only it covers,
+  such as Norwegian), falling back to SFSpeechRecognizer. With the language on
+  Automatic, Cursor Pilot listens for the first two languages in your Mac's
+  language list at once, say Norwegian and English: both recognizers hear the
+  same audio and the transcript its recognizer was surest of wins. Live text
+  shows the language you spoke last.
+- Double-tap **⌃** to type a question in the notch instead of saying it.
+- Quiet system sounds mark listening, sending, a finished task and errors
+  (Settings › On screen › Sound effects).
 - Replies are read per sentence in that sentence's language, with the best
   installed voice: Premium, then Enhanced, then the system voice, never the
   novelty or Eloquence voices. For a natural voice, download a Premium one in
@@ -224,6 +274,12 @@ Done:
 - **Agent**: shell, file editing, computer use and web search after a
   one-time consent, with no prompts; the buddy only shows for mouse and
   keyboard work; texting-style chat; better speech recognition and voices.
+- **Own pointer**: the agent clicks, types and scrolls in apps in the
+  background without taking your mouse or keyboard; app_control works with
+  apps by name; motion blur and click rings on the buddy; memory between
+  chats; Norwegian and English recognised automatically; double-tap ⌃ to
+  type; buddy colours; sound effects; an option to keep Cursor Pilot out of
+  screenshots and recordings; no keychain prompts after rebuilds.
 
 Next phases:
 

@@ -94,6 +94,7 @@ private final class GlowStage: NSObject {
         panel.ignoresMouseEvents = true
         panel.canHide = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.applyRecordingVisibility()
         panel.isReleasedWhenClosed = false
         glow.autoresizingMask = [.width, .height]
         panel.contentView = glow

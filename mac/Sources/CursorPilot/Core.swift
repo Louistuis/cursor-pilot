@@ -70,8 +70,10 @@ enum CoreEvent {
 
 struct AgentStep: Identifiable, Equatable {
     let id = UUID()
+    /// The tool call this step belongs to, so its end replaces its start.
+    var callID = ""
     var phase: String
-    /// "shell", "file", "computer" or "web".
+    /// "shell", "file", "computer", "app" or "web".
     var kind: String
     var summary: String
     var ok: Bool
@@ -81,6 +83,8 @@ struct AgentStep: Identifiable, Equatable {
         case "shell": "terminal"
         case "file": "doc.text"
         case "computer": "cursorarrow.click.2"
+        case "app": "macwindow"
+        case "memory": "brain"
         case "web": "globe"
         default: "sparkles"
         }
@@ -88,11 +92,22 @@ struct AgentStep: Identifiable, Equatable {
 
     /// The icon for a saved step, from its wording.
     static func icon(forSummary s: String) -> String {
+        let app = ["Pressed", "Chose", "Opened", "Looked", "Filled", "Brought", "Checked", "Focused", "Selected",
+                   "Used", "Read text"]
+        if app.contains(where: s.hasPrefix) { return "macwindow" }
         if s.hasPrefix("Ran") || s.hasPrefix("Restarted") { return "terminal" }
         if s.hasPrefix("Read") || s.hasPrefix("Wrote") || s.hasPrefix("Edited") { return "doc.text" }
         if s.hasPrefix("Searched") { return "globe" }
+        if s.hasPrefix("Remembered") || s.hasPrefix("Forgot") { return "brain" }
         return "cursorarrow.click.2"
     }
+}
+
+/// Something Claude remembers about the user between chats.
+struct MemoryFact: Decodable, Identifiable, Hashable {
+    var id: String
+    var text: String
+    var date: String
 }
 
 struct ConversationSummary: Decodable, Identifiable, Hashable {
@@ -204,6 +219,23 @@ final class Core: @unchecked Sendable {
         id.withCString { cp_core_delete_drawing(handle, $0) }
     }
 
+    /// Opens the connection to Claude ahead of a question.
+    func warm() { cp_core_warm(handle) }
+
+    /// What Claude remembers about the user, oldest first.
+    func memory() -> [MemoryFact] {
+        (try? JSONDecoder().decode([MemoryFact].self, from: take(cp_core_list_memory(handle)))) ?? []
+    }
+
+    /// Forgets one fact, or everything when `id` is nil.
+    func forgetMemory(id: String?) {
+        if let id {
+            id.withCString { cp_core_forget_memory(handle, $0) }
+        } else {
+            cp_core_forget_memory(handle, nil)
+        }
+    }
+
     private func take(_ p: UnsafeMutablePointer<CChar>?) -> Data {
         guard let p else { return Data("null".utf8) }
         defer { cp_string_free(p) }
@@ -256,7 +288,7 @@ private func parseEvent(_ json: String) -> CoreEvent? {
         }
         return .mark(shape, label: str("label"))
     case "tool":
-        return .tool(AgentStep(phase: str("phase"), kind: str("kind"), summary: str("summary"),
+        return .tool(AgentStep(callID: str("id"), phase: str("phase"), kind: str("kind"), summary: str("summary"),
                                ok: obj["ok"] as? Bool ?? true))
     case "done": return .done(text: str("text"))
     case "error": return .error(kind: str("kind"), message: str("message"))

@@ -7,6 +7,8 @@ final class NotchState: ObservableObject {
     @Published var expanded = false
     @Published var draft = ""
     @Published var inputFocused = false
+    /// Bumped to put the cursor in the ask field (double-tap Control).
+    @Published var focusRequest = 0
     @Published var includeScreen = true
     /// Size of the hardware notch, or of a stand-in on screens without one.
     @Published var notchSize = CGSize(width: 200, height: 32)
@@ -56,6 +58,7 @@ final class NotchController {
         panel.isMovable = false
         panel.contentView = NSHostingView(rootView: NotchRootView(model: model, state: state,
                                                                   buddy: model.overlay.state))
+        panel.applyRecordingVisibility()
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.layout() } }
@@ -136,6 +139,14 @@ final class NotchController {
                 hoverStart = nil
             }
         }
+    }
+
+    /// Opens the panel with the cursor in the ask field, to type a question.
+    func openForTyping() {
+        if timer == nil { show() }
+        setExpanded(true)
+        panel.makeKey()
+        state.focusRequest &+= 1
     }
 
     func setExpanded(_ expanded: Bool) {
@@ -269,6 +280,7 @@ private struct NotchExpandedView: View {
         .padding(.bottom, 16)
         .foregroundStyle(.white)
         .onChange(of: focused) { _, f in state.inputFocused = f }
+        .onChange(of: state.focusRequest) { _, _ in focused = true }
     }
 
     /// Sits beside the notch, in the same row.
@@ -331,6 +343,10 @@ private struct NotchExpandedView: View {
                 .font(.system(size: 13))
                 .focused($focused)
                 .onSubmit(send)
+                .onExitCommand {
+                    focused = false
+                    state.draft = ""
+                }
             if model.phase == .idle {
                 iconButton("arrow.up.circle.fill", help: "Send", action: send)
                     .disabled(state.draft.trimmingCharacters(in: .whitespaces).isEmpty)

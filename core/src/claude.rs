@@ -121,6 +121,28 @@ pub fn build_body(settings: &Settings, system: &str, messages: &[Value], tools: 
     body
 }
 
+/// One connection pool for the whole app, so a request (and every round of an
+/// agent task) reuses a warm TLS connection instead of shaking hands again.
+fn http() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(15))
+            .timeout_read(Duration::from_secs(180))
+            .max_idle_connections_per_host(4)
+            .build()
+    })
+}
+
+/// Opens a connection to the API ahead of the first request (the user just
+/// pressed the talk key), so it is ready by the time they finish speaking.
+pub fn warm(base_url: &str) {
+    let url = base_url.trim_end_matches('/').to_string();
+    std::thread::spawn(move || {
+        let _ = http().get(&url).timeout(Duration::from_secs(5)).call();
+    });
+}
+
 pub fn stream(
     settings: &Settings,
     body: &Value,
@@ -130,10 +152,7 @@ pub fn stream(
     if settings.api_key.trim().is_empty() {
         return Err(ApiError::MissingKey);
     }
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(180))
-        .build();
+    let agent = http();
     let url = format!("{}/v1/messages", settings.base_url.trim_end_matches('/'));
     let mut req = agent
         .post(&url)

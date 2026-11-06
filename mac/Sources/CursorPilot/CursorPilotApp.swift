@@ -50,6 +50,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
                 return
             }
+            // `-CPRenderTrailPreview out.png`: the buddy at rest and moving
+            // ever faster, then its click ring, in each colour.
+            if let path = UserDefaults.standard.string(forKey: "CPRenderTrailPreview") {
+                let speeds: [CGVector] = [.zero, CGVector(dx: 600, dy: 250), CGVector(dx: 1500, dy: 600),
+                                          CGVector(dx: 2600, dy: -900)]
+                let view = VStack(alignment: .leading, spacing: 10) {
+                    ForEach(BuddyTint.allCases) { tint in
+                        HStack(spacing: 0) {
+                            ForEach(speeds.indices, id: \.self) { i in
+                                ZStack(alignment: .topLeading) {
+                                    MotionTrail(motion: speeds[i], flipped: false, tint: tint)
+                                    PilotArrow(flipped: false, active: i > 0, tint: tint)
+                                }
+                                .frame(width: 20, height: 23)
+                                .scaleEffect(2.2)
+                                .frame(width: 150, height: 70)
+                            }
+                            ClickRing(at: Date().addingTimeInterval(-0.12), tint: tint)
+                                .scaleEffect(2)
+                                .frame(width: 150, height: 70)
+                        }
+                    }
+                }
+                .padding(30)
+                .background(Color(white: 0.2))
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 2
+                if let image = renderer.cgImage,
+                   let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+                return
+            }
             if let path = UserDefaults.standard.string(forKey: "CPRenderGlowPreview") {
                 let size = CGSize(width: 1512, height: 982)
                 for mode in [GlowController.Mode.listening, .thinking, .sketching] {
@@ -65,6 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let model = AppModel.shared
             model.start()
             Task {
+                if await TestHooks.run() {
+                    NSApp.terminate(nil)
+                    return
+                }
                 await model.loadAPIKey()
                 // The menu bar icon is easy to miss (or hidden by the notch),
                 // so first run walks through setup and a missing key opens Home.

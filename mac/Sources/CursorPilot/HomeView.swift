@@ -85,6 +85,12 @@ struct HomeView: View {
                 pendingDelete = c
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            BrandMark()
+                .frame(height: 46)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) { StatusFooter(model: model).background(.bar) }
         .toolbar {
             ToolbarItem {

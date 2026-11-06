@@ -10,7 +10,17 @@ struct SettingsView: View {
     @State private var voices: [AVSpeechSynthesisVoice] = []
     @State private var languages: [(id: String, name: String)] = []
     @State private var askingAccess = false
+    @AppStorage("borrowPointer") private var borrowPointer = true
+    @AppStorage("soundEffects") private var soundEffects = true
+    @AppStorage("buddyTint") private var buddyTint = BuddyTint.rainbow
     private let refresh = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    /// The languages "Automatic" listens for, as in "Norsk bokmål + English".
+    private var automaticLanguages: String {
+        model.resolvedListenLocales
+            .map { Locale.current.localizedString(forLanguageCode: $0.language.languageCode?.identifier ?? "") ?? $0.identifier }
+            .joined(separator: " + ")
+    }
 
     var body: some View {
         Form {
@@ -51,12 +61,40 @@ struct SettingsView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if model.macAccess {
+                    Toggle("Borrow my pointer when an app ignores background clicks", isOn: $borrowPointer)
+                }
             } header: {
                 Text("Working on your Mac")
             } footer: {
                 if model.macAccess {
-                    Text("Files it edits are backed up first (Show Data Folder › backups). Press Stop or hold ⌃⌥ to interrupt at any time.")
+                    Text("A few apps only react to the real pointer. Then it moves yours for a split second and puts it back. Files it edits are backed up first (Show Data Folder › backups). Press Stop or hold ⌃⌥ to interrupt at any time.")
                 }
+            }
+
+            Section {
+                if model.memory.isEmpty {
+                    Text("Nothing yet. Tell it something worth keeping, like “I like short answers”, or say “remember that…”.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.memory) { fact in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(fact.text)
+                            Spacer()
+                            Button { model.forgetMemory(fact.id) } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.tertiary)
+                            .help("Forget this")
+                        }
+                    }
+                    Button("Forget Everything", role: .destructive) { model.forgetMemory(nil) }
+                }
+            } header: {
+                Text("Memory")
+            } footer: {
+                Text("Short facts Cursor Pilot keeps between chats, saved on this Mac and sent to Claude with each question.")
             }
 
             Section("Talking") {
@@ -67,8 +105,9 @@ struct SettingsView: View {
                 if model.talkKey == .custom {
                     LabeledContent("Shortcut") { ShortcutRecorder(model: model) }
                 }
+                Toggle("Double-tap Control to type a question", isOn: $model.doubleTapToType)
                 Picker("Language you speak", selection: $model.listenLocale) {
-                    Text("Automatic (\(Locale.current.localizedString(forIdentifier: model.resolvedListenLocale.identifier) ?? model.resolvedListenLocale.identifier))").tag("")
+                    Text("Automatic (\(automaticLanguages))").tag("")
                     Divider()
                     ForEach(languages, id: \.id) { Text($0.name).tag($0.id) }
                 }
@@ -120,6 +159,18 @@ struct SettingsView: View {
                     .disabled(!model.showBuddy)
                 Toggle("Notch panel", isOn: $model.showNotch)
                 Toggle("Glowing screen edges while working", isOn: $model.showGlow)
+                Picker("Buddy colour", selection: $buddyTint) {
+                    ForEach(BuddyTint.allCases) { tint in
+                        Label {
+                            Text(tint.name)
+                        } icon: {
+                            Image(nsImage: Self.swatch(tint))
+                        }
+                        .tag(tint)
+                    }
+                }
+                Toggle("Sound effects", isOn: $soundEffects)
+                Toggle("Hide from screenshots and screen recordings", isOn: $model.hideFromRecordings)
             }
 
             Section {
@@ -167,6 +218,7 @@ struct SettingsView: View {
         .frame(maxWidth: 680)
         .frame(maxWidth: .infinity)
         .onAppear {
+            model.refreshMemory()
             permissions = .current()
             if voices.isEmpty { voices = Speaker.availableVoices() }
             if languages.isEmpty { languages = VoiceInput.languages() }
@@ -181,6 +233,17 @@ struct SettingsView: View {
             let now = PermissionStatus.current()
             if now != permissions { permissions = now }
         }
+    }
+
+    /// A small dot in the buddy's colours, for the colour picker's menu.
+    private static func swatch(_ tint: BuddyTint) -> NSImage {
+        let size = NSSize(width: 12, height: 12)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let colors = tint.colors.dropLast().map { NSColor($0) }
+            NSGradient(colors: Array(colors))?.draw(in: NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)), angle: -45)
+            return true
+        }
+        return image
     }
 
     private func saveKey() {
@@ -279,8 +342,8 @@ enum Permissions {
 }
 
 enum AccessInfo {
-    static let consent = "Cursor Pilot will run commands, read and change files, and use your mouse and keyboard to do what you ask, on its own and without asking each time, like a co-worker at your Mac. It tells you what it's doing as it goes. You can turn this off any time in Settings."
-    static let on = "Cursor Pilot works on its own in the background, with no prompts: it runs commands, edits files, scripts apps and, when it has to, uses the mouse and keyboard. It says what it's doing as it goes."
+    static let consent = "Cursor Pilot will run commands, read and change files, and work in your apps with its own pointer to do what you ask, on its own and without asking each time, like a co-worker at your Mac. It tells you what it's doing as it goes. You can turn this off any time in Settings."
+    static let on = "Cursor Pilot works on its own in the background, with no prompts: it runs commands, edits files and works in your apps with its own pointer, so your mouse and keyboard stay yours. It says what it's doing as it goes."
     static let off = "Cursor Pilot answers, points and draws on your screen, but doesn't run anything on your Mac."
 }
 

@@ -21,7 +21,15 @@ final class AgentHost: @unchecked Sendable {
             let name = obj["name"] as? String ?? ""
             let input = obj["input"] as? [String: Any] ?? [:]
             let result = waitOnMain { await ComputerControl.shared.perform(name, input: input) }
-            return encode(["content": result.content, "is_error": result.isError])
+            var reply: [String: Any] = ["content": result.content, "is_error": result.isError]
+            if let summary = result.summary { reply["summary"] = summary }
+            return encode(reply)
+        case "apps":
+            let input = obj["input"] as? [String: Any] ?? [:]
+            let result = waitOnMain { await ComputerControl.shared.appControl(input) }
+            var reply: [String: Any] = ["content": result.content, "is_error": result.isError]
+            if let summary = result.summary { reply["summary"] = summary }
+            return encode(reply)
         default:
             return "{}"
         }
@@ -56,10 +64,11 @@ let coreHostCallback: CPHostCallback = { _, json in
 
 // MARK: - Computer control
 
-/// Carries out the computer toolset's actions on one display: screenshots
-/// through ScreenCaptureKit, mouse and keyboard through CGEvent (which needs
-/// Accessibility permission). Coordinates are pixels of the screenshots it
-/// returns.
+/// Carries out the computer toolset's actions on one display. Screenshots
+/// come from ScreenCaptureKit. The mouse is the agent's own: the buddy flies
+/// to each point and clicks, typing and scrolling go straight to the app
+/// there (`BackgroundInput`), so the user's pointer and keyboard stay theirs.
+/// Coordinates are pixels of the screenshots it returns.
 @MainActor
 final class ComputerControl {
     static let shared = ComputerControl()
@@ -69,14 +78,40 @@ final class ComputerControl {
 
     private var screen: NSScreen?
     private var askedForAccessibility = false
+    /// Where the agent's pointer is, in global points (nil: where the user's is).
+    private var pointer: CGPoint?
+    /// The app the agent last clicked in; typing and keys go there.
+    private var target: BackgroundInput.Target?
+    /// The last click that was posted as events (its effect unknown), so a
+    /// repeat at the same spot can fall back to the real pointer.
+    private var lastPosted: (point: CGPoint, time: Date)?
+    /// Apps that needed the real pointer this task.
+    private var realPointerApps: Set<pid_t> = []
 
     struct Result {
         var content: Any
         var isError: Bool
+        var summary: String?
     }
 
-    /// A new task works on the display the pointer is on.
-    func beginTask() { screen = nil }
+    /// May the agent briefly use the real pointer when an app ignores
+    /// background clicks? (Settings › Working on your Mac.)
+    static var mayBorrowPointer: Bool { UserDefaults.standard.object(forKey: "borrowPointer") as? Bool ?? true }
+
+    /// A new task works on the display the pointer is on, from the user's cursor.
+    func beginTask() {
+        screen = nil
+        pointer = nil
+        target = nil
+        lastPosted = nil
+        realPointerApps = []
+        AppControl.shared.reset()
+    }
+
+    /// The task is over: the buddy goes back to the user's cursor.
+    func endTask() {
+        AppModel.shared.overlay.agentRelease()
+    }
 
     nonisolated static var hasAccessibility: Bool { AXIsProcessTrusted() }
 
@@ -111,6 +146,9 @@ final class ComputerControl {
                        y: top + cy * s.frame.height / size.height)
     }
 
+    /// A global point in the screenshot pixels Claude sees.
+    func imagePoint(_ p: CGPoint) -> CGPoint { toImage(p) }
+
     private func toImage(_ p: CGPoint) -> CGPoint {
         let s = activeScreen()
         let size = imageSize(s)
@@ -131,7 +169,7 @@ final class ComputerControl {
         case "zoom":
             return await zoom(input["region"] as? [Double] ?? [])
         case "cursor_position":
-            let p = toImage(Self.mouseLocation())
+            let p = toImage(pointer ?? Self.mouseLocation())
             return Result(content: "X=\(Int(p.x)), Y=\(Int(p.y))", isError: false)
         case "wait":
             let d = min(max(input["duration"] as? Double ?? 1, 0), 30)
@@ -141,64 +179,205 @@ final class ComputerControl {
             break
         }
 
-        guard Self.hasAccessibility else {
-            if !askedForAccessibility {
-                askedForAccessibility = true
-                Self.requestAccessibility()
-            }
-            return Result(content: "Cursor Pilot needs Accessibility permission to use the mouse and keyboard. Tell the user to allow it in System Settings › Privacy & Security › Accessibility. If Cursor Pilot is already switched on there, that entry belongs to an older build: they should remove it with the minus button, then allow Cursor Pilot again. Then try again.",
-                          isError: true)
-        }
+        guard Self.hasAccessibility else { return accessibilityMissing() }
 
         let point = (input["coordinate"] as? [Double]).flatMap { $0.count == 2 ? toGlobal($0[0], $0[1]) : nil }
         let mods = Self.flags(input["text"] as? String ?? "")
+        let overlay = AppModel.shared.overlay
+        var summary: String?
+        var note = "OK"
         switch name {
         case "mouse_move":
             guard let point else { return fail("mouse_move needs a coordinate.") }
-            Self.move(to: point)
+            await fly(to: point)
+            note = "Moved Cursor Pilot's pointer (the user's pointer didn't move)."
         case "left_click", "right_click", "middle_click", "double_click", "triple_click":
-            let target = point ?? Self.mouseLocation()
-            let button: CGMouseButton = name == "right_click" ? .right : name == "middle_click" ? .center : .left
-            let count = name == "double_click" ? 2 : name == "triple_click" ? 3 : 1
-            Self.move(to: target)
-            try? await Task.sleep(for: .milliseconds(30))
-            await Self.click(at: target, button: button, count: count, flags: mods)
+            let at = point ?? pointer ?? Self.mouseLocation()
+            await fly(to: at)
+            overlay.agentClicked()
+            (note, summary) = await click(name, at: at, flags: mods)
         case "left_click_drag":
             guard let start = (input["start_coordinate"] as? [Double]).flatMap({ $0.count == 2 ? toGlobal($0[0], $0[1]) : nil }),
                   let end = point
             else { return fail("left_click_drag needs start_coordinate and coordinate.") }
-            await Self.drag(from: start, to: end, flags: mods)
-        case "left_mouse_down", "left_mouse_up":
-            let p = Self.mouseLocation()
-            let type: CGEventType = name == "left_mouse_down" ? .leftMouseDown : .leftMouseUp
-            Self.post(CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left))
-        case "scroll":
-            if let point { Self.move(to: point) }
-            let amount = Int32(min(max(input["scroll_amount"] as? Int ?? 3, 1), 30)) * 3
-            let dir = input["scroll_direction"] as? String ?? "down"
-            let dy: Int32 = dir == "up" ? amount : dir == "down" ? -amount : 0
-            let dx: Int32 = dir == "left" ? amount : dir == "right" ? -amount : 0
-            let e = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)
-            e?.flags = mods
-            Self.post(e)
-        case "type":
-            await Self.type(input["text"] as? String ?? "")
-        case "key":
-            let combo = input["text"] as? String ?? ""
-            let times = min(max(input["repeat"] as? Int ?? 1, 1), 100)
-            for _ in 0..<times {
-                guard await Self.press(combo) else { return fail("Unknown key: \(combo)") }
+            await fly(to: start)
+            if let win = BackgroundInput.window(at: start) { target = win }
+            if Self.mayBorrowPointer {
+                // Drags rarely work in the background: borrow the pointer briefly.
+                async let flight: Void = overlay.agentMove(toTopLeft: end)
+                await BackgroundInput.withRealPointer(at: start) { await Self.drag(from: start, to: end, flags: mods) }
+                await flight
+                note = "Dragged using the real pointer for a moment; it is back where the user left it."
+            } else if let win = target {
+                async let flight: Void = overlay.agentMove(toTopLeft: end)
+                await BackgroundInput.postDrag(from: start, to: end, flags: mods, to: win)
+                await flight
+                note = "Dragged in the background. Check with a screenshot; some apps ignore background drags."
             }
-        case "hold_key":
+            pointer = end
+            summary = "Dragged in \(target?.appName ?? "the app")"
+        case "left_mouse_down", "left_mouse_up":
+            // Press-and-hold needs the real button; rare enough to borrow it.
+            let p = pointer ?? Self.mouseLocation()
+            let type: CGEventType = name == "left_mouse_down" ? .leftMouseDown : .leftMouseUp
+            if name == "left_mouse_down" { Self.move(to: p) }
+            Self.post(CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left))
+            note = "Used the real pointer for the mouse button."
+        case "scroll":
+            let at = point ?? pointer ?? Self.mouseLocation()
+            await fly(to: at)
+            let amount = min(max(input["scroll_amount"] as? Int ?? 3, 1), 30)
+            let dir = input["scroll_direction"] as? String ?? "down"
+            let dy = dir == "down" ? amount : dir == "up" ? -amount : 0
+            let dx = dir == "right" ? amount : dir == "left" ? -amount : 0
+            guard let win = BackgroundInput.window(at: at) else { return fail("Nothing to scroll there.") }
+            target = win
+            if !mods.isEmpty || realPointerApps.contains(win.pid) {
+                await BackgroundInput.withRealPointer(at: at) {
+                    let e = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2,
+                                    wheel1: Int32(-dy * 3), wheel2: Int32(-dx * 3), wheel3: 0)
+                    e?.flags = mods
+                    Self.post(e)
+                }
+            } else if !BackgroundInput.scroll(at: at, in: win, dx: dx, dy: dy) {
+                note = "Scrolled in the background with wheel events; check with a screenshot that it moved."
+            }
+            summary = "Scrolled \(dir) in \(win.appName)"
+        case "type":
+            let text = input["text"] as? String ?? ""
+            if let pid = keyboardTarget() {
+                await BackgroundInput.type(text, pid: pid)
+                note = "Typed into \(target?.appName ?? "the app") in the background."
+            } else {
+                await Self.type(text)
+            }
+        case "key", "hold_key":
             let combo = input["text"] as? String ?? ""
-            let d = min(max(input["duration"] as? Double ?? 1, 0), 10)
-            guard await Self.press(combo, hold: d) else { return fail("Unknown key: \(combo)") }
+            let times = name == "key" ? min(max(input["repeat"] as? Int ?? 1, 1), 100) : 1
+            let hold = name == "hold_key" ? min(max(input["duration"] as? Double ?? 1, 0), 10) : 0
+            // System shortcuts (Spotlight, app switching, spaces, screenshots)
+            // belong to macOS, not the app: they need the real keyboard.
+            let pid = Self.isSystemShortcut(combo) ? nil : keyboardTarget()
+            for _ in 0..<times {
+                guard await Self.press(combo, hold: hold, pid: pid) else { return fail("Unknown key: \(combo)") }
+            }
         default:
             return fail("Unknown computer action: \(name)")
         }
-        // Let the app on screen react before the next action or screenshot.
+        // Let the app react before the next action or screenshot.
         try? await Task.sleep(for: .milliseconds(140))
-        return ok()
+        return Result(content: note, isError: false, summary: summary)
+    }
+
+    /// The `app_control` tool, with the buddy flying to what it used.
+    func appControl(_ input: [String: Any]) async -> AppControl.Result {
+        guard Self.hasAccessibility else {
+            let r = accessibilityMissing()
+            return AppControl.Result(content: r.content as? String ?? "", isError: true)
+        }
+        if NSApp.isActive || HomeWindow.shared.isVisible { NSApp.hide(nil) }
+        let result = await AppControl.shared.perform(input)
+        if let p = result.point, NSScreen.screens.contains(where: { $0.frame.insetBy(dx: -2, dy: -2).contains(NSPoint(x: p.x, y: (NSScreen.screens.first?.frame.height ?? 0) - p.y)) }) {
+            await fly(to: p)
+            if !result.isError { AppModel.shared.overlay.agentClicked() }
+            if let win = BackgroundInput.window(at: p) { target = win }
+        }
+        return result
+    }
+
+    private func accessibilityMissing() -> Result {
+        if !askedForAccessibility {
+            askedForAccessibility = true
+            Self.requestAccessibility()
+        }
+        return Result(content: "Cursor Pilot needs Accessibility permission to use the mouse and keyboard. Tell the user to allow it in System Settings › Privacy & Security › Accessibility. If Cursor Pilot is already switched on there, that entry belongs to an older build: they should remove it with the minus button, then allow Cursor Pilot again. Then try again.",
+                      isError: true)
+    }
+
+    /// Moves the agent's pointer (the buddy) to `p`.
+    private func fly(to p: CGPoint) async {
+        if pointer == nil { pointer = Self.mouseLocation() }
+        await AppModel.shared.overlay.agentMove(toTopLeft: p)
+        pointer = p
+    }
+
+    /// Where typing goes: the app the agent works in, in the background.
+    /// Nil when that app is in front anyway (or unknown), so the real
+    /// keyboard is used, which every app understands.
+    private func keyboardTarget() -> pid_t? {
+        guard let pid = target?.pid, pid != NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
+        return pid
+    }
+
+    /// One click by the agent. Background first: an Accessibility action on
+    /// the control, or events sent to the app. A repeat at the same spot
+    /// after posted events (which an app may ignore) borrows the real pointer.
+    private func click(_ name: String, at p: CGPoint, flags: CGEventFlags) async -> (String, String?) {
+        guard let win = BackgroundInput.window(at: p) else {
+            await realClick(name, at: p, flags: flags)
+            return ("Clicked with the real pointer (no app window there).", "Clicked")
+        }
+        target = win
+        let repeated = lastPosted.map { hypot($0.point.x - p.x, $0.point.y - p.y) < 8 && Date().timeIntervalSince($0.time) < 45 } ?? false
+        let plain = name == "left_click" && flags.isEmpty
+
+        if plain, let outcome = BackgroundInput.click(at: p, in: win, semanticOnly: true) {
+            lastPosted = nil
+            return describe(outcome, in: win)
+        }
+        if Self.mayBorrowPointer && (repeated || realPointerApps.contains(win.pid)) {
+            if repeated { realPointerApps.insert(win.pid) }
+            lastPosted = nil
+            await realClick(name, at: p, flags: flags)
+            return ("Clicked in \(win.appName) using the real pointer for a moment (it ignores background clicks); the pointer is back where the user left it.",
+                    "Clicked in \(win.appName)")
+        }
+        let outcome: BackgroundInput.Outcome
+        switch name {
+        case "right_click":
+            outcome = BackgroundInput.rightClick(at: p, in: win)
+        case "left_click" where flags.isEmpty:
+            outcome = BackgroundInput.click(at: p, in: win) ?? .posted
+        default:
+            let button: CGMouseButton = name == "middle_click" ? .center : .left
+            let count = name == "double_click" ? 2 : name == "triple_click" ? 3 : 1
+            BackgroundInput.postClick(at: p, button: button, count: count, flags: flags, to: win)
+            outcome = .posted
+        }
+        if case .posted = outcome { lastPosted = (p, Date()) } else { lastPosted = nil }
+        return describe(outcome, in: win)
+    }
+
+    private func describe(_ outcome: BackgroundInput.Outcome, in win: BackgroundInput.Target) -> (String, String?) {
+        switch outcome {
+        case .pressed(let what):
+            return ("Pressed the \(what) in \(win.appName), in the background.", "Clicked the \(what)")
+        case .focused(let what):
+            return ("Clicked into the \(what) in \(win.appName); typing goes there now.", "Clicked the \(what)")
+        case .posted:
+            let borrow = Self.mayBorrowPointer
+                ? " If a screenshot shows it had no effect, click the same spot again: the second try uses the real pointer."
+                : ""
+            return ("Clicked in \(win.appName) in the background, without moving the user's pointer.\(borrow)",
+                    "Clicked in \(win.appName)")
+        }
+    }
+
+    private func realClick(_ name: String, at p: CGPoint, flags: CGEventFlags) async {
+        let button: CGMouseButton = name == "right_click" ? .right : name == "middle_click" ? .center : .left
+        let count = name == "double_click" ? 2 : name == "triple_click" ? 3 : 1
+        await BackgroundInput.withRealPointer(at: p) {
+            await Self.click(at: p, button: button, count: count, flags: flags)
+        }
+    }
+
+    private static func isSystemShortcut(_ combo: String) -> Bool {
+        let c = combo.lowercased().replacingOccurrences(of: " ", with: "")
+        let system = ["cmd+space", "super+space", "command+space", "cmd+tab", "super+tab", "command+tab",
+                      "ctrl+left", "ctrl+right", "ctrl+up", "ctrl+down", "control+left", "control+right",
+                      "control+up", "control+down", "cmd+shift+3", "cmd+shift+4", "cmd+shift+5",
+                      "super+shift+3", "super+shift+4", "super+shift+5", "ctrl+cmd+q", "ctrl+super+q"]
+        return system.contains(c)
     }
 
     private func ok() -> Result { Result(content: "OK", isError: false) }
@@ -211,7 +390,7 @@ final class ComputerControl {
         let s = activeScreen()
         do {
             try? await Task.sleep(for: .milliseconds(60)) // let a hide/animation finish
-            guard let image = try await ScreenCapture.captureImage(of: s, maxEdge: Self.maxEdge, includingWindows: [], showsCursor: true)
+            guard let image = try await ScreenCapture.captureImage(of: s, maxEdge: Self.maxEdge, includingWindows: [], showsCursor: false)
             else { return fail("Couldn't capture the screen.") }
             return Result(content: [Self.imageBlock(image)], isError: false)
         } catch {
@@ -226,7 +405,7 @@ final class ComputerControl {
         let s = activeScreen()
         let size = imageSize(s)
         do {
-            guard let full = try await ScreenCapture.captureImage(of: s, maxEdge: 6000, includingWindows: [], showsCursor: true)
+            guard let full = try await ScreenCapture.captureImage(of: s, maxEdge: 6000, includingWindows: [], showsCursor: false)
             else { return fail("Couldn't capture the screen.") }
             let k = CGFloat(full.width) / size.width
             let rect = CGRect(x: region[0] * k, y: region[1] * k, width: (region[2] - region[0]) * k, height: (region[3] - region[1]) * k)
@@ -337,8 +516,9 @@ final class ComputerControl {
     }
 
     /// Presses an xdotool-style combination such as "Return", "ctrl+s" or
-    /// "super+shift+4", optionally holding it. False when a key is unknown.
-    private static func press(_ combo: String, hold: Double = 0) async -> Bool {
+    /// "super+shift+4", optionally holding it, on the real keyboard or (with
+    /// `pid`) sent only to that app. False when a key is unknown.
+    private static func press(_ combo: String, hold: Double = 0, pid: pid_t? = nil) async -> Bool {
         let parts = combo.split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
         guard let last = parts.last, let key = keyCode(last) else { return false }
         var flags: CGEventFlags = []
@@ -348,21 +528,19 @@ final class ComputerControl {
             flags.insert(m.1)
             modKeys.append((m.0, flags))
         }
-        for (code, f) in modKeys {
-            let e = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(code), keyDown: true)
+        // Background keys use a private source so the user's own modifier
+        // keys don't leak into them.
+        let source = pid == nil ? nil : CGEventSource(stateID: .privateState)
+        func send(_ code: Int, down: Bool, _ f: CGEventFlags) {
+            let e = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(code), keyDown: down)
             e?.flags = f
-            post(e)
+            if let pid { e?.postToPid(pid) } else { e?.post(tap: .cghidEventTap) }
         }
-        let down = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(key), keyDown: true)
-        down?.flags = flags
-        post(down)
+        for (code, f) in modKeys { send(code, down: true, f) }
+        send(key, down: true, flags)
         if hold > 0 { try? await Task.sleep(for: .seconds(hold)) }
-        let up = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(key), keyDown: false)
-        up?.flags = flags
-        post(up)
-        for (code, _) in modKeys.reversed() {
-            post(CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(code), keyDown: false))
-        }
+        send(key, down: false, flags)
+        for (code, _) in modKeys.reversed() { send(code, down: false, []) }
         try? await Task.sleep(for: .milliseconds(20))
         return true
     }
