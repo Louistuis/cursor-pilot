@@ -4,6 +4,8 @@
 #[derive(Default)]
 pub struct SentenceChunker {
     buf: String,
+    /// Inside a fenced block (code or a chart), which is shown, not read.
+    in_code: bool,
 }
 
 impl SentenceChunker {
@@ -17,7 +19,7 @@ impl SentenceChunker {
         let mut out = Vec::new();
         while let Some(end) = sentence_end(&self.buf) {
             let sentence: String = self.buf.drain(..end).collect();
-            if let Some(s) = clean(&sentence) {
+            if let Some(s) = self.speakable(&sentence) {
                 out.push(s);
             }
         }
@@ -25,8 +27,55 @@ impl SentenceChunker {
     }
 
     pub fn finish(&mut self) -> Option<String> {
-        clean(&std::mem::take(&mut self.buf))
+        let rest = std::mem::take(&mut self.buf);
+        self.speakable(&rest)
     }
+
+    /// What of a chunk is read aloud: nothing from fenced blocks, images
+    /// or bare web addresses, and only the words of a link.
+    fn speakable(&mut self, raw: &str) -> Option<String> {
+        let t = raw.trim();
+        if t.starts_with("```") {
+            self.in_code = !self.in_code;
+            return None;
+        }
+        if self.in_code {
+            return None;
+        }
+        clean(&unlink(t))
+    }
+}
+
+/// Drops images (`![alt](src)`) and bare URLs, and turns `[text](url)` into
+/// its text.
+fn unlink(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        let image = rest.starts_with("![");
+        if image || rest.starts_with('[') {
+            let open = if image { 2 } else { 1 };
+            if let Some(close) = rest[open..].find("](") {
+                let label_end = open + close;
+                if let Some(paren) = rest[label_end + 2..].find(')') {
+                    if !image {
+                        out.push_str(&rest[open..label_end]);
+                    }
+                    rest = &rest[label_end + 2 + paren + 1..];
+                    continue;
+                }
+            }
+        }
+        if rest.starts_with("http://") || rest.starts_with("https://") || rest.starts_with("www.") {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            rest = &rest[end..];
+            continue;
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Byte index just past the first sentence terminator that is followed by
@@ -100,6 +149,17 @@ mod tests {
         let mut c = SentenceChunker::new();
         assert!(c.push("Version 3.5 is out").is_empty());
         assert_eq!(c.finish().as_deref(), Some("Version 3.5 is out"));
+    }
+
+    #[test]
+    fn charts_code_images_and_addresses_are_not_read() {
+        let mut c = SentenceChunker::new();
+        let said = c.push(
+            "Here's the trend.\n```chart\n{\"type\": \"bar\", \"data\": []}\n```\n\
+             ![Graph](/tmp/g.png)\nSee [the report](https://x.com/r) at https://x.com/r for more.\n",
+        );
+        assert_eq!(said, vec!["Here's the trend.", "See the report at for more."]);
+        assert!(c.finish().is_none());
     }
 
     #[test]

@@ -3,7 +3,8 @@ import SwiftUI
 
 /// A reply with its formatting: paragraphs, bullet and numbered lists,
 /// headings, quotes and code blocks, plus inline bold, italics, code and
-/// links (bare URLs too). Used in Home's bubbles and the notch.
+/// links (bare URLs too), and charts, images and link cards. Used in Home's
+/// bubbles and the notch.
 struct RichText: View {
     var text: String
     var size: CGFloat = 13.5
@@ -48,6 +49,12 @@ struct RichText: View {
                 Text(Self.inline(s)).italic().opacity(0.85)
             }
             .fixedSize(horizontal: false, vertical: true)
+        case .chart(let spec):
+            ChartCard(spec: spec, compact: size < 13, fill: subtle.opacity(0.07))
+        case .image(let url, let alt):
+            ImageCard(url: url, alt: alt, compact: size < 13)
+        case .link(let url):
+            LinkCard(url: url, compact: size < 13, fill: subtle.opacity(0.08))
         case .code(let s):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(s)
@@ -84,11 +91,18 @@ enum RichBlock: Equatable {
     case numbered([String])
     case quote(String)
     case code(String)
+    /// A ```chart block that holds a valid chart.
+    case chart(ChartSpec)
+    /// `![alt](src)` on a line of its own.
+    case image(URL, String)
+    /// A web address on a line of its own: shown as a preview card.
+    case link(URL)
 
     static func parse(_ text: String) -> [RichBlock] {
         var blocks: [RichBlock] = []
         var para: [String] = []
         var code: [String]?
+        var codeTag = ""
         func flush() {
             if !para.isEmpty { blocks.append(.paragraph(para.joined(separator: "\n"))) }
             para = []
@@ -97,11 +111,17 @@ enum RichBlock: Equatable {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("```") {
                 if let c = code {
-                    blocks.append(.code(c.joined(separator: "\n")))
+                    let body = c.joined(separator: "\n")
+                    if codeTag == "chart", let spec = ChartSpec.parse(body) {
+                        blocks.append(.chart(spec))
+                    } else {
+                        blocks.append(.code(body))
+                    }
                     code = nil
                 } else {
                     flush()
                     code = []
+                    codeTag = line.dropFirst(3).trimmingCharacters(in: .whitespaces).lowercased()
                 }
                 continue
             }
@@ -111,6 +131,12 @@ enum RichBlock: Equatable {
             }
             if line.isEmpty {
                 flush()
+            } else if let (url, alt) = MediaPart.image(in: line) {
+                flush()
+                blocks.append(.image(url, alt))
+            } else if let url = MediaPart.link(in: line) {
+                flush()
+                blocks.append(.link(url))
             } else if let item = bullet(line) {
                 flush()
                 if case .bullets(let items) = blocks.last {
@@ -162,25 +188,47 @@ enum RichBlock: Equatable {
 }
 
 /// Splits a reply into the separate texts Cursor Pilot sends, at blank
-/// lines, keeping code blocks and lists in one piece.
+/// lines, keeping lists in one piece; code blocks, charts, images and links
+/// each come as their own message, like a photo or a link in Messages.
 func messageParts(_ text: String) -> [String] {
     var parts: [String] = []
     var current: [String] = []
     var inCode = false
+    func flush() {
+        if !current.isEmpty { parts.append(current.joined(separator: "\n")) }
+        current = []
+    }
     for line in text.components(separatedBy: "\n") {
-        if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inCode.toggle() }
-        if !inCode && line.trimmingCharacters(in: .whitespaces).isEmpty {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("```") {
+            if inCode {
+                current.append(line)
+                inCode = false
+                flush()
+            } else {
+                flush()
+                inCode = true
+                current.append(line)
+            }
+            continue
+        }
+        if inCode {
+            current.append(line)
+        } else if MediaPart.image(in: line) != nil || MediaPart.link(in: line) != nil {
+            flush()
+            current.append(line)
+            flush()
+        } else if trimmed.isEmpty {
             // A list continues across a blank line.
             if let last = current.last?.trimmingCharacters(in: .whitespaces),
                last.hasPrefix("- ") || last.hasPrefix("* ") || last.first?.isNumber == true {
                 continue
             }
-            if !current.isEmpty { parts.append(current.joined(separator: "\n")) }
-            current = []
+            flush()
         } else {
             current.append(line)
         }
     }
-    if !current.isEmpty { parts.append(current.joined(separator: "\n")) }
+    flush()
     return parts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
 }

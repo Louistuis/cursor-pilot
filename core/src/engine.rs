@@ -29,6 +29,19 @@ Reply in the language the user just used; they may switch languages between mess
 questions come through speech recognition and can contain misheard words, so go with the most \
 likely meaning instead of the literal text.
 
+The chat can also show things, each on its own lines, never read aloud. Use them when they say it \
+better than words, as a friend would send a picture or a link, not in every reply:
+- A chart, for numbers worth comparing or a trend: a fenced block tagged chart holding JSON, e.g.
+```chart
+{\"type\": \"bar\", \"title\": \"Rain this week\", \"unit\": \"mm\", \"data\": [{\"label\": \"Mon\", \"value\": 4}, {\"label\": \"Tue\", \"value\": 11}]}
+```
+type is bar, line, area, pie or point. Add \"series\" to each point for several series. Keep \
+labels short and give at most about 30 points.
+- An image: ![what it shows](/absolute/path.png or https://… address). Use images you made, saved or \
+found, such as a screenshot you took or a picture from the web.
+- A link on a line of its own shows as a preview card, like in Messages.
+Mention what you're showing in a few words; the user sees it while hearing you.
+
 You may receive screenshots of the user's displays. Each one is introduced by a line such as \
 \"Screen 0 (Built-in Display, cursor is here): 1280x800\" that gives its index and pixel size. \
 You can show things on those screens by writing tags in your reply, right where you mention the \
@@ -902,7 +915,7 @@ mod tests {
         assert_eq!(rs.visible, "Click  here.");
         assert!(events
             .iter()
-            .any(|e| e["type"] == "speak" && e["text"] == "Click  here."));
+            .any(|e| e["type"] == "speak" && e["text"] == "Click here."));
     }
 
     #[test]

@@ -402,7 +402,7 @@ final class AppModel: ObservableObject {
         case .text(let t):
             replyText += t
             if phase == .thinking { setPhase(.answering) }
-            overlay.state.caption = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
+            overlay.state.caption = captionText(replyText)
         case .speak(let sentence):
             if speakReplies {
                 speaker.speak(sentence, number: sentencesQueued)
@@ -434,7 +434,7 @@ final class AppModel: ObservableObject {
             handle(helper: e)
         case .done(let text):
             replyText = text
-            overlay.state.caption = text
+            overlay.state.caption = captionText(text)
         case .error(let kind, let message):
             if kind != "cancelled" { showError(message) }
         case .finished:

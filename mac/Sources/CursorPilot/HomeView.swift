@@ -479,7 +479,7 @@ private struct MessageGroup: View {
     }
 }
 
-private let bubbleGray = Color(nsColor: NSColor(name: nil) { appearance in
+let bubbleGray = Color(nsColor: NSColor(name: nil) { appearance in
     appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         ? NSColor(white: 0.24, alpha: 1) : NSColor(white: 0.91, alpha: 1)
 })
@@ -513,6 +513,13 @@ private struct Bubble: View {
         if let emoji = bigEmoji {
             // Like Messages: a few emoji alone come big, without a bubble.
             Text(emoji).font(.system(size: 40)).padding(.vertical, 2)
+        } else if let media = MediaPart.parse(text) {
+            // Charts, pictures and links come on their own, like in Messages.
+            switch media {
+            case .chart(let spec): ChartCard(spec: spec)
+            case .image(let url, let alt): ImageCard(url: url, alt: alt)
+            case .link(let url): LinkCard(url: url)
+            }
         } else {
             RichText(text: text, size: 13.5, subtle: fromMe ? .white : .primary)
                 .font(.system(size: 13.5))

@@ -108,6 +108,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
                 return
             }
+            // `-CPRenderChartPreview out.png`: the kinds of chart a reply can send.
+            if let path = UserDefaults.standard.string(forKey: "CPRenderChartPreview") {
+                let specs = [
+                    #"{"type": "bar", "title": "Rain this week", "unit": "mm", "data": [{"label": "Mon", "value": 4}, {"label": "Tue", "value": 11}, {"label": "Wed", "value": 7.5}, {"label": "Thu", "value": 0}, {"label": "Fri", "value": 15}]}"#,
+                    #"{"type": "line", "title": "Bergen vs Oslo, °C", "data": [{"label": "Jan", "value": 2, "series": "Bergen"}, {"label": "Apr", "value": 7, "series": "Bergen"}, {"label": "Jul", "value": 15, "series": "Bergen"}, {"label": "Oct", "value": 9, "series": "Bergen"}, {"label": "Jan", "value": -4, "series": "Oslo"}, {"label": "Apr", "value": 6, "series": "Oslo"}, {"label": "Jul", "value": 17, "series": "Oslo"}, {"label": "Oct", "value": 7, "series": "Oslo"}]}"#,
+                    #"{"type": "pie", "title": "Disk", "unit": "GB", "data": [{"label": "Apps", "value": 62}, {"label": "Photos", "value": 88}, {"label": "System", "value": 40}, {"label": "Free", "value": 9}]}"#,
+                    #"{"type": "area", "title": "Steps", "data": [{"label": "6", "value": 300}, {"label": "9", "value": 2400}, {"label": "12", "value": 4100}, {"label": "15", "value": 5200}, {"label": "18", "value": 8800}, {"label": "21", "value": 9600}]}"#,
+                ].compactMap(ChartSpec.parse)
+                let view = HStack(alignment: .top, spacing: 16) {
+                    ForEach(0..<2) { col in
+                        VStack(spacing: 16) {
+                            ForEach(specs.indices.filter { $0 % 2 == col }, id: \.self) { i in
+                                ChartCard(spec: specs[i], animated: false)
+                            }
+                        }
+                    }
+                }
+                .padding(24)
+                .background(Color(nsColor: .windowBackgroundColor))
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 2
+                if let image = renderer.cgImage,
+                   let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+                return
+            }
             // `-CPRenderHelperPreview out.png`: each helper's cursor at work,
             // one finished and one near the right edge.
             if let path = UserDefaults.standard.string(forKey: "CPRenderHelperPreview") {

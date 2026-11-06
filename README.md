@@ -188,6 +188,7 @@ Debug launch flags, for design work:
 | `-CPRunActions steps.json` | runs agent actions (`apps`, `computer`, `wait` steps) like the agent would, writes what each returned to `-CPOut` (default `steps.json.out.json`), then quits |
 | `-CPAsk "question"` | sends one typed question through the whole agent (helpers included, no screen, nothing spoken), writes the text, steps, helper events and timings to `-CPOut`, then quits |
 | `-CPRenderHelperPreview out.png` | renders the helpers' cursors and tags |
+| `-CPRenderChartPreview out.png` | renders the kinds of chart a reply can send |
 | `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, writes what each heard to `-CPOut`, then quits |
 
 Test flags run best in a second copy, so the one you use keeps running:
@@ -302,6 +303,11 @@ Done:
   chats; Norwegian and English recognised automatically; double-tap ⌃ to
   type; buddy colours; sound effects; an option to keep Cursor Pilot out of
   screenshots and recordings; no keychain prompts after rebuilds.
+- **Visuals in chat**: replies can send charts (a ```chart JSON block, drawn
+  with Swift Charts: bar, line, area, point and pie, growing in, hover for
+  values), images (`![alt](path or URL)`, shown like photos in Messages) and
+  link preview cards (a link on its own line, via LinkPresentation). None of
+  it is read aloud, and the notch shows them too.
 - **Helpers**: the agent sends helper agents off in parallel, each with its
   own coloured cursor; works on its own without asking for what it can find
   out; notes while working are shown quietly and only the first line and the
