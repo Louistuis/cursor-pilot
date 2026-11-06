@@ -22,6 +22,16 @@ final class NotchState: ObservableObject {
         CGSize(width: max(Self.expandedSize.width, activeSize.width + 40),
                height: notchSize.height + Self.expandedSize.height - 32)
     }
+
+    /// The island's size: the open panel, the wings while working, or the
+    /// bare notch (nothing on a screen without one).
+    func shapeSize(active: Bool) -> CGSize {
+        if expanded { return expandedSize }
+        if active { return activeSize }
+        return hasNotch ? notchSize : CGSize(width: notchSize.width, height: 0)
+    }
+
+    var bottomRadius: CGFloat { expanded ? 24 : 10 }
 }
 
 /// Lets the borderless panel take keyboard focus for the text field
@@ -81,6 +91,15 @@ final class NotchController {
         timer = nil
         setExpanded(false)
         panel.orderOut(nil)
+    }
+
+    /// Where the island is heading, in its screen's top-left points, so the
+    /// screen glow can bend around it; nil while the panel is hidden.
+    var island: (screen: NSScreen, rect: CGRect, radius: CGFloat)? {
+        guard timer != nil, let screen else { return nil }
+        let size = state.shapeSize(active: model.phase != .idle)
+        return (screen, CGRect(x: (screen.frame.width - size.width) / 2, y: 0, width: size.width, height: size.height),
+                state.bottomRadius)
     }
 
     /// The built-in display if it has a notch, otherwise the main display.
@@ -198,16 +217,10 @@ struct NotchRootView: View {
 
     private var isActive: Bool { model.phase != .idle }
 
-    private var shapeSize: CGSize {
-        if state.expanded { return state.expandedSize }
-        if isActive { return state.activeSize }
-        return state.hasNotch ? state.notchSize : CGSize(width: state.notchSize.width, height: 0)
-    }
-
     var body: some View {
-        let size = shapeSize
+        let size = state.shapeSize(active: isActive)
         ZStack(alignment: .top) {
-            NotchShape(bottomRadius: state.expanded ? 24 : 10)
+            NotchShape(bottomRadius: state.bottomRadius)
                 .fill(.black)
                 .shadow(color: .black.opacity(state.expanded ? 0.35 : 0), radius: 16, y: 6)
             if state.expanded {

@@ -54,7 +54,8 @@ final class GlowController {
         let r = GlowStage.cornerRadius(notched: true)
         return GlowView.image(of: GlowState(rect: CGRect(origin: .zero, size: size), radii: (r, r, r, r),
                                             gain: gain, fill: 0, outer: 0, rot: 0.3,
-                                            notch: CGRect(x: size.width / 2 - 104, y: 0, width: 208, height: 34)),
+                                            notch: CGRect(x: size.width / 2 - 276, y: 0, width: 552, height: 240),
+                                            notchRadius: 26),
                               size: size)
     }
 }
@@ -76,13 +77,48 @@ private final class GlowStage: NSObject {
     private(set) var isOpen = true
     var onClose: (() -> Void)?
 
-    /// The notch in this view's top-left points, with a little air around it.
-    private lazy var notch: CGRect? = {
+    /// The camera notch in this view's top-left points, with a little air around it.
+    private lazy var hardwareNotch: CGRect? = {
         guard screen.safeAreaInsets.top > 0, let left = screen.auxiliaryTopLeftArea,
               let right = screen.auxiliaryTopRightArea else { return nil }
         let width = screen.frame.width - left.width - right.width
         return CGRect(x: left.width - 2, y: 0, width: width + 4, height: screen.safeAreaInsets.top + 2)
     }()
+    /// The cutout's edges and corner, following the island as it opens,
+    /// grows wings and closes, on the island's own spring.
+    private var cut: (x: Spring, w: Spring, h: Spring, r: Spring)?
+
+    /// The cutout this frame: the island's outline (where it is heading,
+    /// eased the way SwiftUI eases the island), never smaller than the notch.
+    private func notchCut(dt: CGFloat) -> (CGRect, CGFloat)? {
+        var target = hardwareNotch.map { ($0, CGFloat(12)) }
+        if let island = AppModel.shared.notch?.island, island.screen.frame == screen.frame {
+            // The black body sits 6 pt in from the flared top corners; leave 2 pt of air.
+            let body = CGRect(x: island.rect.minX + 4, y: 0, width: island.rect.width - 8,
+                              height: island.rect.height > 0 ? island.rect.height + 2 : 0)
+            if let hw = hardwareNotch {
+                if body.width > hw.width || body.height > hw.height { target = (body.union(hw), island.radius + 2) }
+            } else {
+                target = (body, island.radius + 2)
+            }
+        }
+        guard let (rect, radius) = target else {
+            cut = nil
+            return nil
+        }
+        guard var c = cut else {
+            cut = (Spring(rect.minX), Spring(rect.width), Spring(rect.height), Spring(radius))
+            return rect.height > 0.5 ? (rect, radius) : nil
+        }
+        let omega: CGFloat = 2 * .pi / 0.38
+        c.x.step(to: rect.minX, dt: dt, omega: omega, damping: 0.82)
+        c.w.step(to: rect.width, dt: dt, omega: omega, damping: 0.82)
+        c.h.step(to: rect.height, dt: dt, omega: omega, damping: 0.82)
+        c.r.step(to: radius, dt: dt, omega: omega, damping: 0.82)
+        cut = c
+        guard c.h.x > 0.5, c.w.x > 0.5 else { return nil }
+        return (CGRect(x: c.x.x, y: 0, width: c.w.x, height: c.h.x), max(c.r.x, 0))
+    }
 
     /// Built-in displays with a notch have rounded corners; the frame follows them.
     static func cornerRadius(notched: Bool) -> CGFloat { notched ? 10 : 0 }
@@ -155,9 +191,11 @@ private final class GlowStage: NSObject {
         rot += spin.x * dt
 
         let r = Self.cornerRadius(notched: screen.safeAreaInsets.top > 0)
+        let cut = notchCut(dt: dt)
         glow.state = GlowState(rect: glow.bounds, radii: (r, r, r, r),
                                gain: Float(max(gain.x, 0)), fill: 0, outer: 0,
-                               rot: Float(rot.truncatingRemainder(dividingBy: 4)), notch: notch)
+                               rot: Float(rot.truncatingRemainder(dividingBy: 4)),
+                               notch: cut?.0, notchRadius: cut?.1 ?? 12)
         glow.render()
     }
 }

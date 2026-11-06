@@ -10,9 +10,11 @@ struct GlowState {
     var fill: Float = 0      // black body inside the frame (the island)
     var outer: Float = 0.35  // halo outside the frame
     var rot: Float = 0       // colours turning around the perimeter, 0..4 per turn
-    /// The camera notch, relative to `rect`: the frame bends around it
-    /// instead of running behind it.
+    /// The camera notch or the island grown out of it, relative to `rect`:
+    /// the frame bends around it instead of running behind it.
     var notch: CGRect?
+    /// Radius of the cutout's bottom corners.
+    var notchRadius: CGFloat = 12
 }
 
 /// The neon edge frame from Zero OCR (MIT, Louis Nordbø), drawn with Metal over the whole screen.
@@ -126,7 +128,7 @@ final class GlowView: NSView {
                 Float(s.radii.tl), Float(s.radii.tr), Float(s.radii.br), Float(s.radii.bl),
                 s.rot, s.gain, s.fill, k, fk, s.outer,
                 Float(s.notch?.minX ?? 0), Float(s.notch?.minY ?? 0),
-                Float(s.notch?.width ?? 0), Float(s.notch?.height ?? 0),
+                Float(s.notch?.width ?? 0), Float(s.notch?.height ?? 0), Float(s.notchRadius),
             ]
             enc.setRenderPipelineState(pipeline)
             enc.setFragmentBytes(&u, length: u.count * 4, index: 0)
@@ -233,7 +235,7 @@ final class GlowView: NSView {
             // light runs down, around its rounded foot and back up.
             float2 nb = float2(U[18], U[19] + 20.0) * 0.5;
             float2 nc = float2(U[16], U[17] - 20.0) + nb;
-            float nr = min(12.0, U[19] * 0.45);
+            float nr = min(U[20], min(U[18], U[19]) * 0.5);
             sd = max(sd, -sdBox(lp - nc, nb, float4(0.0, 0.0, nr, nr)));
         }
         float inside = clamp(0.5 - sd * k, 0.0, 1.0);
