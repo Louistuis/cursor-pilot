@@ -36,6 +36,7 @@ cursor-pilot/
 │       ├── Agent.swift          screenshots and the computer tool's clicks, typing and keys
 │       ├── Pointer.swift        background input and the app_control tool (Accessibility)
 │       ├── CoUser.swift         the real mouse and keyboard, moved and typed like a person
+│       ├── Setup.swift          one-time permission setup; checks that never prompt
 │       ├── Keychain.swift       API key in the login keychain, prompt-free across rebuilds
 │       ├── Sounds.swift         quiet system sounds for listen, send, done, error
 │       ├── TestHooks.swift      launch flags that test actions and speech without a person
@@ -210,6 +211,7 @@ Debug launch flags, for design work:
 | `-CPRenderHelperPreview out.png` | renders the helpers' cursors and tags |
 | `-CPRenderChartPreview out.png` | renders the kinds of chart a reply can send |
 | `-CPRenderJobsPreview out.png` | renders background tasks' cards, at work and done |
+| `-CPPermissions out.json` | writes which permissions are allowed, checked without asking |
 | `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, writes what each heard to `-CPOut`, then quits |
 
 Test flags run best in a second copy, so the one you use keeps running:
@@ -246,6 +248,20 @@ ANTHROPIC_API_KEY=sk-ant-… cargo run --example ask -- "Why is the sky blue?"
 | Microphone, Speech Recognition | push-to-talk questions |
 | Screen Recording | screenshots sent with each question |
 | Accessibility | only for working in apps (pressing controls, clicking, typing) once you let Cursor Pilot work on your Mac |
+| Full Disk Access | reading Messages, and files anywhere without macOS asking per folder |
+| Contacts | names instead of numbers in messages |
+| Automation (Messages, Finder, System Events) | sending texts, and the few scripts the agent may run |
+| Local Network | reaching devices and servers on your network from a task |
+
+Everything is asked for once, up front: Settings › Permissions › **Set Up
+Everything** (and the onboarding's Allow Everything) shows the dialogs that
+can appear in place one after the other, then opens System Settings at each
+switch still off. While it works Cursor Pilot never asks: it only checks,
+and when something is missing it says what to set up instead of putting a
+dialog in front of you. The agent is told not to script other apps, which
+would make macOS ask. macOS doesn't let apps grant themselves permissions,
+so the switches stay yours. `-CPPermissions out.json` reports what's
+allowed without asking.
 
 If a permission is switched on but Cursor Pilot still can't use it, the
 entry was made by an older build signed another way (for example ad hoc,
@@ -327,6 +343,8 @@ Done:
 - **Co-user**: the agent uses your own mouse and keyboard like a person,
   with natural pointer paths, click timing and typing rhythm, and waits when
   you take over; background mode stays as an option.
+- **No prompts while working**: one Set Up Everything step asks for every
+  permission up front; at work it only checks.
 - **Background tasks**: the agent can hand a whole task to an independent
   agent that finishes it on its own while you keep going.
 - **Visuals in chat**: replies can send charts (a ```chart JSON block, drawn

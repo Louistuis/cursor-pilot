@@ -131,7 +131,6 @@ final class ComputerControl {
     static let maxEdge: CGFloat = 1456
 
     private var screen: NSScreen?
-    private var askedForAccessibility = false
     /// Where the agent's pointer is, in global points (nil: where the user's is).
     private var pointer: CGPoint?
     /// The app the agent last clicked in; typing and keys go there.
@@ -523,13 +522,11 @@ final class ComputerControl {
         return result
     }
 
+    /// Never asks macOS while working (that's what setup is for): it says
+    /// what's missing instead.
     private func accessibilityMissing() -> Result {
-        if !askedForAccessibility {
-            askedForAccessibility = true
-            Self.requestAccessibility()
-        }
-        return Result(content: "Cursor Pilot needs Accessibility permission to use the mouse and keyboard. Tell the user to allow it in System Settings › Privacy & Security › Accessibility. If Cursor Pilot is already switched on there, that entry belongs to an older build: they should remove it with the minus button, then allow Cursor Pilot again. Then try again.",
-                      isError: true)
+        Result(content: "Cursor Pilot doesn't have Accessibility permission, so it can't use the mouse and keyboard. Tell the user to run Cursor Pilot's \(Setup.hint) once. If Cursor Pilot is already switched on in System Settings › Privacy & Security › Accessibility, that entry belongs to an older build: they should remove it with the minus button and allow Cursor Pilot again.",
+               isError: true)
     }
 
     /// Moves the agent's pointer (the buddy) to `p`.

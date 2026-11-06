@@ -195,6 +195,25 @@ struct SettingsView: View {
                               granted: permissions.accessibility) {
                     Permissions.openAccessibility()
                 }
+                PermissionRow(name: "Full Disk Access", detail: "To read your messages and work with any file, without asking per folder",
+                              granted: permissions.fullDisk) {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                }
+                PermissionRow(name: "Contacts", detail: "To show names instead of numbers in messages", granted: permissions.contacts) {
+                    Task { await Setup.run(); permissions = .current() }
+                }
+                PermissionRow(name: "Automation", detail: "To control Messages, Finder and System Events", granted: permissions.automation) {
+                    Task { await Setup.askToScript(); permissions = .current() }
+                }
+                if !permissions.everything {
+                    Button {
+                        Task { await Setup.run(); permissions = .current() }
+                    } label: {
+                        Label("Set Up Everything", systemImage: "checkmark.shield").frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                }
                 if !permissions.screen {
                     HStack {
                         Text("Allowed it already? macOS applies it after a restart.")
@@ -207,7 +226,7 @@ struct SettingsView: View {
             } header: {
                 Text("Permissions")
             } footer: {
-                Text("Cursor Pilot only listens while you hold the talk key, and only looks at your screen when you ask something.")
+                Text("Cursor Pilot asks for everything here, once, so macOS never stops it to ask while it works; what's missing it just reports. It only listens while you hold the talk key, and only looks at your screen when you ask something.")
             }
 
             Section {
@@ -305,6 +324,12 @@ struct PermissionStatus: Equatable {
     var speech: Bool
     var screen: Bool
     var accessibility: Bool
+    var fullDisk: Bool
+    var contacts: Bool
+    var automation: Bool
+
+    /// Everything, so nothing ever has to ask while it works.
+    var everything: Bool { microphone && speech && screen && accessibility && fullDisk && contacts && automation }
 
     var all: Bool { microphone && speech && screen }
 
@@ -313,19 +338,18 @@ struct PermissionStatus: Equatable {
             microphone: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
             speech: SFSpeechRecognizer.authorizationStatus() == .authorized,
             screen: ScreenCapture.hasPermission,
-            accessibility: ComputerControl.hasAccessibility
+            accessibility: ComputerControl.hasAccessibility,
+            fullDisk: Setup.hasFullDiskAccess,
+            contacts: Setup.hasContacts,
+            automation: Setup.hasAutomation
         )
     }
 }
 
 enum Permissions {
-    /// Asks for everything in one go: microphone and speech first (their
-    /// dialogs appear in place), then Screen Recording.
+    /// Asks for everything in one go (`Setup.run`).
     @MainActor
-    static func requestAll() async {
-        _ = await VoiceInput.requestPermissions()
-        if !ScreenCapture.hasPermission { openScreenRecording() }
-    }
+    static func requestAll() async { await Setup.run() }
 
     static func openScreenRecording() {
         // The request adds Cursor Pilot to the list; the pane is where it's switched on.

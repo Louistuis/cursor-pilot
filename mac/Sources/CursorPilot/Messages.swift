@@ -31,9 +31,8 @@ enum MessagesTool {
     private static let database = NSHomeDirectory() + "/Library/Messages/chat.db"
 
     private static var noAccess: Result {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
-        return Result(content: "Can't read Messages: Cursor Pilot needs Full Disk Access. System Settings › Privacy & Security › Full Disk Access is open now; ask the user to switch Cursor Pilot on there, then try again. Sending still works without it.",
-                      isError: true, summary: "Needs Full Disk Access for Messages")
+        Result(content: "Can't read Messages: Cursor Pilot needs Full Disk Access. Tell the user to run Cursor Pilot's \(Setup.hint) once. Sending still works without it.",
+               isError: true, summary: "Needs Full Disk Access for Messages")
     }
 
     private struct Chat {
@@ -168,6 +167,11 @@ enum MessagesTool {
     private static func send(to: String, text: String) async -> Result {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !to.isEmpty, !text.isEmpty else { return Result(content: "send needs to and text.", isError: true) }
+        // Scripting Messages without the user's yes from setup would stop to ask.
+        guard Setup.mayScript("com.apple.MobileSMS") else {
+            return Result(content: "Cursor Pilot isn't allowed to control Messages yet, so it can't send. Tell the user to run Cursor Pilot's \(Setup.hint) once.",
+                          isError: true, summary: "Needs permission to send texts")
+        }
         // An existing conversation by name keeps group chats and the right
         // service; otherwise a number, address or contact name.
         var target: String
@@ -218,8 +222,6 @@ enum MessagesTool {
                 }
             }
             contacts = index
-        } else if CNContactStore.authorizationStatus(for: .contacts) == .notDetermined {
-            store.requestAccess(for: .contacts) { _, _ in Task { @MainActor in contacts = nil } }
         }
         return index
     }

@@ -116,7 +116,6 @@ final class AppModel: ObservableObject {
     private let doubleTap = DoubleTapControl()
     /// Screen Recording is requested once per launch; after that a missing
     /// permission is explained instead of prompting on every question.
-    private var askedForScreen = false
     /// Sentences sent to the voice in this reply, and the one being spoken.
     private var sentencesQueued = 0
     private var sentenceSpoken = -1
@@ -298,8 +297,8 @@ final class AppModel: ObservableObject {
             precapture = (Task { (try? await ScreenCapture.captureAll(includingWindows: [])) ?? [] }, Date())
         }
         Task {
-            guard await VoiceInput.requestPermissions() else {
-                showError("Cursor Pilot needs Microphone and Speech Recognition access. Turn them on in System Settings › Privacy & Security.")
+            guard Setup.hasVoice else {
+                showError("Cursor Pilot can't hear you yet: run \(Setup.hint).")
                 return
             }
             do {
@@ -382,11 +381,8 @@ final class AppModel: ObservableObject {
                 } catch {
                     NSLog("Cursor Pilot: screen capture failed: \(error)")
                 }
-            } else if !askedForScreen {
-                askedForScreen = true
-                ScreenCapture.requestPermission()
             } else {
-                flashNotice("Can't see your screen: allow Screen Recording in Settings")
+                flashNotice("Can't see your screen: run \(Setup.hint)")
             }
         }
 
@@ -568,7 +564,7 @@ final class AppModel: ObservableObject {
     /// the drawings shown in Home.
     func saveDrawing() async {
         guard ScreenCapture.hasPermission else {
-            ScreenCapture.requestPermission()
+            flashNotice("Can't capture the screen: run \(Setup.hint)")
             return
         }
         let screen = NSScreen.screens.first { $0.displayID == ink.state.toolbarScreen } ?? NSScreen.main

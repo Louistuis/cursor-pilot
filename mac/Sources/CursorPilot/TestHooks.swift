@@ -18,6 +18,15 @@ enum TestHooks {
             await ask(question, to: defaults.string(forKey: "CPOut") ?? "/dev/stdout")
             return true
         }
+        // `-CPPermissions out.json`: what's allowed, checked without asking.
+        if let out = defaults.string(forKey: "CPPermissions") {
+            let p = PermissionStatus.current()
+            write(["microphone": p.microphone, "speech": p.speech, "screen": p.screen,
+                   "accessibility": p.accessibility, "full_disk": p.fullDisk, "contacts": p.contacts,
+                   "automation": Dictionary(uniqueKeysWithValues: Setup.scripted.map { ($0, Setup.mayScript($0)) }),
+                   "everything": p.everything], to: out)
+            return true
+        }
         if let files = defaults.string(forKey: "CPHear") {
             await hear(files.components(separatedBy: "|"), to: defaults.string(forKey: "CPOut") ?? "/dev/stdout")
             return true

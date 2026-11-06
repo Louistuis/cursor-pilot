@@ -159,7 +159,7 @@ struct OnboardingView: View {
             Text("Let it listen and look").font(.title.bold())
             Text("Cursor Pilot only listens while you hold the shortcut, and only looks at your screen when you ask something.")
                 .foregroundStyle(.secondary)
-            if !permissions.all {
+            if !permissions.everything {
                 Button {
                     Task { await Permissions.requestAll(); permissions = .current() }
                 } label: {
