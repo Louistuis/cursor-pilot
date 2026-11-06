@@ -94,7 +94,12 @@ final class GlowView: NSView {
     }
 
     /// Draws one frame off screen, for `-CPRenderGlowPreview`. `size` is in points.
-    static func image(of state: GlowState, size: CGSize, scale: CGFloat = 2) -> CGImage? {
+    /// The glow as it looks on screen over `backdrop` (sRGB, 0–1). The shader
+    /// writes light (colour may exceed alpha), which the window server adds
+    /// to what's behind; an image file can't hold that, so it's composited
+    /// here the same way, and comes out opaque.
+    static func image(of state: GlowState, size: CGSize, scale: CGFloat = 2,
+                      backdrop: (r: Float, g: Float, b: Float) = (0.07, 0.07, 0.08)) -> CGImage? {
         guard let device, let queue, let cmd = queue.makeCommandBuffer() else { return nil }
         let w = Int(size.width * scale), h = Int(size.height * scale)
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
@@ -106,7 +111,14 @@ final class GlowView: NSView {
         cmd.waitUntilCompleted()
         var bytes = [UInt8](repeating: 0, count: w * h * 4)
         texture.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        // BGRA: light plus the backdrop where the glow doesn't cover it.
+        let back = [backdrop.b, backdrop.g, backdrop.r].map { $0 * 255 }
+        for i in stride(from: 0, to: bytes.count, by: 4) {
+            let cover = 1 - Float(bytes[i + 3]) / 255
+            for c in 0..<3 { bytes[i + c] = UInt8(min(255, Float(bytes[i + c]) + back[c] * cover)) }
+            bytes[i + 3] = 255
+        }
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
         guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info.rawValue) else { return nil }
         return ctx.makeImage()
