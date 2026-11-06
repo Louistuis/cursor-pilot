@@ -41,7 +41,7 @@ cursor-pilot/
 │       ├── Shortcut.swift       user-chosen shortcut + recorder
 │       ├── Notch.swift          panel that drops out of the notch
 │       ├── Onboarding.swift     first-run setup
-│       ├── Shaders.swift        Metal light effects: wave, fluid dots, Strands orb
+│       ├── Shaders.swift        Metal light effects: voice wave, fluid dots
 │       ├── ShaderView.swift     SwiftUI canvas that renders them
 │       ├── Ink.swift            Claude's circles/arrows/boxes, the pen, sketch toolbar
 │       ├── Glow.swift           neon edge frame shader (from Zero OCR)
@@ -251,9 +251,9 @@ Done:
 
 - **Phase 1**: voice questions, multi-display screenshots, streamed and
   spoken answers, pointing, chat history, settings.
-- **Visuals**: native Metal light effects. A glass orb that follows your
-  voice while listening, merging dots while thinking, a chromatic wave while
-  speaking. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- **Visuals**: native Metal light effects. A chromatic wave that follows
+  your voice while listening and speaks with Cursor Pilot, and metaball dots
+  that merge, scatter and gather while it thinks. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - **Phase 2**: notch panel (wings show listening / thinking / answering;
   hover the notch for the latest exchange and a quick-ask field), custom
   hold-to-talk shortcut, first-run onboarding.

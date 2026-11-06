@@ -269,8 +269,8 @@ struct PhaseIndicator: View {
     var body: some View {
         switch phase {
         case .idle: EmptyView()
-        case .listening: VoiceOrb(level: level).frame(width: 30, height: 30).frame(height: 24)
-        case .thinking: ThinkingBlobs().frame(width: 34, height: 34).frame(height: 24)
+        case .listening: SpeakingWave(level: level).frame(width: 56, height: 24)
+        case .thinking: ThinkingBlobs(zoom: 2.4).frame(width: 34, height: 34).frame(height: 24)
         case .answering: SpeakingWave().frame(width: 56, height: 24)
         }
     }

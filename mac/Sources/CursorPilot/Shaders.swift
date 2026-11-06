@@ -1,16 +1,14 @@
 // Cursor Pilot's light effects as Metal shaders, compiled at runtime from
 // source so the Swift package needs no Metal build step.
 //
-// - wave:       ribbons of light while speaking (original)
-// - fluidDots:  six dots that merge and spread while thinking (original)
-// - strands:    glass orb with ribbons of light, ported from the React Bits
-//               "Strands" component (MIT + Commons Clause, see
-//               THIRD_PARTY_NOTICES.md)
+// - wave:       the chromatic voice waveform, while speaking or listening
+// - fluidDots:  six metaball dots that merge, scatter and gather, while thinking
 //
-// Strands is ported from WebGL: gl_FragCoord is flipped to Metal's top-left origin,
-// GLSL mod() keeps its floor semantics (gmod), and pow(x, 2.0) on values that
-// can be negative is written as sq(x), since Metal's pow is undefined there.
-// Output is premultiplied alpha so the light composites over any background.
+// Both are ported from GLSL: gl_FragCoord is flipped to Metal's bottom-left
+// origin, GLSL mod() keeps its floor semantics (gmod), and pow(x, 2.0) on
+// values that can be negative is written as sq(x), since Metal's pow is
+// undefined there. Output is premultiplied light, so it adds to whatever is
+// behind it, the same as the original on black.
 
 let shaderSource = #"""
 #include <metal_stdlib>
@@ -24,348 +22,266 @@ vertex float4 cp_fullscreen(uint vid [[vertex_id]]) {
     return float4(p[vid], 0.0, 1.0);
 }
 
-/// x, y: drawable size; z: seconds; w: input level 0...1, or -1 for none.
-struct BasicUniforms { float4 a; };
+/// a: drawable size, seconds, input level 0...1 (or -1 for none).
+/// b.x: zoom, so a small canvas can still show the effect large.
+struct BasicUniforms { float4 a; float4 b; };
 
 inline float4 lightOut(float3 col) {
     col = clamp(col, 0.0, 1.0);
     return float4(col, max(col.r, max(col.g, col.b)));
 }
 
-// MARK: palette
-
-// The app's rainbow (pilotRainbow in Overlay.swift), looping.
-constant float3 RAINBOW[5] = {
-    float3(0.35, 0.88, 1.00), float3(0.42, 0.48, 1.00), float3(0.72, 0.40, 1.00),
-    float3(1.00, 0.42, 0.82), float3(1.00, 0.68, 0.36)
-};
-
-inline float3 rainbow(float t) {
-    t = fract(t) * 5.0;
-    int i = int(floor(t));
-    return mix(RAINBOW[i], RAINBOW[(i + 1) % 5], smoothstep(0.0, 1.0, fract(t)));
-}
-
 // MARK: wave
 
-// Three ribbons of light that swell in the middle and lie flat at the ends,
-// higher and livelier with the level.
-fragment float4 cp_wave(float4 pos [[position]], constant BasicUniforms& U [[buffer(0)]]) {
-    float2 size = U.a.xy;
-    float t = U.a.z;
-    float energy = U.a.w < 0.0 ? 0.55 + 0.25 * sin(t * 1.7) * sin(t * 0.63 + 1.0) : clamp(U.a.w, 0.0, 1.0);
-    float2 p = float2((pos.x / size.x) * 2.0 - 1.0, 1.0 - (pos.y / size.y) * 2.0);
-    float envelope = sq(clamp(1.0 - p.x * p.x, 0.0, 1.0));
+namespace wave {
+constant float PI          = 3.14159265359;
+constant float AMPLITUDE   = 0.32;
+constant float FREQ        = 1.1;
+constant float ABER_FREQ   = 1.0;
+constant float SPEED       = 2.4;
+constant float WAVE_SCALE  = 0.6;
+constant float ABERRATION  = 2.6;
+constant float THICKNESS   = 3.0;
+constant float INTENSITY   = 2.0;
+constant float FALLOFF     = 1.7;
+constant float EDGE_MASK   = 0.4;
+constant float EDGE_INSET  = 0.0;
+constant float BAND_FILL   = 30000.0;
+constant float BAND_THICK  = 0.08;
+constant float SOFTNESS    = 2.5;
+constant float LOW_AMP     = 6.0;
+constant float LOW_INT     = 1.5;
+constant float MID_ABER    = 0.8;
+constant float MID_ABAMP   = 0.05;
+constant float MID_SOFT    = 0.4;
+constant float HIGH_ABER   = 0.5;
+constant float HIGH_ABAMP  = 0.06;
+constant float RESOLVED    = 1.0;
+constant float UNRES_SCALE = 0.14;
 
-    float3 col = float3(0.0);
-    for (int i = 0; i < 3; i++) {
-        float fi = float(i);
-        float y = sin(p.x * (2.2 + fi * 1.3) + t * (1.8 + fi * 0.7) + fi * 2.1)
-                * (0.35 + 0.5 * energy) * (0.9 - fi * 0.2);
-        y += 0.08 * energy * sin(p.x * 7.0 - t * 3.1 + fi);
-        float d = abs(p.y - y * envelope);
-        float w = 0.012 + 0.02 * energy;
-        float glow = sq(w / (d + w)) * (0.6 + 0.4 * envelope);
-        col += rainbow(fi * 0.27 + p.x * 0.18 + t * 0.05) * glow * 0.9;
+inline float3 spectral4(int s) {
+    float x = float(s);
+    return clamp(float3(abs(x - 3.0) - 1.0, 2.0 - abs(x - 2.0), 2.0 - abs(x - 4.0)), 0.0, 1.0);
+}
+}
+
+// Four chromatic lines around a main one, swelling in the middle, with low,
+// mid and high bands that drift on their own. Given a level, the wave grows
+// and shrinks with it.
+fragment float4 cp_wave(float4 pos [[position]], constant BasicUniforms& U [[buffer(0)]]) {
+    using namespace wave;
+    float2 R = U.a.xy;
+    float2 fragCoord = float2(pos.x, R.y - pos.y);
+    float aspect = R.x / R.y;
+    float2 p = (fragCoord + 0.5) * 2.0 / R - 1.0;
+    p.x *= aspect;
+    p /= U.b.x;
+    float yScreen = p.y;
+    p /= max(WAVE_SCALE, 0.1);
+
+    float t    = U.a.z;
+    float low  = clamp(0.45 + 0.45 * sin(t * 0.8) * sin(t * 0.37 + 1.0), 0.0, 1.0);
+    float mid  = clamp(0.40 + 0.40 * sin(t * 1.7 + 2.0) * sin(t * 0.53), 0.0, 1.0);
+    float high = clamp(0.30 + 0.30 * sin(t * 2.9 + 4.0) * sin(t * 0.71 + 2.0), 0.0, 1.0);
+    float voice = U.a.w < 0.0 ? 1.0 : mix(0.22, 1.2, clamp(U.a.w, 0.0, 1.0));
+
+    float res   = clamp(RESOLVED, 0.0, 1.0);
+    float drift = gmod(t, 20.0 * PI) * SPEED;
+
+    float xN  = p.x / max(aspect, 1.0);
+    float env = cos(PI * 0.5 * min(abs(0.9 * xN), 1.0));
+    env *= env;
+
+    float A1    = (AMPLITUDE + 0.01 * low * LOW_AMP) * voice;
+    float A2    = A1 + (mid * MID_ABAMP + high * HIGH_ABAMP) * voice;
+    float AB    = (ABERRATION + mid * MID_ABER + high * HIGH_ABER) * res;
+    float th    = mix(0.1, 0.01 * THICKNESS, res);
+    float inten = mix(0.1, 0.01 * (INTENSITY + low * LOW_INT), res);
+    float soft  = 0.01 * res * max(0.0, SOFTNESS + mid * MID_SOFT);
+
+    float dUnres = max(length(p) - mix(0.14, UNRES_SCALE, res), 0.0);
+    float yMain = A1 * env * res * sin(p.x * FREQ + drift);
+
+    float bandFillTh = max(BAND_THICK, 1e-4);
+    float bandAmt    = 1e-4 * BAND_FILL * inten;
+    float3 num = float3(0.0), den = float3(0.0);
+    for (int s = 0; s < 4; s++) {
+        float3 hue = mix(float3(1.0), spectral4(s), res);
+        den += hue;
+        float ab = mix(-AB, AB, float(s) / 3.0);
+        float yL = A2 * env * res * sin(p.x * ABER_FREQ + drift + ab);
+        float d   = mix(dUnres, abs(p.y - yL), res);
+        float lor = mix(1.0 / (1.0 + sq(0.02 * d)), 1.0, res);
+        float line = inten / (sqrt(d * d + soft * soft) + th);
+        float lo = min(yMain, yL), hi = max(yMain, yL);
+        float dBand = max(0.0, max(p.y - hi, lo - p.y));
+        float band  = bandAmt / (dBand + bandFillTh);
+        num += hue * lor * (line + band);
     }
-    // A faint resting line where the ribbons flatten out.
-    col += rainbow(t * 0.05) * 0.15 * (0.004 / (abs(p.y) + 0.004)) * (1.0 - 0.5 * envelope);
+    float3 col = num / den;
+
+    float dM    = mix(dUnres, abs(p.y - yMain), res);
+    float lorM  = mix(1.0 / (1.0 + sq(0.02 * dM)), 1.0, res);
+    float boost = (1.0 - res) * (14.0 * low + 4.0);
+    col += 0.5 * inten * (lorM + boost) / (sqrt(dM * dM + soft * soft) + th);
+
+    col = pow(max(col, 0.0), float3(1.5));
+    float emT = clamp((abs(yScreen) - 1.0 + EDGE_INSET) / (-max(EDGE_MASK, 1e-4)), 0.0, 1.0);
+    float em  = emT * emT * (3.0 - 2.0 * emT);
+    float gauss = exp(-sq(xN * FALLOFF));
+    col *= mix(1.0, em * gauss, res);
+    col *= res;
     return lightOut(col);
 }
 
 // MARK: fluid dots
 
-// Six dots that circle, drift together until they melt into one blob, then
-// spread out again.
+namespace dots {
+constant float TAU = 6.28318530718;
+constant int   N   = 6;
+constant float SMOOTH_K = 0.08;
+constant float INTENSITY  = 0.0025;
+constant float FALLOFF_P  = 1.35;
+constant float FADE_START = 0.02;
+constant float FADE_END   = 0.56;
+constant float ABERR = 0.005;
+constant float3 SPECTRAL = float3(0.0, 0.5, 1.0) * ABERR;
+constant float HUE_SPEED = 0.06;
+constant float COLOR_K   = 0.5;
+constant float SAT       = 0.01;
+constant float HUE_SPAN  = 0.667;
+constant float MERGE_PERIOD = 6.0;
+constant float STAGGER  = 0.33;
+constant float HOLD     = 0.0;
+constant float W = 4.6;
+constant float L = 3.2;
+constant float PIERCE  = 0.12;
+constant float RECOIL  = 0.035;
+constant float REC_LAG = 0.11;
+constant float GATHER_PERIOD = 12.0;
+constant float GATHER_START  = 9.2;
+constant float GATHER_HOLD   = 0.8;
+constant float GATHER_R      = 0.008;
+constant float GATHER_DIM    = 0.85;
+constant float GATHER_IN     = 1.8;
+constant float GATHER_IN_L   = 7.5;
+constant float BURST_W = 6.5;
+constant float BURST_L = 4.0;
+constant float CHARGE_T     = 0.30;
+constant float CHARGE_SHRK  = 0.18;
+constant float CHARGE_GLOW  = 0.35;
+constant float FLASH_GAIN   = 1.2;
+constant float FLASH_DECAY  = 7.0;
+
+inline float hash11(float n) { return fract(sin(n * 127.1 + 311.7) * 43758.5453); }
+
+inline float settleWL(float tau, float w, float l) {
+    if (tau <= 0.0) return 0.0;
+    return 1.0 - exp(-l * tau) * cos(w * tau);
+}
+
+inline float settle(float tau) { return settleWL(tau, W, L); }
+
+inline float settleCrit(float tau, float l) {
+    if (tau <= 0.0) return 0.0;
+    return 1.0 - exp(-l * tau) * (1.0 + l * tau);
+}
+
+inline float smin(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+
+inline float3 hue2rgb(float h) {
+    h = fract(h);
+    float r = clamp(abs(h * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+    float g = clamp(2.0 - abs(h * 6.0 - 2.0), 0.0, 1.0);
+    float b = clamp(2.0 - abs(h * 6.0 - 4.0), 0.0, 1.0);
+    return float3(r, g, b);
+}
+
+inline float dotR(float fi, float seed, float t) {
+    return 0.036 + 0.010 * sin(t * 1.3 + seed * TAU) + 0.005 * sin(t * 2.4 + fi * 1.3);
+}
+
+inline float dotSD(float2 p, float2 pos, float r, float t, float fi, float shapeDamp) {
+    float2 d = p - pos;
+    float sq = 0.075 * (0.5 + 0.5 * sin(t * 0.9 + fi * 2.0)) * shapeDamp;
+    float ca = cos(t * 0.35 + fi), sa = sin(t * 0.35 + fi);
+    d = float2x2(float2(ca, -sa), float2(sa, ca)) * d;
+    d *= float2(1.0 + sq, 1.0 - sq);
+    return length(d) - r;
+}
+
+float3 scene(float2 p, float t) {
+    float k  = floor(t / MERGE_PERIOD);
+    float u  = fract(t / MERGE_PERIOD);
+    float te = u * MERGE_PERIOD;
+    float tg = gmod(t, GATHER_PERIOD);
+    float g  = settleCrit((tg - GATHER_START) * GATHER_IN, GATHER_IN_L)
+             - settleWL(tg - GATHER_START - GATHER_HOLD, BURST_W, BURST_L);
+    float gC = clamp(g, 0.0, 1.0);
+    float tb     = tg - (GATHER_START + GATHER_HOLD);
+    float charge = smoothstep(-CHARGE_T, 0.0, min(tb, 0.0)) * gC;
+    float flash  = tb > 0.0 ? exp(-tb * FLASH_DECAY) : 0.0;
+    float gBright = mix(1.0, GATHER_DIM, gC) * (1.0 + CHARGE_GLOW * charge + FLASH_GAIN * flash);
+    float3 total3 = float3(1e5);
+    float3 cAcc   = float3(0.0);
+    float  wAcc   = 1e-6;
+    for (int i = 0; i < N; i++) {
+        float fi   = float(i);
+        float seed = hash11(fi);
+        float ang = fi / float(N) * TAU + t * 0.35;
+        float2 dir = float2(cos(ang), sin(ang));
+        float R = 0.17 + 0.010 * sin(t * 1.0) + 0.007 * sin(t * 1.3 + seed * TAU);
+        float pairId   = gmod(fi, 3.0);
+        float moverLow = gmod(k + pairId, 2.0);
+        float isMover  = (fi < 2.5) ? step(moverLow, 0.5) : step(0.5, moverLow);
+        float goStart  = pairId * STAGGER;
+        float retStart = 3.0 * STAGGER + HOLD + pairId * STAGGER;
+        float m   = (settle(te - goStart)           - settle(te - retStart))           * isMover;
+        float rec = (settle(te - goStart - REC_LAG) - settle(te - retStart - REC_LAG)) * (1.0 - isMover);
+        float rSelf = dotR(fi, seed, t);
+        rSelf = mix(rSelf, 0.036, gC);
+        rSelf *= 1.0 - CHARGE_SHRK * charge;
+        float fj    = gmod(fi + 3.0, 6.0);
+        float rPart = dotR(fj, hash11(fj), t);
+        float deep   = -(R + RECOIL) - PIERCE * rPart;
+        float radial = mix(R, deep, m) + RECOIL * rec;
+        radial = mix(radial, GATHER_R, g);
+        float2 pos = radial * dir;
+        float sdR = dotSD(p - SPECTRAL.r * dir, pos, rSelf, t, fi, 1.0 - gC);
+        float sdG = dotSD(p - SPECTRAL.g * dir, pos, rSelf, t, fi, 1.0 - gC);
+        float sdB = dotSD(p - SPECTRAL.b * dir, pos, rSelf, t, fi, 1.0 - gC);
+        total3 = float3(smin(total3.r, sdR, SMOOTH_K),
+                        smin(total3.g, sdG, SMOOTH_K),
+                        smin(total3.b, sdB, SMOOTH_K));
+        float hue = fract(fi / float(N) + t * HUE_SPEED) * HUE_SPAN;
+        float3 dotCol = mix(float3(1.0), hue2rgb(hue), SAT);
+        float w = exp(-sdG * COLOR_K);
+        cAcc += w * dotCol;
+        wAcc += w;
+    }
+    float3 sd3    = max(total3, float3(0.0)) + 1e-4;
+    float3 core3  = clamp(INTENSITY / pow(sd3, float3(FALLOFF_P)), 0.0, 1.0);
+    float3 edge3  = 1.0 - smoothstep(float3(FADE_START), float3(FADE_END), sd3);
+    float3 bright = core3 * edge3 * gBright;
+    return bright * (cAcc / wAcc);
+}
+}
+
+// Six dots circling that pair up and pierce each other, then every twelve
+// seconds gather into one point and burst out again.
 fragment float4 cp_fluid_dots(float4 pos [[position]], constant BasicUniforms& U [[buffer(0)]]) {
-    float2 size = U.a.xy;
+    float2 res = U.a.xy;
+    float2 fragCoord = float2(pos.x, res.y - pos.y);
+    float2 p = (2.0 * fragCoord - res) / min(res.x, res.y) / U.b.x;
     float t = U.a.z;
-    float2 p = float2(pos.x - 0.5 * size.x, 0.5 * size.y - pos.y) / min(size.x, size.y) * 2.0;
-
-    float gather = 0.5 + 0.5 * sin(t * 0.9);
-    float field = 0.0;
-    float3 tint = float3(0.0);
-    float weight = 0.0;
-    for (int i = 0; i < 6; i++) {
-        float fi = float(i);
-        float a = t * (0.6 + 0.13 * fi) + fi * 1.047;
-        float r = mix(0.12, 0.48, gather) * (0.85 + 0.15 * sin(t * 1.3 + fi * 2.0));
-        float2 d = p - r * float2(cos(a), sin(a * 1.1));
-        float radius = 0.17 + 0.03 * sin(t * 2.1 + fi);
-        float f = radius * radius / (dot(d, d) + 1e-4);
-        field += f;
-        // Cubed, so each dot keeps its own colour instead of blending to white.
-        tint += rainbow(fi / 6.0 + t * 0.04) * f * f * f;
-        weight += f * f * f;
-    }
-    float3 base = tint / max(weight, 1e-6);
-    float aa = max(fwidth(field), 1e-3);
-    float inside = smoothstep(1.0 - aa, 1.0 + aa, field);
-    float halo = smoothstep(0.35, 1.0, field) * 0.35;
-    float3 col = base * (inside * 0.9 + halo) + inside * smoothstep(2.0, 5.0, field) * 0.1;
+    p /= 1.0 + 0.03 * sin(t * 1.0);
+    float3 col = dots::scene(p, t);
+    col *= 1.0 + 0.05 * sin(t * 1.0 + 1.0);
+    col = pow(max(col, 0.0), float3(1.0 / 1.2));
+    col = min(col, 1.0);
     return lightOut(col);
-}
-
-// MARK: strands
-
-struct StrandsUniforms {
-    float4 u0, u1, u2, u3, u4, u5, u6;
-    float4 colors[8];
-};
-
-#define uResolution X.u0.xy
-#define uLevel X.u0.z
-#define uCount int(X.u0.w)
-#define uMotion X.u1.xyz
-#define uAmplitude X.u1.w
-#define uWaviness X.u2.x
-#define uThickness X.u2.y
-#define uGlow X.u2.z
-#define uTaper X.u2.w
-#define uSpread X.u3.x
-#define uHueShift X.u3.y
-#define uIntensity X.u3.z
-#define uSaturation X.u3.w
-#define uScale X.u4.x
-#define uGlass X.u4.y
-#define uRadius X.u4.z
-#define uRefraction X.u4.w
-#define uDispersion X.u5.x
-#define uRim X.u5.y
-#define uLean X.u5.zw
-#define uIntro X.u6.x
-#define uPulse X.u6.y
-#define uLight X.u6.z
-#define uOpacity X.u6.w
-#define COL(i) X.colors[i].xyz
-#define SU constant StrandsUniforms& X
-
-namespace st {
-constant float PI = 3.14159265;
-
-float3 hueRotate(float3 c, float a) {
-    const float3x3 toYiq = float3x3(float3(0.299, 0.596, 0.211), float3(0.587, -0.274, -0.523), float3(0.114, -0.322, 0.312));
-    const float3x3 toRgb = float3x3(float3(1.0, 1.0, 1.0), float3(0.956, -0.272, -1.106), float3(0.621, -0.647, 1.703));
-    float3 yiq = toYiq * c;
-    float ca = cos(a);
-    float sa = sin(a);
-    yiq.yz = float2x2(float2(ca, sa), float2(-sa, ca)) * yiq.yz;
-    return max(toRgb * yiq, float3(0.0));
-}
-
-float3 grade(float3 c, SU) {
-    float g = dot(c, float3(0.2126, 0.7152, 0.0722));
-    c = clamp(mix(float3(g), c, 1.5 * uSaturation), 0.0, 1.0);
-    return hueRotate(c, uHueShift * 6.2831853);
-}
-
-float3 lightInk(float3 L, float halo, float3 body, SU) {
-    float3 Lg = grade(L, X);
-    float lum = dot(Lg, float3(0.2126, 0.7152, 0.0722));
-    float cov = 1.0 - exp(-lum * 2.6);
-    float3 hue = Lg / max(max(Lg.r, max(Lg.g, Lg.b)), 1e-4);
-    float white = pow(clamp(min(hue.r, min(hue.g, hue.b)), 0.0, 1.0), 1.4);
-    float3 ink = pow(hue, float3(2.2)) * 0.88;
-    float coreAmt = white * smoothstep(0.05, 2.2, lum) * 0.92;
-    float3 cream = mix(mix(COL(3), float3(1.0), 0.3), float3(1.0, 0.985, 0.95), smoothstep(1.2, 3.5, lum));
-    float3 c = mix(body, float3(0.66, 0.69, 0.76), halo * 0.32);
-    c = mix(c, ink, cov * (1.0 - white));
-    return mix(c, cream, clamp(coreAmt, 0.0, 1.0));
-}
-
-float sstep(float a, float b, float x) {
-    float t = clamp((x - a) / (b - a), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
-
-float erfa(float x) {
-    float a = abs(x);
-    float t = 1.0 / (1.0 + 0.3275911 * a);
-    float y = 1.0 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-a * a);
-    return x < 0.0 ? -y : y;
-}
-
-float3 grad4(float3 c0, float3 c1, float3 c2, float3 c3, float p1, float p2, float f) {
-    float3 c = mix(c0, c1, sstep(0.0, p1, f));
-    c = mix(c, c2, sstep(p1, p2, f));
-    return mix(c, c3, sstep(p2, 1.0, f));
-}
-
-float2 sheetW(float tt, float H, float sig, float sigB, float ridges, SU) {
-    float ew = 0.04 * uThickness;
-    float res0 = 0.0;
-    float res1 = 0.0;
-    for (int pass = 0; pass < 2; pass++) {
-        float sg = pass == 0 ? sig : sigB;
-        float fill = 0.5 * (erfa(tt / sg) - erfa((tt - H) / sg)) / H;
-        float se = sqrt(sg * sg + 0.25 * ew * ew * H * H);
-        float de = (tt - H + 0.5 * ew * H) / se;
-        float eg = exp(-de * de) / (se * 1.7724539);
-        float rgw = sqrt(sg * sg + 0.0025 * H * H);
-        float d1 = (tt - 0.45 * H) / rgw;
-        float d2 = (tt - 0.241 * H) / rgw;
-        float rid = 0.04 * (exp(-d1 * d1) * step(1.5, ridges) + 0.7 * exp(-d2 * d2) * step(2.5, ridges)) / (rgw * 1.7724539);
-        float v = 0.6 * fill * (1.0 - 0.55 * uLight) + (1.6 * ew * 0.886 * eg + rid) * (1.0 + 1.3 * uLight);
-        if (pass == 0) res0 = v;
-        else res1 = v;
-    }
-    return float2(res0, res1);
-}
-
-float axis(float x, SU) {
-    float a = uAmplitude;
-    return -0.2318 + uLean.y * 0.06 + (-0.2394 + uLean.x * 0.1) * x + 0.2815 * a * x * x + 0.3368 * a * x * x * x;
-}
-
-float softp(float z) {
-    return 0.03 * log(1.0 + exp(clamp(z / 0.03, -60.0, 60.0)));
-}
-
-float3 light(float2 u, float fp, float bend, float level, thread float& halo, SU) {
-    float amp = level < 0.65 ? mix(0.25, 1.0, sstep(0.0, 0.65, level)) : mix(1.0, 1.12, (level - 0.65) / 0.35);
-    float grow = clamp((amp - 0.25) / 0.75, 0.0, 1.25);
-    float x = u.x / uScale;
-    float uy = u.y;
-    float ya = axis(x, X);
-    float taper = max(uTaper, 0.05);
-    float bx = 0.0437 + uMotion.z + uLean.x * 0.08;
-    float bump = exp(-sq((x - bx) / (0.6879 * taper)));
-    float hW = 0.02 + softp(-0.12 + 0.5324 * uAmplitude * grow * uMotion.y * bump - 0.02);
-    float k = 1.0 * uWaviness;
-    float cphi = cos(0.5 * PI + k * (x + 0.0664) + uMotion.x);
-    float envC = (0.0886 + 0.3 * exp(-sq((x - 0.0634) / 0.6873))) * uSpread * grow;
-    float hC = -envC * tanh(cphi / 0.6);
-    float th = 0.051 * uThickness * exp(-sq(cphi / 0.5));
-    float sig = sqrt(sq(0.005 + 0.05 * bend) + fp * fp + th * th);
-    float sigB = sqrt(0.0064 * max(uGlow, 0.05) * max(uGlow, 0.05) + fp * fp + th * th);
-    float mend = exp(-pow(abs((x + 0.0421) / (0.4235 * taper)), 2.2689));
-    float3 red = COL(0);
-    float3 orange = COL(1);
-    float3 amber = COL(2);
-    float3 warmWhite = COL(3);
-    float3 cyan = COL(4);
-    float3 blue = COL(5);
-    float3 deep = COL(6);
-    float3 orangeEdge = orange * float3(1.0, 0.85, 0.77);
-    float3 coolCore = mix(warmWhite, float3(1.0, 1.0, 0.7), 0.6);
-    float3 mint = clamp(mix(cyan, warmWhite, 0.35) * float3(0.92, 1.05, 0.95), 0.0, 1.0);
-    float ridges = float(uCount);
-    float glow = max(uGlow, 0.0);
-    float3 L = float3(0.0);
-    float3 Lb = float3(0.0);
-    {
-        float H = max(abs(hW), 1e-4);
-        float tt = uy - ya;
-        float2 w = sheetW(tt, H, sig, sigB, ridges, X);
-        float f = clamp(tt / H, 0.0, 1.0);
-        float3 c = grad4(warmWhite, amber, orange, orangeEdge, 0.2351, 0.5643, f);
-        c = mix(c, red, sstep(0.75, 1.0, f) * sstep(0.196, 0.3376, hW));
-        float3 mean = (grad4(warmWhite, amber, orange, orangeEdge, 0.2351, 0.5643, 0.1) + grad4(warmWhite, amber, orange, orangeEdge, 0.2351, 0.5643, 0.35) + grad4(warmWhite, amber, orange, orangeEdge, 0.2351, 0.5643, 0.6) + grad4(warmWhite, amber, orange, orangeEdge, 0.2351, 0.5643, 0.9)) * 0.25;
-        L += mix(c, mean, sstep(0.3, 1.2, sig / H)) * (w.x * 0.2101 * mend);
-        Lb += mix(c, mean, sstep(0.3, 1.2, sigB / H)) * (w.y * 0.2101 * mend);
-    }
-    {
-        float H = max(abs(hC), 1e-4);
-        float tt = (uy - ya) * (hC >= 0.0 ? 1.0 : -1.0);
-        float2 w = sheetW(tt, H, sig, sigB, 1.0, X);
-        float f = clamp(tt / H, 0.0, 1.0);
-        float3 c = grad4(coolCore, cyan, blue, deep, 0.15, 0.7931, f);
-        float3 mean = (grad4(coolCore, cyan, blue, deep, 0.15, 0.7931, 0.1) + grad4(coolCore, cyan, blue, deep, 0.15, 0.7931, 0.35) + grad4(coolCore, cyan, blue, deep, 0.15, 0.7931, 0.6) + grad4(coolCore, cyan, blue, deep, 0.15, 0.7931, 0.9)) * 0.25;
-        L += mix(c, mean, sstep(0.3, 1.2, sig / H)) * (w.x * 0.28 * mend);
-        Lb += mix(c, mean, sstep(0.3, 1.2, sigB / H)) * (w.y * 0.28 * mend);
-    }
-    float3 G = float3(0.0);
-    float wh = sqrt(0.0256 + envC * envC * cphi * cphi);
-    float dg = (uy - ya) / wh;
-    G += float3(1.0, 0.97, 0.92) * (exp(-dg * dg) * 0.0315 / wh * mend * glow);
-    float nx = -0.0664 - uMotion.x / k + 0.2168;
-    float bxx = (x - nx) / 0.1849;
-    float byy = (uy - axis(nx, X) - 0.0333) / (0.0544 * mix(0.7, 1.0, min(amp, 1.0)));
-    G += mint * (exp(-bxx * bxx - byy * byy) * 1.4 * glow * sstep(0.0, 0.6, amp));
-    float hb = (uy - ya - 0.3 * hW) / (0.07 + 0.45 * hW + 0.3 * envC);
-    halo = exp(-hb * hb) * mend * smoothstep(0.0, 0.3, uIntro);
-    float3 total = L + 0.16 * glow * Lb + 1.16 * G;
-    return total * 2.4 * uIntensity * smoothstep(0.0, 0.3, uIntro) * sstep(uIntro * 1.6, uIntro * 1.6 - 0.5, abs(x));
-}
-
-float2 remap(float2 p, float f, thread float& r, thread float& bend, SU) {
-    r = min(length(p), 0.9995);
-    bend = pow(r, 5.17);
-    float k = clamp(uRefraction, 0.0, 1.8);
-    float sc = (1.0 - 0.278 * k * (1.0 - bend)) * (1.0 - 0.632 * k * bend) / (1.0 - 0.278 * k);
-    return p * sc * f;
-}
-}
-
-fragment float4 cp_strands(float4 position [[position]], SU [[buffer(0)]]) {
-    using namespace st;
-    float2 res = uResolution;
-    float2 frag = float2(position.x, res.y - position.y);
-    float2 p = (frag - 0.5 * res) / min(res.x, res.y);
-    float level = clamp(uLevel, 0.0, 1.0);
-    float appear = smoothstep(0.0, 0.35, uIntro);
-
-    if (uGlass > 0.5) {
-        float R = uRadius * mix(0.94, 1.0, uIntro) * (1.0 + 0.03 * uPulse);
-        float px = 1.0 / (min(res.x, res.y) * R);
-        float2 pc = p / R;
-        float rho = length(pc);
-        if (rho > 1.0 + 2.0 * px) {
-            float sh = uLight * 0.07 * exp(-sq((rho - 0.985) / 0.07)) * smoothstep(-0.6, 0.4, -pc.y) * appear * uOpacity;
-            return float4(0.0, 0.0, 0.0, sh);
-        }
-        float r;
-        float bend;
-        float2 u = remap(pc, 1.0, r, bend, X);
-        float fp = 0.5 * max(length(dfdx(u)), length(dfdy(u)));
-        float halo;
-        float skip;
-        float3 L = light(u, fp, bend, level, halo, X);
-        float ca = 0.02 * uDispersion * bend;
-        if (ca > 0.0015) {
-            float r2;
-            float b2;
-            L.r = light(remap(pc, 1.0 - ca, r2, b2, X), fp, bend, level, skip, X).r;
-            L.b = light(remap(pc, 1.0 + ca, r2, b2, X), fp, bend, level, skip, X).b;
-        }
-        float3 col = 1.0 - exp(-L);
-        float2 d = pc / max(rho, 1e-6);
-        float key = 0.4 * pow(max(0.0, d.x * 0.94 - d.y * 0.34), 6.0) + 0.2 * pow(max(0.0, -d.x * 0.5 + d.y * 0.87), 6.0);
-        float ring = exp(-sq((r - 0.985) / 0.011));
-        float hzk = 0.25 + 0.7 * pow(max(0.0, -d.x * 0.6 + d.y * 0.8), 2.0) + pow(max(0.0, d.x * 0.8 - d.y * 0.6), 2.0);
-        float haze = exp(-sq((1.0 - r) / 0.09)) * hzk * 0.13 * uRim;
-        float3 orb;
-        if (uLight > 0.5) {
-            float lz = dot(d * r, float2(-0.55, 0.83));
-            float3 body = mix(float3(0.885, 0.893, 0.915), float3(0.972, 0.975, 0.983), 0.5 + 0.5 * lz);
-            float fres = smoothstep(0.8, 1.0, r);
-            body = mix(body, float3(0.82, 0.83, 0.86), fres * fres * 0.5);
-            orb = lightInk(L, halo, body, X);
-            float spec = exp(-sq((r - 0.955) / 0.03)) * pow(max(0.0, dot(d, float2(-0.55, 0.83))), 3.0);
-            orb = mix(orb, float3(1.0), clamp(spec * 0.85 * uRim + haze * 0.6, 0.0, 1.0));
-            float edge = exp(-sq((1.0 - r) / (0.01 + 1.2 * px)));
-            orb *= 1.0 - 0.12 * edge;
-        } else {
-            orb = float3(0.04) + col * (1.0 + 0.1 * bend * uRim) + ring * key * uRim * (1.0 + 0.4 * level) + haze * float3(1.0, 1.02, 1.04);
-            orb = grade(clamp(orb, 0.0, 1.0), X);
-        }
-        float inside = clamp((1.0 - rho) / px + 0.5, 0.0, 1.0) * appear;
-        float3 rgb = orb * inside;
-        return float4(rgb, max(inside * mix(0.92, 1.0, uLight), max(max(rgb.r, rgb.g), rgb.b))) * uOpacity;
-    } else {
-        float span = 0.5 * res.x / min(res.x, res.y);
-        float2 u = p * (0.78 / span) + float2(0.0, -0.15);
-        float fp = 0.5 * max(length(dfdx(u)), length(dfdy(u)));
-        float halo;
-        float fade = sstep(0.82, 0.55, abs(u.x));
-        float3 L = light(u, fp, 0.0, level, halo, X) * fade;
-        float3 col = grade(1.0 - exp(-L), X) * appear;
-        if (uLight > 0.5) {
-            float3 c = lightInk(L, halo * fade * 0.6, float3(1.0), X);
-            float a = clamp(1.0 - min(c.r, min(c.g, c.b)), 0.0, 1.0) * appear;
-            return float4((c - (1.0 - a)) * appear, a) * uOpacity;
-        }
-        return float4(col, max(max(col.r, col.g), col.b)) * uOpacity;
-    }
 }
 """#

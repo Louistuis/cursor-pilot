@@ -124,7 +124,7 @@ struct OnboardingView: View {
 
     private var welcome: some View {
         VStack(spacing: 16) {
-            VoiceOrb(listening: true).frame(width: 150, height: 150)
+            ShaderTile { SpeakingWave() }.frame(width: 150, height: 150)
             Text("Meet Cursor Pilot").font(.largeTitle.bold())
             Text("A helper that lives next to your cursor. Ask out loud about anything on your screen, and it answers, then flies over to point at what you need.")
                 .multilineTextAlignment(.center)
@@ -258,16 +258,20 @@ private struct AccessCard: View {
     }
 }
 
-/// Big orb that reacts to the microphone while the user talks.
+/// The wave following the microphone while the user talks, then the dots
+/// while Cursor Pilot thinks.
 private struct TryItOrb: View {
     @ObservedObject var model: AppModel
     @ObservedObject var buddy: OverlayState
 
     var body: some View {
-        switch model.phase {
-        case .thinking: ThinkingBlobs()
-        default: VoiceOrb(level: model.phase == .listening ? buddy.level : nil,
-                          energy: model.phase == .idle ? 0.35 : 0.8)
+        ShaderTile {
+            switch model.phase {
+            case .thinking: ThinkingBlobs(zoom: 1.6)
+            case .listening: SpeakingWave(level: buddy.level)
+            case .answering: SpeakingWave()
+            case .idle: SpeakingWave(level: 0.15)
+            }
         }
     }
 }

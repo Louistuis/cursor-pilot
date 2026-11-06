@@ -701,7 +701,7 @@ private struct ChatEmptyState: View {
     @ObservedObject var model: AppModel
     var body: some View {
         VStack(spacing: 10) {
-            VoiceOrb(energy: 0.4).frame(width: 84, height: 84)
+            ShaderTile { SpeakingWave() }.frame(width: 84, height: 84)
             Text("What can I do for you?").font(.title3.weight(.semibold))
             Text("Text me here, or hold \(model.talkDisplay) anywhere and just talk.")
                 .font(.callout)
