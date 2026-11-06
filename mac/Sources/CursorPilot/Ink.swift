@@ -6,13 +6,20 @@ enum InkShape: Equatable {
     case circle(center: CGPoint, radius: CGFloat)
     case arrow(from: CGPoint, to: CGPoint)
     case box(CGRect)
+    case underline(from: CGPoint, width: CGFloat)
+    case highlight(CGRect)
+    case trace([CGPoint])
+    case note(at: CGPoint, text: String)
 
-    /// Where the shape sits, to decide which screen shows it.
+    /// Where the shape sits: which screen shows it, and what it is pinned to.
     var anchor: CGPoint {
         switch self {
         case .circle(let c, _): c
         case .arrow(_, let to): to
-        case .box(let r): CGPoint(x: r.midX, y: r.midY)
+        case .box(let r), .highlight(let r): CGPoint(x: r.midX, y: r.midY)
+        case .underline(let a, let w): CGPoint(x: a.x + w / 2, y: a.y - 6)
+        case .trace(let pts): pts[pts.count / 2]
+        case .note(let p, _): p
         }
     }
 
@@ -21,6 +28,10 @@ enum InkShape: Equatable {
         case .circle(let c, let r): .circle(center: c - o, radius: r)
         case .arrow(let a, let b): .arrow(from: a - o, to: b - o)
         case .box(let r): .box(r.offsetBy(dx: -o.x, dy: -o.y))
+        case .underline(let a, let w): .underline(from: a - o, width: w)
+        case .highlight(let r): .highlight(r.offsetBy(dx: -o.x, dy: -o.y))
+        case .trace(let pts): .trace(pts.map { $0 - o })
+        case .note(let p, let t): .note(at: p - o, text: t)
         }
     }
 }
@@ -29,6 +40,13 @@ struct InkMark: Identifiable, Equatable {
     let id = UUID()
     var shape: InkShape
     var label: String
+    /// How far what it marks has moved since (scrolled, window dragged).
+    var shift: CGPoint = .zero
+    /// What it marks is out of sight: scrolled away or covered.
+    var hidden = false
+
+    /// Where it is drawn now, in global points.
+    var placed: InkShape { shift == .zero ? shape : shape.offset(by: CGPoint(x: -shift.x, y: -shift.y)) }
 }
 
 /// A freehand pen stroke, in global top-left-origin points.
@@ -41,6 +59,8 @@ struct InkStroke: Identifiable, Equatable {
 enum InkPalette {
     /// Claude's marker.
     static let marker = Color(red: 1.0, green: 0.34, blue: 0.24)
+    /// Claude's highlighter and sticky notes.
+    static let highlighter = Color(red: 1.0, green: 0.86, blue: 0.2)
     /// The user's pens.
     static let pens: [Color] = [
         Color(red: 1.0, green: 0.18, blue: 0.62),
@@ -91,8 +111,15 @@ final class InkController {
 
     // MARK: Claude's marks
 
+    /// What each mark is pinned to: the element under it when drawn, and
+    /// where that element was then.
+    private var pins: [UUID: (element: AXUIElement, pid: pid_t, origin: CGPoint)] = [:]
+    private var pinTimer: Timer?
+    private var pinTicks = 0
+
     func add(_ mark: InkMark) {
         state.marks.append(mark)
+        pin(mark)
         updateVisibility()
         let id = mark.id
         Task { [weak self] in
@@ -105,7 +132,58 @@ final class InkController {
 
     func clearMarks() {
         withAnimation(.easeOut(duration: 0.25)) { state.marks.removeAll() }
+        pins.removeAll()
         updateVisibility()
+    }
+
+    // MARK: Pinning
+
+    /// Pins a mark to the control or text under it, so it moves with the
+    /// page when it scrolls and with the window when it is dragged.
+    private func pin(_ mark: InkMark) {
+        guard ComputerControl.hasAccessibility, let win = BackgroundInput.window(at: mark.shape.anchor),
+              let element = BackgroundInput.element(at: mark.shape.anchor, pid: win.pid),
+              let frame = BackgroundInput.frame(element)
+        else { return }
+        pins[mark.id] = (element, win.pid, frame.origin)
+        if pinTimer == nil {
+            let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.followPins() }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            pinTimer = t
+        }
+    }
+
+    private func followPins() {
+        pins = pins.filter { id, _ in state.marks.contains { $0.id == id } }
+        guard !pins.isEmpty else {
+            pinTimer?.invalidate()
+            pinTimer = nil
+            return
+        }
+        pinTicks += 1
+        let checkCover = pinTicks % 5 == 0
+        for i in state.marks.indices {
+            guard let pin = pins[state.marks[i].id] else { continue }
+            var mark = state.marks[i]
+            if let frame = BackgroundInput.frame(pin.element) {
+                let shift = CGPoint(x: frame.minX - pin.origin.x, y: frame.minY - pin.origin.y)
+                if hypot(shift.x - mark.shift.x, shift.y - mark.shift.y) > 0.5 { mark.shift = shift }
+                if checkCover {
+                    // Hidden when another window now covers it, or it
+                    // scrolled out from under its own.
+                    mark.hidden = BackgroundInput.window(at: mark.placed.anchor)?.pid != pin.pid
+                }
+            } else {
+                mark.hidden = true
+            }
+            if mark != state.marks[i] {
+                withAnimation(mark.hidden != state.marks[i].hidden ? .easeOut(duration: 0.2) : nil) {
+                    state.marks[i] = mark
+                }
+            }
+        }
     }
 
     // MARK: Sketching
@@ -252,8 +330,9 @@ struct InkCanvas: View {
                     .gesture(penGesture)
             }
             strokesLayer.allowsHitTesting(false)
-            ForEach(state.marks.filter { bounds.contains($0.shape.anchor) }) { mark in
-                MarkView(shape: mark.shape.offset(by: origin), label: mark.label, seed: mark.id.hashValue)
+            ForEach(state.marks.filter { bounds.contains($0.placed.anchor) }) { mark in
+                MarkView(shape: mark.placed.offset(by: origin), label: mark.label, seed: mark.id.hashValue)
+                    .opacity(mark.hidden ? 0 : 1)
                     .allowsHitTesting(false)
                     .transition(.opacity)
             }
@@ -341,6 +420,29 @@ struct MarkView: View {
                     .frame(width: r.width, height: r.height)
                     .offset(x: r.minX, y: r.minY)
             }
+            if case .highlight(let r) = shape {
+                // A highlighter swipe, wiped on from the left.
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(InkPalette.highlighter.opacity(0.42))
+                    .frame(width: r.width + 6, height: r.height + 2)
+                    .rotationEffect(.degrees(-0.6))
+                    .mask(alignment: .leading) { Rectangle().frame(width: (r.width + 10) * progress) }
+                    .offset(x: r.minX - 3, y: r.minY - 1)
+            }
+            if case .note(let p, let text) = shape {
+                Text(text)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color(white: 0.12))
+                    .frame(maxWidth: 180, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .background(InkPalette.highlighter, in: RoundedRectangle(cornerRadius: 4))
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+                    .rotationEffect(.degrees(seed % 2 == 0 ? -2.5 : 2))
+                    .scaleEffect(0.6 + 0.4 * progress, anchor: .topLeading)
+                    .opacity(progress)
+                    .offset(x: p.x + 10, y: p.y + 10)
+            }
             MarkPath(shape: shape, seed: seed)
                 .trim(from: 0, to: progress)
                 .stroke(InkPalette.marker, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
@@ -367,7 +469,10 @@ struct MarkView: View {
         switch shape {
         case .circle(let c, let r): CGPoint(x: c.x, y: c.y - r - 18)
         case .arrow(let a, _): CGPoint(x: a.x, y: a.y - 16)
-        case .box(let r): CGPoint(x: r.midX, y: r.minY - 16)
+        case .box(let r), .highlight(let r): CGPoint(x: r.midX, y: r.minY - 16)
+        case .underline(let a, let w): CGPoint(x: a.x + w / 2, y: a.y + 20)
+        case .trace(let pts): CGPoint(x: pts[0].x, y: pts[0].y - 16)
+        case .note(let p, _): p
         }
     }
 }
@@ -412,6 +517,18 @@ struct MarkPath: Shape {
                 p.move(to: b)
                 p.addLine(to: CGPoint(x: b.x - hx * head, y: b.y - hy * head))
             }
+        case .underline(let a, let w):
+            // A quick marker line with a slight wave, overshooting a little.
+            let steps = 24
+            for i in 0...steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                let pt = CGPoint(x: a.x - 3 + (w + 6) * t, y: a.y + 3 + sin(t * .pi * 2 + phase) * 1.4 + t * 1.5)
+                i == 0 ? p.move(to: pt) : p.addLine(to: pt)
+            }
+        case .trace(let pts):
+            p = smoothPath(pts)
+        case .highlight, .note:
+            break
         case .box(let r):
             let j: CGFloat = 3
             p.move(to: CGPoint(x: r.minX - j, y: r.minY + 1))
@@ -505,6 +622,12 @@ struct InkPreview: View {
             MarkView(shape: .circle(center: CGPoint(x: 205, y: 215), radius: 48), label: "Save button", seed: 3, animated: false)
             MarkView(shape: .arrow(from: CGPoint(x: 420, y: 300), to: CGPoint(x: 300, y: 380)), label: "Drag here", seed: 4, animated: false)
             MarkView(shape: .box(CGRect(x: 480, y: 250, width: 200, height: 46)), label: "Your total", seed: 5, animated: false)
+            Text("Net revenue grew 14% this quarter").font(.title3).foregroundStyle(.black).offset(x: 100, y: 440)
+            MarkView(shape: .highlight(CGRect(x: 100, y: 440, width: 330, height: 26)), label: "", seed: 6, animated: false)
+            MarkView(shape: .underline(from: CGPoint(x: 100, y: 470), width: 330), label: "", seed: 7, animated: false)
+            MarkView(shape: .trace([CGPoint(x: 120, y: 330), CGPoint(x: 170, y: 300), CGPoint(x: 230, y: 320),
+                                    CGPoint(x: 270, y: 290), CGPoint(x: 330, y: 300)]), label: "Route", seed: 8, animated: false)
+            MarkView(shape: .note(at: CGPoint(x: 690, y: 160), text: "Export as PDF first, then send it."), label: "", seed: 9, animated: false)
             InkCanvas(state: state, displayID: 1, origin: .zero, size: CGSize(width: 900, height: 600),
                       ask: { _ in }, save: {}, done: {})
         }

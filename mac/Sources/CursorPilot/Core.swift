@@ -284,6 +284,13 @@ private func parseEvent(_ json: String) -> CoreEvent? {
         case "circle": shape = .circle(center: CGPoint(x: n("x"), y: n("y")), radius: n("r"))
         case "arrow": shape = .arrow(from: CGPoint(x: n("x1"), y: n("y1")), to: CGPoint(x: n("x2"), y: n("y2")))
         case "box": shape = .box(CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h")))
+        case "underline": shape = .underline(from: CGPoint(x: n("x"), y: n("y")), width: n("w"))
+        case "highlight": shape = .highlight(CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h")))
+        case "trace":
+            let pts = (obj["points"] as? [[Double]] ?? []).compactMap { $0.count == 2 ? CGPoint(x: $0[0], y: $0[1]) : nil }
+            guard pts.count >= 2 else { return nil }
+            shape = .trace(pts)
+        case "note": shape = .note(at: CGPoint(x: n("x"), y: n("y")), text: str("text"))
         default: return nil
         }
         return .mark(shape, label: str("label"))

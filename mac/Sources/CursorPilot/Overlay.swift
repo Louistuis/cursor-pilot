@@ -644,7 +644,7 @@ struct KaraokeCaption: View {
         let shown = Array(lines.indices.filter { $0 >= row && $0 <= row + 1 })
         VStack(alignment: .leading, spacing: 4) {
             ForEach(shown, id: \.self) { i in
-                HStack(spacing: 7) {
+                HStack(spacing: 5) {
                     ForEach(lines[i]) { w in
                         Text(w.text)
                             .foregroundStyle(.primary.opacity(w.id == current ? 1 : w.id < current ? 0.62 : 0.4))

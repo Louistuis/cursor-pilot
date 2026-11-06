@@ -4,7 +4,8 @@
 //! `<point x="412" y="230" screen="0" label="Save button"/>`,
 //! `<circle x="412" y="230" r="40" screen="0"/>`,
 //! `<arrow x1="100" y1="80" x2="412" y2="230" screen="0"/>` or
-//! `<box x="380" y="210" w="80" h="40" screen="0"/>`.
+//! `<box x="380" y="210" w="80" h="40" screen="0"/>`, plus `<underline>`,
+//! `<highlight>`, `<trace>` and `<note>`.
 //! Text arrives in arbitrary chunks, so a tag can be split across deltas; the
 //! filter holds back anything that might still become a tag and releases it
 //! as plain text once it clearly is not one.
@@ -12,8 +13,19 @@
 use std::collections::HashMap;
 
 /// Longest run we hold back while waiting for a tag to close.
-const MAX_TAG_LEN: usize = 400;
-const TAG_NAMES: [&str; 4] = ["point", "circle", "arrow", "box"];
+const MAX_TAG_LEN: usize = 600;
+const TAG_NAMES: [&str; 8] = [
+    "point",
+    "circle",
+    "arrow",
+    "box",
+    "underline",
+    "highlight",
+    "trace",
+    "note",
+];
+/// Most points kept from a trace.
+const MAX_TRACE_POINTS: usize = 40;
 /// Ring radius, in screenshot pixels, when a circle tag gives none.
 const DEFAULT_RADIUS: f64 = 36.0;
 
@@ -28,6 +40,14 @@ pub enum Shape {
     Arrow { x1: f64, y1: f64, x2: f64, y2: f64 },
     /// Highlight a rectangle; x, y is its top-left corner.
     Box { x: f64, y: f64, w: f64, h: f64 },
+    /// A marker line under text, from x, y across w.
+    Underline { x: f64, y: f64, w: f64 },
+    /// A translucent highlighter swipe over a rectangle.
+    Highlight { x: f64, y: f64, w: f64, h: f64 },
+    /// A freehand line through points, e.g. tracing a route or an outline.
+    Trace { points: Vec<(f64, f64)> },
+    /// A sticky note with a few words, pinned at x, y.
+    Note { x: f64, y: f64, text: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,6 +191,43 @@ fn parse_mark(tag: &str) -> Option<Mark> {
             y: num("y")?,
             w: num("w").filter(|w| *w > 0.0)?,
             h: num("h").filter(|h| *h > 0.0)?,
+        },
+        "underline" => Shape::Underline {
+            x: num("x")?,
+            y: num("y")?,
+            w: num("w").filter(|w| *w > 0.0)?,
+        },
+        "highlight" => Shape::Highlight {
+            x: num("x")?,
+            y: num("y")?,
+            w: num("w").filter(|w| *w > 0.0)?,
+            h: num("h").filter(|h| *h > 0.0)?,
+        },
+        "trace" => {
+            let points: Vec<(f64, f64)> = attrs
+                .get("points")?
+                .split_whitespace()
+                .filter_map(|pair| {
+                    let (x, y) = pair.split_once(',')?;
+                    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+                })
+                .filter(|(x, y): &(f64, f64)| x.is_finite() && y.is_finite())
+                .take(MAX_TRACE_POINTS)
+                .collect();
+            if points.len() < 2 {
+                return None;
+            }
+            Shape::Trace { points }
+        }
+        "note" => Shape::Note {
+            x: num("x")?,
+            y: num("y")?,
+            text: attrs
+                .get("text")
+                .filter(|t| !t.trim().is_empty())?
+                .chars()
+                .take(120)
+                .collect(),
         },
         _ => return None,
     };
@@ -369,5 +426,48 @@ mod tests {
             vec![Piece::Text("<boxes> and <arrows".into())]
         );
         assert_eq!(run(&["<box w=\"0\" h=\"1\" x=\"1\" y=\"1\"/>"]).len(), 1);
+    }
+
+    #[test]
+    fn parses_new_drawing_tags() {
+        let mut f = MarkupFilter::new();
+        let mut pieces = f.push(
+            r#"Here <underline x="10" y="20" w="80"/> and <highlight x="1" y="2" w="3" h="4"/>"#,
+        );
+        pieces.extend(f.push(
+            r#" path <trace points="0,0 10,5 20,0"/> <note x="5" y="6" text="Click here first"/>"#,
+        ));
+        pieces.extend(f.finish());
+        let shapes: Vec<Shape> = pieces
+            .into_iter()
+            .filter_map(|p| match p {
+                Piece::Mark(m) => Some(m.shape),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                Shape::Underline {
+                    x: 10.0,
+                    y: 20.0,
+                    w: 80.0
+                },
+                Shape::Highlight {
+                    x: 1.0,
+                    y: 2.0,
+                    w: 3.0,
+                    h: 4.0
+                },
+                Shape::Trace {
+                    points: vec![(0.0, 0.0), (10.0, 5.0), (20.0, 0.0)]
+                },
+                Shape::Note {
+                    x: 5.0,
+                    y: 6.0,
+                    text: "Click here first".into()
+                },
+            ]
+        );
     }
 }

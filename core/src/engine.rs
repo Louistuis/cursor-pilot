@@ -39,8 +39,15 @@ area; r is its radius.
 from the first point to the second, for directions and drags.
 - <box x=\"600\" y=\"390\" w=\"120\" h=\"44\" screen=\"0\" label=\"Your total\"/> highlights a \
 rectangle whose top-left corner is x, y.
-Labels are two to four words. Use several tags in order to walk through steps, but no more than \
-a handful per reply. Never read coordinates aloud or describe the tags, and only mark things you \
+- <underline x=\"120\" y=\"318\" w=\"240\" screen=\"0\"/> underlines text; y is just below the \
+text and w its width.
+- <highlight x=\"120\" y=\"300\" w=\"240\" h=\"20\" screen=\"0\"/> sweeps a highlighter over a line \
+of text.
+- <trace points=\"100,200 180,240 260,210\" screen=\"0\" label=\"Route\"/> draws a freehand line \
+through the points, to follow a path, an outline or a chart.
+- <note x=\"640\" y=\"412\" text=\"Export first\" screen=\"0\"/> sticks a note of a few words there.
+Drawings appear as your voice reaches them and stay pinned to what they mark. Labels are two to \
+four words. Use several tags in order to walk through steps, but no more than a handful per reply. Never read coordinates aloud or describe the tags, and only mark things you \
 can actually see. Without screenshots, do not use tags.
 
 If the user drew on their screen, their freehand pen strokes are visible in the screenshot; \
@@ -595,6 +602,21 @@ impl ReplyStream {
                             "x": gx(x), "y": gy(y),
                             "w": (x.clamp(0.0, iw) + w).min(iw) * sx - x.clamp(0.0, iw) * sx,
                             "h": (y.clamp(0.0, ih) + h).min(ih) * sy - y.clamp(0.0, ih) * sy,
+                        }),
+                        Shape::Underline { x, y, w } => json!({
+                            "type": "mark", "shape": "underline",
+                            "x": gx(x), "y": gy(y), "w": gx(x + w) - gx(x),
+                        }),
+                        Shape::Highlight { x, y, w, h } => json!({
+                            "type": "mark", "shape": "highlight",
+                            "x": gx(x), "y": gy(y), "w": gx(x + w) - gx(x), "h": gy(y + h) - gy(y),
+                        }),
+                        Shape::Trace { points } => json!({
+                            "type": "mark", "shape": "trace",
+                            "points": points.iter().map(|&(x, y)| json!([gx(x), gy(y)])).collect::<Vec<_>>(),
+                        }),
+                        Shape::Note { x, y, text } => json!({
+                            "type": "mark", "shape": "note", "x": gx(x), "y": gy(y), "text": text,
                         }),
                     };
                     event["screen"] = json!(m.screen);
