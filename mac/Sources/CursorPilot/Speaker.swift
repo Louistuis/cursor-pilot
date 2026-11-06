@@ -18,13 +18,18 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private var voiceCache: [String: AVSpeechSynthesisVoice] = [:]
 
     var isSpeaking: Bool { pending > 0 }
+    /// A sentence starts being spoken: its number (from `speak`) and text.
+    var onSentence: ((Int, String) -> Void)?
+    /// The word about to be spoken, as a UTF-16 range of that sentence.
+    var onWord: ((NSRange) -> Void)?
+    private var numbers: [ObjectIdentifier: Int] = [:]
 
     override init() {
         super.init()
         synth.delegate = self
     }
 
-    func speak(_ text: String) {
+    func speak(_ text: String, number: Int = -1) {
         let lang = language(of: text)
         let u = AVSpeechUtterance(string: text)
         if let id = voiceID, let chosen = AVSpeechSynthesisVoice(identifier: id), chosen.language.hasPrefix(lang) {
@@ -36,11 +41,13 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         u.pitchMultiplier = 1.0
         u.postUtteranceDelay = 0.04
         pending += 1
+        numbers[ObjectIdentifier(u)] = number
         synth.speak(u)
     }
 
     func stop() {
         pending = 0
+        numbers.removeAll()
         synth.stopSpeaking(at: .immediate)
     }
 
@@ -103,7 +110,19 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         AVSpeechSynthesisVoice.speechVoices().contains { matches($0, lang) && $0.quality != .default }
     }
 
+    nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didStart u: AVSpeechUtterance) {
+        let id = ObjectIdentifier(u), text = u.speechString
+        Task { @MainActor in self.onSentence?(self.numbers[id] ?? -1, text) }
+    }
+
+    nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, willSpeakRangeOfSpeechString range: NSRange,
+                                       utterance u: AVSpeechUtterance) {
+        Task { @MainActor in self.onWord?(range) }
+    }
+
     nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
+        let id = ObjectIdentifier(u)
+        Task { @MainActor in self.numbers[id] = nil }
         Task { @MainActor in self.finishedOne() }
     }
 

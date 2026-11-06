@@ -232,6 +232,7 @@ final class ComputerControl {
             let dx = dir == "right" ? amount : dir == "left" ? -amount : 0
             guard let win = BackgroundInput.window(at: at) else { return fail("Nothing to scroll there.") }
             target = win
+            if Self.mayBorrowPointer, BackgroundInput.needsRealPointer(win.pid) { realPointerApps.insert(win.pid) }
             if !mods.isEmpty || realPointerApps.contains(win.pid) {
                 await BackgroundInput.withRealPointer(at: at) {
                     let e = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2,
@@ -318,10 +319,11 @@ final class ComputerControl {
             return ("Clicked with the real pointer (no app window there).", "Clicked")
         }
         target = win
+        if Self.mayBorrowPointer, BackgroundInput.needsRealPointer(win.pid) { realPointerApps.insert(win.pid) }
         let repeated = lastPosted.map { hypot($0.point.x - p.x, $0.point.y - p.y) < 8 && Date().timeIntervalSince($0.time) < 45 } ?? false
         let plain = name == "left_click" && flags.isEmpty
 
-        if plain, let outcome = BackgroundInput.click(at: p, in: win, semanticOnly: true) {
+        if plain, !realPointerApps.contains(win.pid), let outcome = BackgroundInput.click(at: p, in: win, semanticOnly: true) {
             lastPosted = nil
             return describe(outcome, in: win)
         }

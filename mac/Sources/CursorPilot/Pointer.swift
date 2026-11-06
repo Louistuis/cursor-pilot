@@ -205,6 +205,23 @@ enum BackgroundInput {
         return .posted
     }
 
+    /// Browsers and Electron apps ignore clicks sent to their process, and
+    /// their web pages report Accessibility presses that do nothing, so they
+    /// get the real pointer for the moment of each click.
+    static func needsRealPointer(_ pid: pid_t) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        let id = app.bundleIdentifier?.lowercased() ?? ""
+        let browsers = ["com.google.chrome", "com.brave.browser", "com.microsoft.edgemac", "company.thebrowser",
+                        "org.mozilla.firefox", "com.operasoftware.opera", "com.vivaldi.vivaldi", "org.chromium.chromium",
+                        "app.zen-browser", "com.openai.atlas"]
+        if browsers.contains(where: id.hasPrefix) { return true }
+        guard let url = app.bundleURL else { return false }
+        let frameworks = url.appendingPathComponent("Contents/Frameworks")
+        return ["Electron Framework.framework", "Chromium Embedded Framework.framework"].contains {
+            FileManager.default.fileExists(atPath: frameworks.appendingPathComponent($0).path)
+        }
+    }
+
     /// Mouse down/up pairs sent only to the target app. The pointer stays put.
     static func postClick(at p: CGPoint, button: CGMouseButton, count: Int, flags: CGEventFlags, to target: Target) {
         let (down, up): (CGEventType, CGEventType) = switch button {

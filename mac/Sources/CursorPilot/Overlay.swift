@@ -10,6 +10,8 @@ final class OverlayState: ObservableObject {
     @Published var mode: Mode = .idle
     @Published var level: Float = 0
     @Published var caption = ""
+    /// The sentence being spoken and the word in it, for the karaoke caption.
+    @Published var spoken: SpokenWord?
     @Published var pointLabel: String?
     /// A short confirmation such as "Saved to Drawings".
     @Published var notice: String?
@@ -391,10 +393,14 @@ struct OverlayView: View {
                         if state.mode == .answering {
                             VoiceBars(level: 0.55, live: true).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
                         }
-                        Text(tail(state.caption))
-                            .font(.system(size: 13))
-                            .foregroundStyle(state.mode == .error ? Color(red: 1, green: 0.45, blue: 0.45) : Color.primary)
-                            .lineLimit(5)
+                        if state.mode == .answering, let spoken = state.spoken {
+                            KaraokeCaption(spoken: spoken)
+                        } else {
+                            Text(tail(state.caption))
+                                .font(.system(size: 13))
+                                .foregroundStyle(state.mode == .error ? Color(red: 1, green: 0.45, blue: 0.45) : Color.primary)
+                                .lineLimit(5)
+                        }
                     }
                     .padding(.horizontal, 13)
                     .padding(.vertical, 9)
@@ -606,5 +612,88 @@ extension NSWindow {
     /// and Claude has to see it.
     func applyRecordingVisibility() {
         sharingType = UserDefaults.standard.bool(forKey: "hideFromRecordings") ? .none : .readOnly
+    }
+}
+
+/// The sentence being read aloud and the word the voice is on.
+struct SpokenWord: Equatable {
+    var sentence: String
+    /// UTF-16 range of the word in `sentence`.
+    var word: NSRange
+}
+
+/// Spoken replies, read along: the line the voice is on and the next one,
+/// with a soft highlight that glides onto each word as it is said and the
+/// lines rolling up as the voice moves on.
+struct KaraokeCaption: View {
+    var spoken: SpokenWord
+    @Namespace private var focus
+    @AppStorage("buddyTint") private var tint = BuddyTint.rainbow
+
+    private struct Word: Identifiable {
+        let id: Int
+        let text: String
+        let location: Int
+    }
+
+    var body: some View {
+        let words = Self.words(in: spoken.sentence)
+        let lines = Self.lines(words, budget: 32)
+        let current = words.last { $0.location <= spoken.word.location }?.id ?? -1
+        let row = lines.firstIndex { $0.contains { $0.id == current } } ?? 0
+        let shown = Array(lines.indices.filter { $0 >= row && $0 <= row + 1 })
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(shown, id: \.self) { i in
+                HStack(spacing: 7) {
+                    ForEach(lines[i]) { w in
+                        Text(w.text)
+                            .foregroundStyle(.primary.opacity(w.id == current ? 1 : w.id < current ? 0.62 : 0.4))
+                            .background {
+                                if w.id == current {
+                                    Capsule()
+                                        .fill(LinearGradient(colors: tint.colors, startPoint: .leading, endPoint: .trailing))
+                                        .opacity(0.28)
+                                        .padding(.horizontal, -3)
+                                        .padding(.vertical, -1)
+                                        .matchedGeometryEffect(id: "focus", in: focus)
+                                }
+                            }
+                    }
+                }
+                .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity),
+                                        removal: .move(edge: .top).combined(with: .opacity)))
+            }
+        }
+        .font(.system(size: 14, weight: .medium))
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minWidth: 120, maxWidth: 300, minHeight: shown.count > 1 ? 40 : 19, alignment: .topLeading)
+        .clipped()
+        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: current)
+        .animation(.spring(response: 0.42, dampingFraction: 0.9), value: row)
+        .animation(.easeOut(duration: 0.2), value: spoken.sentence)
+    }
+
+    private static func words(in s: String) -> [Word] {
+        let ns = s as NSString
+        let regex = try? NSRegularExpression(pattern: "\\S+")
+        return (regex?.matches(in: s, range: NSRange(location: 0, length: ns.length)) ?? []).enumerated().map {
+            Word(id: $0.offset, text: ns.substring(with: $0.element.range), location: $0.element.range.location)
+        }
+    }
+
+    /// Words packed into lines of about `budget` characters.
+    private static func lines(_ words: [Word], budget: Int) -> [[Word]] {
+        var out: [[Word]] = [[]]
+        var length = 0
+        for w in words {
+            if length > 0 && length + 1 + w.text.count > budget {
+                out.append([])
+                length = 0
+            }
+            out[out.count - 1].append(w)
+            length += (length > 0 ? 1 : 0) + w.text.count
+        }
+        return out
     }
 }

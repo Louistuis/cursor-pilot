@@ -113,6 +113,11 @@ final class AppModel: ObservableObject {
     /// Screen Recording is requested once per launch; after that a missing
     /// permission is explained instead of prompting on every question.
     private var askedForScreen = false
+    /// Sentences sent to the voice in this reply, and the one being spoken.
+    private var sentencesQueued = 0
+    private var sentenceSpoken = -1
+    /// Pointing and drawings waiting for the voice to reach their sentence.
+    private var heldVisuals: [(sentence: Int, show: () -> Void)] = []
     private var activeRequest: UInt64?
     /// The last request is over and saved (its reply may still be playing).
     @Published private(set) var requestFinished = true
@@ -153,7 +158,23 @@ final class AppModel: ObservableObject {
             self?.heardText = text
             self?.overlay.state.caption = text
         }
-        speaker.onIdle = { [weak self] in self?.settleIfDone() }
+        speaker.onIdle = { [weak self] in
+            self?.releaseVisuals(upTo: .max)
+            self?.overlay.state.spoken = nil
+            self?.settleIfDone()
+        }
+        speaker.onSentence = { [weak self] number, text in
+            guard let self else { return }
+            if number >= 0 {
+                sentenceSpoken = number
+                releaseVisuals(upTo: number)
+            }
+            overlay.state.spoken = SpokenWord(sentence: text, word: NSRange(location: 0, length: 0))
+        }
+        speaker.onWord = { [weak self] range in
+            guard let self, let spoken = overlay.state.spoken else { return }
+            overlay.state.spoken = SpokenWord(sentence: spoken.sentence, word: range)
+        }
         ink.onAsk = { [weak self] text in Task { await self?.ask(text, includeScreen: true) } }
         ink.onSave = { [weak self] in Task { await self?.saveDrawing() } }
         glow.enabled = showGlow
@@ -377,11 +398,14 @@ final class AppModel: ObservableObject {
             if phase == .thinking { setPhase(.answering) }
             overlay.state.caption = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
         case .speak(let sentence):
-            if speakReplies { speaker.speak(sentence) }
+            if speakReplies {
+                speaker.speak(sentence, number: sentencesQueued)
+                sentencesQueued += 1
+            }
         case .point(let x, let y, let label):
-            overlay.point(atTopLeft: CGPoint(x: x, y: y), label: label)
+            showInTime { [weak self] in self?.overlay.point(atTopLeft: CGPoint(x: x, y: y), label: label) }
         case .mark(let shape, let label):
-            ink.add(InkMark(shape: shape, label: label))
+            showInTime { [weak self] in self?.ink.add(InkMark(shape: shape, label: label)) }
         case .tool(let step):
             switch step.phase {
             case "start":
@@ -404,6 +428,7 @@ final class AppModel: ObservableObject {
         case .error(let kind, let message):
             if kind != "cancelled" { showError(message) }
         case .finished:
+            if !speaker.isSpeaking { releaseVisuals(upTo: .max) }
             ComputerControl.shared.endTask()
             if lastError == nil, !liveSteps.isEmpty { Sounds.play(.done) }
             requestFinished = true
@@ -429,7 +454,29 @@ final class AppModel: ObservableObject {
     }
 
     /// Stops whatever is running: listening, the request, speech, pointing.
+    /// Points and draws when the voice reaches the sentence the tag sits in,
+    /// so the buddy and the ink move with what is being said. A tag belongs
+    /// to the sentence still being written when it arrives.
+    private func showInTime(_ show: @escaping () -> Void) {
+        let sentence = sentencesQueued
+        if !speakReplies || sentence <= sentenceSpoken {
+            show()
+        } else {
+            heldVisuals.append((sentence, show))
+        }
+    }
+
+    private func releaseVisuals(upTo sentence: Int) {
+        let due = heldVisuals.filter { $0.sentence <= sentence }
+        heldVisuals.removeAll { $0.sentence <= sentence }
+        for v in due { v.show() }
+    }
+
     func interrupt() {
+        heldVisuals.removeAll()
+        sentencesQueued = 0
+        sentenceSpoken = -1
+        overlay.state.spoken = nil
         resetTask?.cancel()
         if let id = activeRequest { core.cancel(id) }
         ComputerControl.shared.endTask()

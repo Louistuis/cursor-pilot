@@ -84,6 +84,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
                 return
             }
+            // `-CPRenderCaptionPreview out.png`: the read-along caption at a
+            // few points of a long sentence.
+            if let path = UserDefaults.standard.string(forKey: "CPRenderCaptionPreview") {
+                let sentence = "Open the File menu, choose Export as PDF, then pick the Desktop folder and press Save to finish."
+                let ns = sentence as NSString
+                let view = VStack(alignment: .leading, spacing: 16) {
+                    ForEach(["File", "PDF,", "Desktop", "finish."], id: \.self) { word in
+                        KaraokeCaption(spoken: SpokenWord(sentence: sentence, word: ns.range(of: word)))
+                            .padding(.horizontal, 13).padding(.vertical, 9)
+                            .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 16))
+                    }
+                }
+                .padding(24)
+                .background(Color(white: 0.3))
+                .environment(\.colorScheme, .dark)
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 2
+                if let image = renderer.cgImage,
+                   let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+                return
+            }
             if let path = UserDefaults.standard.string(forKey: "CPRenderGlowPreview") {
                 let size = CGSize(width: 1512, height: 982)
                 for mode in [GlowController.Mode.listening, .thinking, .sketching] {
