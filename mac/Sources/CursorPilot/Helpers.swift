@@ -6,6 +6,28 @@ import SwiftUI
 /// (`agent::HELPERS`); each is also the colour of its cursor.
 let helperNames = ["Mint", "Sunset", "Rose", "Violet", "Ocean"]
 
+/// Background tasks are agents from 100 (`agent::JOB_BASE`); they outlive
+/// the request that started them.
+func isJob(_ agent: Int) -> Bool { agent >= 100 }
+
+/// An agent's name and colour: helpers in order, background tasks from the
+/// end (`agent::job_name`).
+func agentName(_ agent: Int) -> String {
+    isJob(agent) ? helperNames[helperNames.count - 1 - (agent - 100) % helperNames.count]
+        : helperNames[max(0, min(agent - 1, helperNames.count - 1))]
+}
+
+/// A task the agent handed off to work in the background.
+struct BackgroundJob: Identifiable, Equatable {
+    let id: Int
+    var name: String
+    var title: String
+    /// Its latest step, or its report once it's over.
+    var status: String
+    /// "running", "done", "failed" or "stopped".
+    var state: String
+}
+
 /// What one helper's cursor shows.
 @MainActor
 final class HelperCursorState: ObservableObject {
@@ -71,17 +93,19 @@ final class HelperCursors {
         }
     }
 
-    func dismissAll() {
-        for (_, c) in cursors { c.leave(after: 0, onGone: {}) }
-        cursors.removeAll()
+    func dismissAll(keeping keep: (Int) -> Bool = { _ in false }) {
+        for (n, c) in cursors where !keep(n) {
+            c.leave(after: 0, onGone: {})
+            cursors[n] = nil
+        }
     }
 
     private func cursor(_ agent: Int, name: String? = nil) -> HelperCursor {
         if let c = cursors[agent] { return c }
-        let name = name ?? helperNames[max(0, min(agent - 1, helperNames.count - 1))]
+        let name = name ?? agentName(agent)
         // Start beside the user's pointer, each helper a step further out.
         let mouse = NSEvent.mouseLocation
-        let k = CGFloat(agent - 1)
+        let k = CGFloat(isJob(agent) ? agent - 100 : agent - 1)
         let c = HelperCursor(state: HelperCursorState(name: name, status: "Starting"),
                              at: CGPoint(x: mouse.x + 34 + 26 * k, y: mouse.y - 40 - 26 * k))
         cursors[agent] = c

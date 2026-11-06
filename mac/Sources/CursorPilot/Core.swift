@@ -85,6 +85,19 @@ struct HelperEvent {
     var ok: Bool
 }
 
+/// What a background task reports (the core's `job` events), outside any request.
+struct JobEvent {
+    /// "start", "step", "note" or "end".
+    var phase: String
+    /// Its agent number, from 100; its pointer and workspace go by it.
+    var job: Int
+    var name: String
+    /// Its title at the start, its latest step, or its report at the end.
+    var text: String
+    /// At the end: "done", "failed" or "stopped".
+    var state: String
+}
+
 struct AgentStep: Identifiable, Equatable {
     let id = UUID()
     /// The tool call this step belongs to, so its end replaces its start.
@@ -112,7 +125,8 @@ struct AgentStep: Identifiable, Equatable {
     /// The icon for a saved step, from its wording.
     static func icon(forSummary s: String) -> String {
         if s.hasPrefix("Texted") || s.hasPrefix("Read messages") || s.hasSuffix("your messages") { return "message" }
-        if helperNames.contains(where: { s.hasPrefix($0 + ":") }) { return "person.2" }
+        if helperNames.contains(where: { s.hasPrefix($0 + ":") }) || s.hasPrefix("Started in the background")
+            || s.hasPrefix("Stopped a background") || s.hasPrefix("Checked the background") { return "person.2" }
         let app = ["Pressed", "Chose", "Opened", "Looked", "Filled", "Brought", "Checked", "Focused", "Selected",
                    "Used", "Read text"]
         if app.contains(where: s.hasPrefix) { return "macwindow" }
@@ -194,6 +208,11 @@ final class Core: @unchecked Sendable {
     /// Lets the agent use the screen, mouse and keyboard.
     func attachAgentHost() { cp_core_set_host(handle, coreHostCallback, nil) }
 
+    /// Background tasks' progress and reports go to `AppModel.handle(job:)`.
+    func attachJobs() { cp_core_set_job_callback(handle, coreJobCallback, nil) }
+
+    func stopJob(_ job: Int) { _ = cp_core_stop_job(handle, UInt64(job)) }
+
     func newConversation() { cp_core_new_conversation(handle) }
 
     var currentConversationID: String {
@@ -267,6 +286,16 @@ final class Core: @unchecked Sendable {
 private final class EventBox {
     let handler: @MainActor (CoreEvent) -> Void
     init(_ handler: @escaping @MainActor (CoreEvent) -> Void) { self.handler = handler }
+}
+
+private let coreJobCallback: CPEventCallback = { _, json in
+    guard let json,
+          let obj = try? JSONSerialization.jsonObject(with: Data(String(cString: json).utf8)) as? [String: Any]
+    else { return }
+    let event = JobEvent(phase: obj["phase"] as? String ?? "", job: obj["job"] as? Int ?? 0,
+                         name: obj["name"] as? String ?? "", text: obj["text"] as? String ?? "",
+                         state: obj["state"] as? String ?? "")
+    Task { @MainActor in AppModel.shared.handle(job: event) }
 }
 
 private let coreEventCallback: CPEventCallback = { ctx, json in

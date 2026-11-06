@@ -77,6 +77,67 @@ pub fn delegate_tool() -> Value {
     })
 }
 
+/// Background tasks are agents numbered from here, so the app can tell them
+/// from helpers and keep them going when a request ends.
+pub const JOB_BASE: usize = 100;
+
+/// The name (and cursor colour) of the `k`th background task: from the end
+/// of the helpers' names, so it rarely matches a helper working at the time.
+pub fn job_name(k: usize) -> &'static str {
+    HELPERS[HELPERS.len() - 1 - k % HELPERS.len()]
+}
+
+pub fn background_tool() -> Value {
+    json!({
+        "name": "background_task",
+        "description": "Hand a task to an independent background agent that does all of it on its own, \
+    from start to finish, while the user carries on and keeps talking to you. Use it when the user wants \
+    something done that takes a while and doesn't need them (\"book…\", \"find and download…\", \"sort out…\", \
+    \"keep an eye on…\", \"do this in the background\"): start it, tell the user in one short line that it's \
+    on it, and don't wait for it. It has its own pointer, shell, windows and private browser, and the same \
+    tools as you, and it never asks the user to do anything. When it finishes the user gets its report \
+    directly, and you are told on their next message. It can't see this conversation, so give it \
+    everything it needs. list shows the background tasks and how they are doing; stop ends one.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "list", "stop"]},
+                "task": {"type": "string", "description": "start: what to do and what to report, complete and specific."},
+                "title": {"type": "string", "description": "start: three to six words for the user, e.g. \"renewing the passport form\"."},
+                "id": {"type": "integer", "description": "stop: the task's number from list."}
+            },
+            "required": ["action"]
+        }
+    })
+}
+
+/// What every agent with a workspace of its own is told about it.
+const WORKSPACE: &str = "You have your own workspace, apart from the user's screen, and the user keeps \
+working while you do. Windows you open are yours: your screenshots show only your current window, even \
+where the user's windows cover it, and your clicks and typing go to it. A web page you open with \
+app_control open (the URL as target) opens in your own browser: a private copy only you use, with no \
+sign-ins, never the user's tabs (set shared to true only when your task needs the user's signed-in \
+browser). app_control actions without an app work in your current window; prefer them (elements, then \
+press or set_value): they work even where the user's windows cover yours. Never bring windows to the \
+front, and don't use the user's own windows unless your task says so.";
+
+/// The system prompt for a background task: it works alone, for a long
+/// time if need be, and its last reply goes straight to the user.
+pub fn job_prompt(name: &str, settings: &Settings, home: &str, today: &str) -> String {
+    format!(
+        "You are {name}, a background agent inside Cursor Pilot, an assistant on the user's Mac. The user \
+asked for the task below to be done in the background, so they can get on with other things. Do all of it \
+yourself, from start to finish. Never ask the user to do a step or to confirm something they already asked \
+for; work around problems, try another way, and only stop short when something truly can't be done \
+without them (a password, a payment, a choice only they can make). While you work, keep any text between \
+tool calls to a few words about the next step; it shows next to your cursor. When you're done, your last \
+reply goes straight to the user as a text message: a line or two in a texting style saying what you did \
+and anything they need (exact names, numbers, paths, links), or what's left for them and why.\n\n\
+{WORKSPACE}{}",
+        system_addendum(settings, home, today, false)
+    )
+}
+
 /// The system prompt for a helper: it works alone and reports back to the
 /// agent that sent it, not to the user.
 pub fn helper_prompt(name: &str, settings: &Settings, home: &str, today: &str) -> String {
@@ -87,14 +148,7 @@ to the user: work through your part on your own, from start to finish, without a
 and then reply with a short report for the agent that sent you: what you did, what you found (with the \
 exact details it needs: names, numbers, paths, links), and anything you couldn't do and why. While you \
 work, keep any text between tool calls to a few words about the next step; it shows next to your cursor.\n\n\
-You have your own workspace, apart from the user's screen, and the user keeps working while you do. \
-Windows you open are yours: your screenshots show only your current window, even where the user's \
-windows cover it, and your clicks and typing go to it. A web page you open with app_control open (the \
-URL as target) opens in your own browser: a private copy only you use, with no sign-ins, never the \
-user's tabs (set shared to true only when your task needs the user's signed-in browser). app_control \
-actions without an app work in your current window; prefer them (elements, then press or set_value): \
-they work even where the user's windows cover yours. Never bring windows to the front, and don't use \
-the user's own windows unless your task says so.{}",
+{WORKSPACE}{}",
         system_addendum(settings, home, today, false)
     )
 }
@@ -352,6 +406,16 @@ impl<'a> Call<'a> {
                     _ => format!("Forgot \u{201C}{text}\u{201D}"),
                 }
             }
+            "background_task" => match i["action"].as_str().unwrap_or("") {
+                "start" => {
+                    let title = i["title"].as_str().unwrap_or("").trim();
+                    let task = i["task"].as_str().unwrap_or("");
+                    let title = if title.is_empty() { clip_words(task, 6) } else { title.to_string() };
+                    format!("Started in the background: {title}")
+                }
+                "stop" => "Stopped a background task".into(),
+                _ => "Checked the background tasks".into(),
+            },
             "messages" => match i["action"].as_str().unwrap_or("") {
                 "send" => format!("Texted {}", i["to"].as_str().unwrap_or("someone")),
                 "read" => format!(
@@ -375,7 +439,7 @@ impl<'a> Call<'a> {
             "memory"
         } else if self.name == "messages" {
             "messages"
-        } else if self.name == "delegate" {
+        } else if self.name == "delegate" || self.name == "background_task" {
             "agent"
         } else {
             "file"

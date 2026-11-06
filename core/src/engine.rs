@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -112,6 +112,28 @@ struct Worker<'a> {
     shell: &'a Mutex<Option<Shell>>,
 }
 
+/// A task the agent handed to a background agent, on its own thread.
+struct Job {
+    /// Its agent number (from `agent::JOB_BASE`), which its pointer and
+    /// workspace in the app go by.
+    n: usize,
+    name: &'static str,
+    title: String,
+    /// The conversation it was started from, where its report goes.
+    conversation: String,
+    cancel: Arc<AtomicBool>,
+    /// "running", "done", "failed" or "stopped".
+    state: &'static str,
+    /// What it is doing now, or its report once it's over.
+    status: String,
+}
+
+/// Where background tasks' events go: the app, outside any request.
+pub type JobSink = Arc<dyn Fn(Value) + Send + Sync>;
+
+/// Background tasks that may run at once.
+const MAX_JOBS: usize = 3;
+
 pub struct Engine {
     pub settings: Mutex<Settings>,
     session: Mutex<Session>,
@@ -125,11 +147,25 @@ pub struct Engine {
     editor: Editor,
     memory: Memory,
     home: PathBuf,
+    /// Itself, so background tasks can outlive the request that started them.
+    this: Weak<Engine>,
+    jobs: Mutex<Vec<Job>>,
+    job_sink: Mutex<Option<JobSink>>,
+    /// Finished tasks' reports, by conversation, for the agent's next turn there.
+    job_notes: Mutex<Vec<(String, String)>>,
 }
 
 pub type Emit<'a> = &'a mut dyn FnMut(Value);
 
 impl Engine {
+    /// An engine that can run background tasks.
+    pub fn shared(data_dir: PathBuf) -> Arc<Self> {
+        Arc::new_cyclic(|this| Self {
+            this: this.clone(),
+            ..Self::new(data_dir)
+        })
+    }
+
     pub fn new(data_dir: PathBuf) -> Self {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
@@ -149,6 +185,10 @@ impl Engine {
             },
             memory: Memory::new(&data_dir),
             home,
+            this: Weak::new(),
+            jobs: Mutex::new(Vec::new()),
+            job_sink: Mutex::new(None),
+            job_notes: Mutex::new(Vec::new()),
         }
     }
 
@@ -246,6 +286,9 @@ impl Engine {
         tools.push(memory::tool());
         if access {
             tools.push(agent::delegate_tool());
+            if self.this.upgrade().is_some() {
+                tools.push(agent::background_tool());
+            }
         }
         let system = format!(
             "{SYSTEM_PROMPT}{}{}",
@@ -268,7 +311,12 @@ impl Engine {
 
         let mut out = ReplyStream::new(&req.screens);
         let mut messages = history.clone();
-        messages.push(json!({"role": "user", "content": user_content(req)}));
+        let mut content = user_content(req);
+        let notes = self.take_job_notes(&conversation_id);
+        if !notes.is_empty() {
+            content.insert(0, json!({"type": "text", "text": notes.join("\n")}));
+        }
+        messages.push(json!({"role": "user", "content": content}));
         let mut steps: Vec<String> = Vec::new();
         let mut finished = None;
 
@@ -478,6 +526,11 @@ impl Engine {
                 (false, "app_control") => from_host(json!({"type": "apps", "input": call.input})),
                 (false, "messages") => from_host(json!({"type": "messages", "input": call.input})),
                 (false, "memory") => self.memory.run(call.input, &agent::date_string(now())),
+                (false, "background_task") if worker.id == 0 => self.background(call.input, settings),
+                (false, "background_task") => (
+                    json!("Only the main agent can start background tasks; do this part yourself."),
+                    true,
+                ),
                 (false, "bash") => self.run_bash(worker.shell, call.input, cancel),
                 (false, "str_replace_based_edit_tool") => match self.editor.run(call.input) {
                     Ok(s) => (json!(s), false),
@@ -544,7 +597,7 @@ impl Engine {
                     let tx = tx.clone();
                     let id = call.id.to_string();
                     let handle = scope.spawn(move || {
-                        let report = self.run_helper(i + 1, name, &id, &task, settings, cancel, &tx);
+                        let report = self.run_helper(i + 1, name, &id, &task, settings, cancel, &tx, false);
                         let _ = tx.send(json!({"type": "agent", "phase": "end", "agent": i + 1, "id": id, "name": name, "ok": report.is_ok()}));
                         report
                     });
@@ -576,9 +629,196 @@ impl Engine {
         reports
     }
 
-    /// One helper's own agent loop: it works on its task with its own shell
-    /// and pointer and returns its report. Its tool steps and notes go to
-    /// `tx` as `agent` events, for its cursor, not into the chat.
+    // MARK: Background tasks
+
+    /// Background tasks' events go to `sink` (none: nowhere).
+    pub fn set_job_sink(&self, sink: Option<JobSink>) {
+        *self.job_sink.lock().unwrap() = sink;
+    }
+
+    fn job_emit(&self, event: Value) {
+        let sink = self.job_sink.lock().unwrap().clone();
+        if let Some(sink) = sink {
+            sink(event);
+        }
+    }
+
+    /// The `background_task` tool.
+    fn background(&self, input: &Value, settings: &Settings) -> (Value, bool) {
+        match input["action"].as_str().unwrap_or("") {
+            "start" => {
+                let task = input["task"].as_str().unwrap_or("").trim().to_string();
+                let title = input["title"].as_str().unwrap_or("").trim();
+                let title = if title.is_empty() { agent::clip_words(&task, 6) } else { title.to_string() };
+                match self.start_job(task, title.clone(), settings) {
+                    Ok((n, name)) => (
+                        json!(format!(
+                            "{name} is on it in the background (task {}). The user sees its pointer and gets its report \
+when it's done; you'll be told on their next message. Tell the user in a few words, then carry on.",
+                            n - agent::JOB_BASE + 1
+                        )),
+                        false,
+                    ),
+                    Err(e) => (json!(e), true),
+                }
+            }
+            "list" => {
+                let jobs = self.jobs.lock().unwrap();
+                if jobs.is_empty() {
+                    return (json!("No background tasks yet."), false);
+                }
+                let lines: Vec<String> = jobs
+                    .iter()
+                    .map(|j| {
+                        format!(
+                            "{}. {} \u{2014} {} ({}): {}",
+                            j.n - agent::JOB_BASE + 1,
+                            j.name,
+                            j.title,
+                            j.state,
+                            agent::clip_words(&j.status, 40)
+                        )
+                    })
+                    .collect();
+                (json!(lines.join("\n")), false)
+            }
+            "stop" => {
+                let id = input["id"].as_u64().unwrap_or(0) as usize;
+                if id > 0 && self.stop_job(agent::JOB_BASE + id - 1) {
+                    (json!(format!("Task {id} is stopping.")), false)
+                } else {
+                    (json!("No such running task; list them first."), true)
+                }
+            }
+            other => (json!(format!("Unknown action: {other}")), true),
+        }
+    }
+
+    /// Starts a background task on its own thread. Returns its agent number
+    /// and name.
+    fn start_job(&self, task: String, title: String, settings: &Settings) -> Result<(usize, &'static str), String> {
+        let Some(engine) = self.this.upgrade() else {
+            return Err("Background tasks aren't available here.".into());
+        };
+        if task.is_empty() {
+            return Err("Say what the task is.".into());
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (n, name) = {
+            let mut jobs = self.jobs.lock().unwrap();
+            if jobs.iter().filter(|j| j.state == "running").count() >= MAX_JOBS {
+                return Err(format!(
+                    "{MAX_JOBS} background tasks are already running; wait for one to finish or stop one."
+                ));
+            }
+            let k = jobs.len();
+            let (n, name) = (agent::JOB_BASE + k, agent::job_name(k));
+            jobs.push(Job {
+                n,
+                name,
+                title: title.clone(),
+                conversation: self.current_conversation_id(),
+                cancel: cancel.clone(),
+                state: "running",
+                status: "Starting".into(),
+            });
+            (n, name)
+        };
+        self.job_emit(json!({"type": "job", "phase": "start", "job": n, "name": name, "text": title}));
+        let settings = settings.clone();
+        std::thread::Builder::new()
+            .name(format!("cursor-pilot-job-{n}"))
+            .spawn(move || {
+                let (tx, rx) = mpsc::channel::<Value>();
+                let relay = engine.clone();
+                let forward = std::thread::spawn(move || {
+                    for event in rx {
+                        relay.job_progress(n, event);
+                    }
+                });
+                let report = engine.run_helper(n, name, &format!("job-{n}"), &task, &settings, &cancel, &tx, true);
+                drop(tx);
+                let _ = forward.join();
+                engine.finish_job(n, report);
+            })
+            .map_err(|e| format!("Couldn't start it: {e}"))?;
+        Ok((n, name))
+    }
+
+    /// A step or note from a background task: shown by its pointer.
+    fn job_progress(&self, n: usize, event: Value) {
+        let text = event["text"].as_str().unwrap_or("").to_string();
+        if let Some(j) = self.jobs.lock().unwrap().iter_mut().find(|j| j.n == n) {
+            if !text.is_empty() {
+                j.status = text.clone();
+            }
+        }
+        self.job_emit(json!({"type": "job", "phase": event["phase"], "job": n, "name": event["name"], "text": text, "kind": event["kind"]}));
+    }
+
+    /// A background task is over: its report goes to the user and into its
+    /// conversation, and the agent hears about it on the next message there.
+    fn finish_job(&self, n: usize, report: Result<String, String>) {
+        let (name, title, conversation, state, text) = {
+            let mut jobs = self.jobs.lock().unwrap();
+            let Some(j) = jobs.iter_mut().find(|j| j.n == n) else { return };
+            let (state, text) = match &report {
+                _ if j.cancel.load(Ordering::Relaxed) => ("stopped", "Stopped before it was done.".to_string()),
+                Ok(t) => ("done", t.clone()),
+                Err(e) => ("failed", format!("Couldn't finish: {e}")),
+            };
+            j.state = state;
+            j.status = text.clone();
+            (j.name, j.title.clone(), j.conversation.clone(), state, text)
+        };
+        self.job_emit(json!({"type": "job", "phase": "end", "job": n, "name": name, "title": title, "state": state, "ok": state == "done", "text": text}));
+        let turn = Turn {
+            role: "assistant".into(),
+            text: text.clone(),
+            at: now(),
+            screens: 0,
+            points: Vec::new(),
+            steps: vec![format!("{name}: {title}")],
+        };
+        {
+            let mut session = self.session.lock().unwrap();
+            if session.transcript.id == conversation {
+                session.note(turn);
+                let _ = self.store.save(&session.transcript);
+            } else if let Some(mut t) = self.store.load(&conversation) {
+                t.updated_at = now();
+                t.turns.push(turn);
+                let _ = self.store.save(&t);
+            }
+        }
+        self.job_notes.lock().unwrap().push((
+            conversation,
+            format!("[Background task \u{201C}{title}\u{201D} ({name}) {state}. Its report, already shown to the user: {text}]"),
+        ));
+    }
+
+    fn take_job_notes(&self, conversation: &str) -> Vec<String> {
+        let mut notes = self.job_notes.lock().unwrap();
+        let (mine, rest): (Vec<_>, Vec<_>) = notes.drain(..).partition(|(c, _)| c == conversation);
+        *notes = rest;
+        mine.into_iter().map(|(_, n)| n).collect()
+    }
+
+    /// Stops a running background task; false when there's none.
+    pub fn stop_job(&self, n: usize) -> bool {
+        match self.jobs.lock().unwrap().iter().find(|j| j.n == n && j.state == "running") {
+            Some(j) => {
+                j.cancel.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// One agent's own loop, for a helper or a background task (`job`): it
+    /// works on its task with its own shell and pointer and returns its
+    /// report. Its tool steps and notes go to `tx` as `agent` events, for
+    /// its cursor, not into the chat.
     #[allow(clippy::too_many_arguments)]
     fn run_helper(
         &self,
@@ -589,6 +829,7 @@ impl Engine {
         settings: &Settings,
         cancel: &AtomicBool,
         tx: &mpsc::Sender<Value>,
+        job: bool,
     ) -> Result<String, String> {
         if task.is_empty() {
             return Err("no task was given".into());
@@ -596,12 +837,13 @@ impl Engine {
         let shell = Mutex::new(None);
         let worker = Worker { id: n, shell: &shell };
         let tools = agent::tool_definitions(settings);
-        let system = agent::helper_prompt(
-            name,
-            settings,
-            &self.home.display().to_string(),
-            &agent::date_string(now()),
-        );
+        let (home, today) = (self.home.display().to_string(), agent::date_string(now()));
+        let system = if job {
+            agent::job_prompt(name, settings, &home, &today)
+        } else {
+            agent::helper_prompt(name, settings, &home, &today)
+        };
+        let rounds = if job { MAX_ROUNDS } else { HELPER_ROUNDS };
         let mut messages = vec![json!({"role": "user", "content": task})];
         let mut steps = Vec::new();
         let mut emit = |event: Value| {
@@ -611,7 +853,7 @@ impl Engine {
                 let _ = tx.send(json!({"type": "agent", "phase": "step", "agent": n, "id": call_id, "name": name, "text": event["summary"], "kind": event["kind"]}));
             }
         };
-        for _ in 0..HELPER_ROUNDS {
+        for _ in 0..rounds {
             let body = claude::build_body(settings, &system, &messages, &tools);
             let reply = claude::stream(settings, &body, cancel, |_| {}).map_err(|e| e.message())?;
             let text: String = reply
@@ -654,7 +896,7 @@ impl Engine {
             }
         }
         Err(format!(
-            "it ran out of steps after {HELPER_ROUNDS}; it got this far: {}",
+            "it ran out of steps after {rounds}; it got this far: {}",
             steps.join("; ")
         ))
     }

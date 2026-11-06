@@ -110,6 +110,13 @@ until you turn it on. Tools, all run by the app on your Mac:
   instead. If an app opened in the background brings itself forward, your
   app is put back in front. A helper's cursor fades while it works under
   your windows.
+- **background_task** (ours): hands a task to an independent background
+  agent that does all of it on its own while you carry on and keep talking.
+  It works like a helper (own cursor, shell, windows and private browser)
+  but outlives the request: the main agent answers at once, a card in Home
+  shows what the task is doing with a stop button, and when it's done you
+  hear a sound, its report lands in the chat and is read aloud, and the
+  main agent is told on your next message. Up to three run at once.
 - **web_search** on the models that support it.
 
 By default the agent works like a person sitting at your Mac (Settings ›
@@ -202,6 +209,7 @@ Debug launch flags, for design work:
 | `-CPAsk "question"` | sends one typed question through the whole agent (helpers included, no screen, nothing spoken), writes the text, steps, helper events and timings to `-CPOut`, then quits |
 | `-CPRenderHelperPreview out.png` | renders the helpers' cursors and tags |
 | `-CPRenderChartPreview out.png` | renders the kinds of chart a reply can send |
+| `-CPRenderJobsPreview out.png` | renders background tasks' cards, at work and done |
 | `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, writes what each heard to `-CPOut`, then quits |
 
 Test flags run best in a second copy, so the one you use keeps running:
@@ -319,6 +327,8 @@ Done:
 - **Co-user**: the agent uses your own mouse and keyboard like a person,
   with natural pointer paths, click timing and typing rhythm, and waits when
   you take over; background mode stays as an option.
+- **Background tasks**: the agent can hand a whole task to an independent
+  agent that finishes it on its own while you keep going.
 - **Visuals in chat**: replies can send charts (a ```chart JSON block, drawn
   with Swift Charts: bar, line, area, point and pie, growing in, hover for
   values), images (`![alt](path or URL)`, shown like photos in Messages) and

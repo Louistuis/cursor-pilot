@@ -18,6 +18,18 @@ bool cp_core_configure(CPCore *core, const char *settings_json);
 uint64_t cp_core_send(CPCore *core, const char *request_json, CPEventCallback callback, void *ctx);
 void cp_core_cancel(CPCore *core, uint64_t request_id);
 
+/* Background tasks report as `job` events through `callback`, outside any
+ * request and on any thread. NULL removes it. */
+void cp_core_set_job_callback(CPCore *core, CPEventCallback callback, void *ctx);
+/* Stops a background task by its agent number; false when none is running. */
+bool cp_core_stop_job(CPCore *core, uint64_t job);
+
+/* Background tasks report as `job` events through `callback`, outside any
+ * request and on any thread. NULL removes it. */
+void cp_core_set_job_callback(CPCore *core, CPEventCallback callback, void *ctx);
+/* Stops a background task by its agent number; false when none is running. */
+bool cp_core_stop_job(CPCore *core, uint64_t job);
+
 void cp_core_new_conversation(CPCore *core);
 char *cp_core_current_conversation(CPCore *core);
 char *cp_core_list_conversations(CPCore *core);

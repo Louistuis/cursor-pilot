@@ -136,6 +136,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
                 return
             }
+            // `-CPRenderJobsPreview out.png`: background tasks' cards, at work and done.
+            if let path = UserDefaults.standard.string(forKey: "CPRenderJobsPreview") {
+                let jobs = [
+                    BackgroundJob(id: 100, name: "Ocean", title: "Renewing the library books", status: "Filled in the card number", state: "running"),
+                    BackgroundJob(id: 101, name: "Violet", title: "Finding train times to Oslo", status: "Opened vy.no in its own browser", state: "running"),
+                    BackgroundJob(id: 102, name: "Rose", title: "Sorting the Downloads folder", status: "Moved 48 files into Documents, Images and Installers. Nothing was deleted.", state: "done"),
+                ]
+                let view = VStack(spacing: 6) {
+                    ForEach(jobs) { JobCard(job: $0) {} }
+                }
+                .padding(16)
+                .frame(width: 560)
+                .background(Color(nsColor: .windowBackgroundColor))
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 2
+                if let image = renderer.cgImage,
+                   let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+                return
+            }
             // `-CPRenderHelperPreview out.png`: each helper's cursor at work,
             // one finished and one near the right edge.
             if let path = UserDefaults.standard.string(forKey: "CPRenderHelperPreview") {

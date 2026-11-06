@@ -38,6 +38,14 @@ pub struct CPCore {
 struct SendPtr(*mut c_void);
 // The Swift side owns the context and guarantees it outlives the request.
 unsafe impl Send for SendPtr {}
+unsafe impl Sync for SendPtr {}
+
+impl SendPtr {
+    /// Through a method, so closures capture the whole (sendable) wrapper.
+    fn get(&self) -> *mut c_void {
+        self.0
+    }
+}
 
 unsafe fn str_arg<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
@@ -63,7 +71,7 @@ pub unsafe extern "C" fn cp_core_new(config_json: *const c_char) -> *mut CPCore 
         return std::ptr::null_mut();
     };
     Box::into_raw(Box::new(CPCore {
-        engine: Arc::new(Engine::new(PathBuf::from(dir))),
+        engine: Engine::shared(PathBuf::from(dir)),
     }))
 }
 
@@ -145,6 +153,32 @@ pub unsafe extern "C" fn cp_core_set_host(
     if let Some(core) = core.as_ref() {
         *core.engine.host.lock().unwrap() = host.map(|f| Arc::new(agent::Host { f, ctx }));
     }
+}
+
+/// Background tasks report through `callback` (null: nowhere) as `job`
+/// events: `start`, `step`, `note` and `end` (with the report), outside any
+/// request and on any thread.
+#[no_mangle]
+pub unsafe extern "C" fn cp_core_set_job_callback(
+    core: *mut CPCore,
+    callback: Option<EventCallback>,
+    ctx: *mut c_void,
+) {
+    let Some(core) = core.as_ref() else { return };
+    let sink = callback.map(|callback| {
+        let ctx = SendPtr(ctx);
+        Arc::new(move |v: Value| {
+            let c = CString::new(v.to_string()).unwrap_or_default();
+            callback(ctx.get(), c.as_ptr());
+        }) as engine::JobSink
+    });
+    core.engine.set_job_sink(sink);
+}
+
+/// Stops a background task by its agent number; false when none is running.
+#[no_mangle]
+pub unsafe extern "C" fn cp_core_stop_job(core: *mut CPCore, job: u64) -> bool {
+    core.as_ref().is_some_and(|c| c.engine.stop_job(job as usize))
 }
 
 /// Cancels one request, or every running request when `id` is 0.

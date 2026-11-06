@@ -33,6 +33,7 @@ enum TestHooks {
         // Tests run before the app reads its key from the Keychain.
         if !model.hasAPIKey { await model.loadAPIKey() }
         ComputerControl.shared.beginTask()
+        model.core.attachJobs()
         var log: [[String: Any]] = []
         let started = Date()
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
@@ -59,6 +60,20 @@ enum TestHooks {
                 }
                 log.append(entry)
             }
+        }
+        // Background tasks it started: follow them to the end (ten minutes at most).
+        var seen: [String] = []
+        while model.jobs.contains(where: { $0.state == "running" }), Date().timeIntervalSince(started) < 600 {
+            for j in model.jobs where !seen.contains("\(j.id)|\(j.state)|\(j.status)") {
+                seen.append("\(j.id)|\(j.state)|\(j.status)")
+                log.append(["t": (Date().timeIntervalSince(started) * 10).rounded() / 10,
+                            "job": [j.id, j.name, j.title, j.state, j.status]])
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        for j in model.jobs {
+            log.append(["t": (Date().timeIntervalSince(started) * 10).rounded() / 10,
+                        "job": [j.id, j.name, j.title, j.state, j.status]])
         }
         // Let the helpers' cursors finish and fade.
         try? await Task.sleep(for: .seconds(2.5))

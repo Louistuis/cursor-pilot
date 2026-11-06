@@ -27,6 +27,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var openTranscript: Transcript?
     /// What the agent has done so far in the running request.
     @Published private(set) var liveSteps: [AgentStep] = []
+    /// Tasks running in the background, and ones that just finished.
+    @Published private(set) var jobs: [BackgroundJob] = []
 
     // Settings
     @Published var apiKey: String {
@@ -212,6 +214,7 @@ final class AppModel: ObservableObject {
     func start() {
         configureCore()
         core.attachAgentHost()
+        core.attachJobs()
         registerHotKey()
         drawHotKey = HotKey(.draw, id: 2, onPress: { [weak self] in
             Task { @MainActor in self?.toggleSketch() }
@@ -469,6 +472,43 @@ final class AppModel: ObservableObject {
             }
         }
     }
+
+    /// A background task's progress, and its report when it's over: a sound,
+    /// the report in the chat, and read aloud unless something else is going on.
+    func handle(job e: JobEvent) {
+        let cursors = HelperCursors.shared
+        let i = jobs.firstIndex { $0.id == e.job }
+        switch e.phase {
+        case "start":
+            jobs.removeAll { $0.id == e.job }
+            jobs.append(BackgroundJob(id: e.job, name: e.name, title: e.text, status: "Starting", state: "running"))
+            cursors.start(agent: e.job, name: e.name, status: e.text)
+        case "end":
+            if let i {
+                jobs[i].state = e.state
+                jobs[i].status = e.text
+            }
+            cursors.finish(agent: e.job, ok: e.state == "done")
+            ComputerControl.end(agent: e.job)
+            Sounds.play(e.state == "failed" ? .error : .done)
+            refreshConversations()
+            reloadOpenTranscript()
+            if e.state != "stopped", phase == .idle, speakReplies, !speaker.isSpeaking {
+                speak(captionText(e.text))
+            }
+            // The card stays a moment so the report can be read, then goes.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(12))
+                self?.jobs.removeAll { $0.id == e.job && $0.state != "running" }
+            }
+        default:
+            guard let i, !e.text.isEmpty else { return }
+            jobs[i].status = e.text
+            cursors.update(agent: e.job, status: e.text)
+        }
+    }
+
+    func stopJob(_ id: Int) { core.stopJob(id) }
 
     /// Returns to idle once the reply has streamed and been spoken, leaving
     /// the bubble up for a moment so it can be read.

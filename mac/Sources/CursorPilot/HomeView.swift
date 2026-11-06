@@ -303,6 +303,26 @@ private struct ChatView: View {
     }
 
     private var composer: some View {
+        VStack(spacing: 8) {
+            if !model.jobs.isEmpty {
+                VStack(spacing: 6) {
+                    ForEach(model.jobs) { job in
+                        JobCard(job: job) { model.stopJob(job.id) }
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.jobs)
+            }
+            composerRow
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 740)
+        .frame(maxWidth: .infinity)
+        .background(.bar)
+    }
+
+    private var composerRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
             Button { includeScreen.toggle() } label: {
                 Image(systemName: includeScreen ? "eye.circle.fill" : "eye.slash.circle.fill")
@@ -330,11 +350,6 @@ private struct ChatView: View {
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(Color.secondary.opacity(composerFocused ? 0.45 : 0.28), lineWidth: 0.8))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(maxWidth: 740)
-        .frame(maxWidth: .infinity)
-        .background(.bar)
     }
 
     @ViewBuilder private var trailingButton: some View {
@@ -812,6 +827,75 @@ private struct DrawingTile: View {
         .task(id: drawing.id) {
             // Decode off the main thread so scrolling stays smooth.
             image = await Task.detached(priority: .utility) { NSImage(contentsOf: url) }.value
+        }
+    }
+}
+
+/// A task working in the background: its colour, what it's doing, and a
+/// way to stop it. Once it's over it shows its report for a moment.
+struct JobCard: View {
+    let job: BackgroundJob
+    let stop: () -> Void
+    @State private var pulse = false
+
+    private var running: Bool { job.state == "running" }
+
+    var body: some View {
+        let colors = (BuddyTint(rawValue: job.name.lowercased()) ?? .mint).colors
+        HStack(alignment: .center, spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 9, height: 9)
+                if running {
+                    Circle()
+                        .stroke(colors[0].opacity(0.5), lineWidth: 1.5)
+                        .frame(width: 9, height: 9)
+                        .scaleEffect(pulse ? 2.2 : 1)
+                        .opacity(pulse ? 0 : 1)
+                }
+            }
+            .frame(width: 20, height: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(job.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text(running ? job.status : captionText(job.status))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(running ? 1 : 2)
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: job.status)
+            }
+            Spacer(minLength: 8)
+            if running {
+                Text(job.name)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Button(action: stop) {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 17))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Stop this task")
+            } else {
+                Image(systemName: job.state == "done" ? "checkmark.circle.fill"
+                      : job.state == "stopped" ? "stop.circle" : "exclamationmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(job.state == "done" ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+                    .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .padding(.leading, 6)
+        .padding(.trailing, 10)
+        .padding(.vertical, 7)
+        .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 0.6))
+        .onAppear {
+            withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) { pulse = true }
         }
     }
 }

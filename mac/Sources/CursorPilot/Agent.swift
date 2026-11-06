@@ -93,12 +93,21 @@ final class ComputerControl {
         return c
     }
 
-    /// The task is over: every pointer goes home and the helpers' cursors leave.
+    /// The task is over: every pointer goes home and the helpers' cursors
+    /// leave. Background tasks keep going.
     static func endAll() {
         shared.endTask()
-        for c in helpers.values { c.workspace?.close() }
-        helpers.removeAll()
-        HelperCursors.shared.dismissAll()
+        for (n, c) in helpers where !isJob(n) {
+            c.workspace?.close()
+            helpers[n] = nil
+        }
+        HelperCursors.shared.dismissAll(keeping: isJob)
+    }
+
+    /// A background task is over: its windows are free and its browser quits.
+    static func end(agent n: Int) {
+        helpers[n]?.workspace?.close()
+        helpers[n] = nil
     }
 
     let agent: Int
@@ -115,7 +124,7 @@ final class ComputerControl {
     private init(agent: Int) {
         self.agent = agent
         apps = AppControl(agent: agent)
-        workspace = agent > 0 ? Workspace(agent: agent, name: helperNames[min(agent - 1, helperNames.count - 1)]) : nil
+        workspace = agent > 0 ? Workspace(agent: agent, name: agentName(agent)) : nil
     }
 
     /// Longest edge of screenshots sent to Claude.

@@ -127,6 +127,13 @@ impl Session {
 
     /// Adds turns to the transcript only, for an exchange that didn't finish
     /// (its messages can't be replayed, but the user should see it).
+    /// Adds a message that wasn't an answer to a question, such as a
+    /// background task's report.
+    pub fn note(&mut self, turn: Turn) {
+        self.transcript.updated_at = now();
+        self.transcript.turns.push(turn);
+    }
+
     pub fn record(&mut self, user_turn: Turn, assistant_turn: Turn) {
         if self.transcript.title.is_empty() {
             self.transcript.title = title_from(&user_turn.text);
