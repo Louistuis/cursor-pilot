@@ -85,6 +85,7 @@ struct AgentStep: Identifiable, Equatable {
         case "computer": "cursorarrow.click.2"
         case "app": "macwindow"
         case "memory": "brain"
+        case "messages": "message"
         case "web": "globe"
         default: "sparkles"
         }
@@ -92,6 +93,7 @@ struct AgentStep: Identifiable, Equatable {
 
     /// The icon for a saved step, from its wording.
     static func icon(forSummary s: String) -> String {
+        if s.hasPrefix("Texted") || s.hasPrefix("Read messages") || s.hasSuffix("your messages") { return "message" }
         let app = ["Pressed", "Chose", "Opened", "Looked", "Filled", "Brought", "Checked", "Focused", "Selected",
                    "Used", "Read text"]
         if app.contains(where: s.hasPrefix) { return "macwindow" }

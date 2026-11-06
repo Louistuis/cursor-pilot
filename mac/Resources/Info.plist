@@ -28,6 +28,8 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSContactsUsageDescription</key>
+	<string>Cursor Pilot shows names instead of numbers when it reads or sends your messages.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Cursor Pilot scripts your apps when you ask it to do something for you, such as making a note or renaming files.</string>
 	<key>NSHighResolutionCapable</key>

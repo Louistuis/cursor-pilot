@@ -250,6 +250,8 @@ private struct ChatView: View {
                     }
                     if turns.isEmpty && !isLive {
                         ChatEmptyState(model: model).padding(.top, 80)
+                    } else {
+                        ContactHeader().padding(.bottom, 6)
                     }
                     ForEach(Array(turns.enumerated()), id: \.offset) { i, turn in
                         if i == 0 || turn.at - turns[i - 1].at > 15 * 60 {
@@ -257,14 +259,18 @@ private struct ChatView: View {
                         }
                         MessageGroup(model: model, fromMe: turn.role == "user", text: turn.text,
                                      screens: turn.screens, points: turn.points, live: false,
-                                     steps: (turn.steps ?? []).map { StepItem(icon: AgentStep.icon(forSummary: $0), text: $0) })
+                                     steps: (turn.steps ?? []).map { StepItem(icon: AgentStep.icon(forSummary: $0), text: $0) },
+                                     key: "\(model.openTranscript?.id ?? "")#\(i)",
+                                     status: !isLive && turn.role == "user" && i == turns.count - 2 ? "Read" : nil)
                             .padding(.top, i > 0 && turns[i - 1].role == turn.role ? 2 : 10)
                     }
                     if isLive {
                         if !model.heardText.isEmpty || model.phase == .listening {
                             MessageGroup(model: model, fromMe: true,
                                          text: model.heardText.isEmpty ? "…" : model.heardText,
-                                         screens: 0, points: [], live: true)
+                                         screens: 0, points: [], live: true,
+                                         status: model.phase == .listening ? nil
+                                             : model.replyText.isEmpty && model.liveSteps.isEmpty ? "Delivered" : "Read")
                                 .padding(.top, 10)
                         }
                         if model.phase != .listening {
@@ -406,14 +412,29 @@ private struct MessageGroup: View {
     var points: [String]
     var live: Bool
     var steps: [StepItem] = []
+    /// Identifies the message for tapbacks; live messages have none.
+    var key: String?
+    /// "Delivered" or "Read" under your latest message.
+    var status: String?
+    @ObservedObject private var tapbacks = Tapbacks.shared
 
     var body: some View {
         let parts = paragraphs
         let working = live && !fromMe && (parts.isEmpty || steps.contains { $0.running })
         VStack(alignment: fromMe ? .trailing : .leading, spacing: 2) {
             ForEach(Array(parts.enumerated()), id: \.offset) { i, part in
-                Bubble(text: part, fromMe: fromMe, tail: i == parts.count - 1 && !working)
+                let partKey = key.map { "\($0).\(i)" }
+                Bubble(text: part, fromMe: fromMe, tail: i == parts.count - 1 && !working,
+                       tapback: partKey.flatMap { tapbacks.reactions[$0] })
+                    .onTapGesture(count: 2) { if let partKey { tapbacks.toggle("❤️", for: partKey) } }
                     .contextMenu {
+                        if let partKey {
+                            ControlGroup {
+                                ForEach(Tapbacks.choices, id: \.self) { r in
+                                    Button(r) { tapbacks.toggle(r, for: partKey) }
+                                }
+                            }
+                        }
                         Button("Copy") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(fromMe ? text : part, forType: .string)
@@ -433,6 +454,13 @@ private struct MessageGroup: View {
             if fromMe && screens > 0 {
                 Caption(text: screens == 1 ? "Saw your screen" : "Saw \(screens) screens")
             }
+            if let status {
+                Text(status)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .transition(.opacity)
+            }
             if !points.isEmpty {
                 Caption(text: "Pointed at " + points.joined(separator: ", "))
             }
@@ -447,9 +475,7 @@ private struct MessageGroup: View {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.isEmpty { return fromMe ? ["(asked about the screen)"] : [] }
         if fromMe { return [t] }
-        return t.components(separatedBy: "\n\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        return messageParts(t)
     }
 }
 
@@ -462,30 +488,89 @@ private struct Bubble: View {
     var text: String
     var fromMe: Bool
     var tail: Bool
+    var tapback: String?
 
     var body: some View {
-        Text(markdown(text))
-            .font(.system(size: 13.5))
-            .lineSpacing(1.5)
-            .textSelection(.enabled)
-            .foregroundStyle(fromMe ? Color.white : Color.primary)
-            .tint(fromMe ? .white : pilotAccent)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background {
-                ZStack(alignment: fromMe ? .bottomTrailing : .bottomLeading) {
-                    RoundedRectangle(cornerRadius: 17, style: .continuous)
-                    if tail { BubbleTail(fromMe: fromMe).frame(width: 14, height: 16) }
+        content
+            .overlay(alignment: fromMe ? .topLeading : .topTrailing) {
+                if let tapback {
+                    Text(tapback)
+                        .font(.system(size: 13))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(fromMe ? bubbleGray : pilotAccent))
+                        .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 2))
+                        .offset(x: fromMe ? -14 : 14, y: -14)
+                        .transition(.scale(scale: 0.3).combined(with: .opacity))
                 }
-                .foregroundStyle(fromMe ? pilotAccent : bubbleGray)
             }
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: tapback)
+            .padding(.top, tapback == nil ? 0 : 10)
             .frame(maxWidth: 460, alignment: fromMe ? .trailing : .leading)
             .padding(fromMe ? .leading : .trailing, 60)
     }
 
-    private func markdown(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(s)
+    @ViewBuilder private var content: some View {
+        if let emoji = bigEmoji {
+            // Like Messages: a few emoji alone come big, without a bubble.
+            Text(emoji).font(.system(size: 40)).padding(.vertical, 2)
+        } else {
+            RichText(text: text, size: 13.5, subtle: fromMe ? .white : .primary)
+                .font(.system(size: 13.5))
+                .lineSpacing(1.5)
+                .textSelection(.enabled)
+                .foregroundStyle(fromMe ? Color.white : Color.primary)
+                .tint(fromMe ? .white : pilotAccent)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background {
+                    ZStack(alignment: fromMe ? .bottomTrailing : .bottomLeading) {
+                        RoundedRectangle(cornerRadius: 17, style: .continuous)
+                        if tail { BubbleTail(fromMe: fromMe).frame(width: 14, height: 16) }
+                    }
+                    .foregroundStyle(fromMe ? pilotAccent : bubbleGray)
+                }
+        }
+    }
+
+    private var bigEmoji: String? {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, t.count <= 3,
+              t.unicodeScalars.allSatisfy({ $0.properties.isEmojiPresentation || $0.properties.isEmoji && $0.value > 0x238C || $0.value == 0x200D || $0.value == 0xFE0F })
+        else { return nil }
+        return t
+    }
+}
+
+/// Tapback reactions on Cursor Pilot's and your messages, kept on this Mac.
+@MainActor
+final class Tapbacks: ObservableObject {
+    static let shared = Tapbacks()
+    static let choices = ["❤️", "👍", "👎", "😂", "‼️", "❓"]
+    @Published private(set) var reactions: [String: String]
+
+    private init() {
+        reactions = UserDefaults.standard.dictionary(forKey: "tapbacks") as? [String: String] ?? [:]
+    }
+
+    func toggle(_ reaction: String, for key: String) {
+        reactions[key] = reactions[key] == reaction ? nil : reaction
+        UserDefaults.standard.set(reactions, forKey: "tapbacks")
+    }
+}
+
+/// The top of a conversation, like Messages: who you're texting.
+private struct ContactHeader: View {
+    var body: some View {
+        VStack(spacing: 5) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 46, height: 46)
+            Text("Cursor Pilot")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 4)
     }
 }
 

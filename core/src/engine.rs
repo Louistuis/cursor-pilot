@@ -407,6 +407,7 @@ impl Engine {
                     from_host(json!({"type": "computer", "name": call.name, "input": call.input}))
                 }
                 (false, "app_control") => from_host(json!({"type": "apps", "input": call.input})),
+                (false, "messages") => from_host(json!({"type": "messages", "input": call.input})),
                 (false, "memory") => self.memory.run(call.input, &agent::date_string(now())),
                 (false, "bash") => self.run_bash(call.input, cancel),
                 (false, "str_replace_based_edit_tool") => match self.editor.run(call.input) {

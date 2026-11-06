@@ -53,7 +53,8 @@ final class GlowController {
         let gain: Float = mode == .thinking ? 0.98 : mode == .sketching ? 0.45 : 0.7
         let r = GlowStage.cornerRadius(notched: true)
         return GlowView.image(of: GlowState(rect: CGRect(origin: .zero, size: size), radii: (r, r, r, r),
-                                            gain: gain, fill: 0, outer: 0, rot: 0.3),
+                                            gain: gain, fill: 0, outer: 0, rot: 0.3,
+                                            notch: CGRect(x: size.width / 2 - 104, y: 0, width: 208, height: 34)),
                               size: size)
     }
 }
@@ -74,6 +75,14 @@ private final class GlowStage: NSObject {
     private var spin = Spring(0.14)
     private(set) var isOpen = true
     var onClose: (() -> Void)?
+
+    /// The notch in this view's top-left points, with a little air around it.
+    private lazy var notch: CGRect? = {
+        guard screen.safeAreaInsets.top > 0, let left = screen.auxiliaryTopLeftArea,
+              let right = screen.auxiliaryTopRightArea else { return nil }
+        let width = screen.frame.width - left.width - right.width
+        return CGRect(x: left.width - 2, y: 0, width: width + 4, height: screen.safeAreaInsets.top + 2)
+    }()
 
     /// Built-in displays with a notch have rounded corners; the frame follows them.
     static func cornerRadius(notched: Bool) -> CGFloat { notched ? 10 : 0 }
@@ -148,7 +157,7 @@ private final class GlowStage: NSObject {
         let r = Self.cornerRadius(notched: screen.safeAreaInsets.top > 0)
         glow.state = GlowState(rect: glow.bounds, radii: (r, r, r, r),
                                gain: Float(max(gain.x, 0)), fill: 0, outer: 0,
-                               rot: Float(rot.truncatingRemainder(dividingBy: 4)))
+                               rot: Float(rot.truncatingRemainder(dividingBy: 4)), notch: notch)
         glow.render()
     }
 }

@@ -315,17 +315,45 @@ private struct NotchExpandedView: View {
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.55))
         } else {
-            VStack(alignment: .leading, spacing: 6) {
-                if !model.heardText.isEmpty {
-                    Text(model.heardText).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55)).lineLimit(2)
-                }
+            ScrollViewReader { proxy in
                 ScrollView {
-                    Text(model.replyText.isEmpty ? "…" : model.replyText)
-                        .font(.system(size: 13))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 4) {
+                        if !model.heardText.isEmpty {
+                            Text(model.heardText)
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(pilotAccent, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                                .padding(.leading, 60)
+                        }
+                        ForEach(Array(messageParts(model.replyText).enumerated()), id: \.offset) { _, part in
+                            RichText(text: part, size: 12.5, subtle: .white)
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.white)
+                                .tint(Color(red: 0.55, green: 0.75, blue: 1))
+                                .textSelection(.enabled)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                                .padding(.trailing, 40)
+                        }
+                        if model.phase == .thinking || (model.replyText.isEmpty && model.phase == .answering) {
+                            NotchTypingDots()
+                        }
+                        if let step = model.liveSteps.last(where: { $0.phase == "start" }) {
+                            Label(step.summary, systemImage: AgentStep.icon(for: step.kind))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.6))
+                                .lineLimit(1)
+                        }
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                    .animation(.spring(response: 0.3, dampingFraction: 0.85), value: model.replyText.count / 40)
                 }
                 .scrollIndicators(.never)
+                .onChange(of: model.replyText) { proxy.scrollTo("end", anchor: .bottom) }
             }
         }
     }
@@ -380,4 +408,22 @@ private struct NotchExpandedView: View {
 @MainActor
 func openSettings() {
     HomeWindow.shared.show(.settings)
+}
+
+/// Three dots in a dark bubble while the reply is on its way.
+private struct NotchTypingDots: View {
+    var body: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 3) {
+                ForEach(0..<3) { i in
+                    let phase = (sin(t * 5.5 - Double(i) * 0.9) + 1) / 2
+                    Circle().fill(.white).frame(width: 5, height: 5).opacity(0.3 + 0.5 * phase)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(.white.opacity(0.12), in: Capsule())
+        }
+    }
 }

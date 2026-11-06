@@ -24,6 +24,12 @@ final class AgentHost: @unchecked Sendable {
             var reply: [String: Any] = ["content": result.content, "is_error": result.isError]
             if let summary = result.summary { reply["summary"] = summary }
             return encode(reply)
+        case "messages":
+            let input = obj["input"] as? [String: Any] ?? [:]
+            let result = waitOnMain { await MessagesTool.perform(input) }
+            var reply: [String: Any] = ["content": result.content, "is_error": result.isError]
+            if let summary = result.summary { reply["summary"] = summary }
+            return encode(reply)
         case "apps":
             let input = obj["input"] as? [String: Any] ?? [:]
             let result = waitOnMain { await ComputerControl.shared.appControl(input) }

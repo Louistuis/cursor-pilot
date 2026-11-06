@@ -12,6 +12,8 @@ final class OverlayState: ObservableObject {
     @Published var caption = ""
     /// The sentence being spoken and the word in it, for the karaoke caption.
     @Published var spoken: SpokenWord?
+    /// Replies are read aloud: the bubble only ever shows the read-along line.
+    @Published var readAlong = false
     @Published var pointLabel: String?
     /// A short confirmation such as "Saved to Drawings".
     @Published var notice: String?
@@ -395,6 +397,9 @@ struct OverlayView: View {
                         }
                         if state.mode == .answering, let spoken = state.spoken {
                             KaraokeCaption(spoken: spoken)
+                        } else if state.mode == .answering && state.readAlong {
+                            // The voice is about to start: no wall of text first.
+                            EmptyView()
                         } else {
                             Text(tail(state.caption))
                                 .font(.system(size: 13))

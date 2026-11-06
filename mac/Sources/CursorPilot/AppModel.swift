@@ -159,9 +159,14 @@ final class AppModel: ObservableObject {
             self?.overlay.state.caption = text
         }
         speaker.onIdle = { [weak self] in
-            self?.releaseVisuals(upTo: .max)
-            self?.overlay.state.spoken = nil
-            self?.settleIfDone()
+            guard let self else { return }
+            releaseVisuals(upTo: .max)
+            // The last line stays, fully read, until the bubble goes away.
+            if let spoken = overlay.state.spoken {
+                overlay.state.spoken = SpokenWord(sentence: spoken.sentence,
+                                                  word: NSRange(location: (spoken.sentence as NSString).length, length: 0))
+            }
+            settleIfDone()
         }
         speaker.onSentence = { [weak self] number, text in
             guard let self else { return }
@@ -339,6 +344,7 @@ final class AppModel: ObservableObject {
             return
         }
         Sounds.play(.send)
+        overlay.state.readAlong = speakReplies
         heardText = text
         replyText = ""
         lastError = nil
@@ -568,6 +574,7 @@ final class AppModel: ObservableObject {
         case .idle:
             overlay.state.mode = .idle
             overlay.state.caption = ""
+            overlay.state.spoken = nil
             overlay.state.level = 0
         case .listening:
             backgroundWork = false

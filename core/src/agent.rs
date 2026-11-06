@@ -45,7 +45,30 @@ pub fn tool_definitions(settings: &Settings) -> Vec<Value> {
         tools.push(json!({"type": "web_search_20260209", "name": "web_search", "max_uses": 5}));
     }
     tools.push(app_control_tool());
+    tools.push(messages_tool());
     tools
+}
+
+/// Our tool for the user's iMessages and texts.
+fn messages_tool() -> Value {
+    json!({
+        "name": "messages",
+        "description": "The user's Messages app (iMessage and SMS): list recent conversations, read one, \
+    or send a text. Send only what the user asked you to send, to whom they asked, in their words or \
+    clearly what they meant; if the recipient is ambiguous, read chats first or ask.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["chats", "read", "send"],
+                           "description": "chats: recent conversations with their last message. read: the latest messages with someone. send: text someone."},
+                "with": {"type": "string", "description": "read: a contact's name, a group chat's name, a number or an address."},
+                "to": {"type": "string", "description": "send: a contact's name, an existing chat's name, a number or an address."},
+                "text": {"type": "string", "description": "send: the message."},
+                "limit": {"type": "integer", "description": "chats or read: how many (default 15 or 20)."}
+            },
+            "required": ["action"]
+        }
+    })
 }
 
 /// Our own tool for working with apps through their accessibility trees, in
@@ -108,6 +131,7 @@ Typing and keys go to the app you last clicked in. If a click had no visible eff
 spot once more: the retry briefly borrows the user's real pointer for apps that ignore background \
 clicks. Drags use the real pointer for a moment. End each group of actions with a screenshot (or \
 an elements listing) to check the result.\n\
+- messages reads the user's Messages conversations and sends texts for them.\n\
 - web_search, when present, finds current information.\n\
 How to work: do what the user asked, completely, the way they asked. Prefer, in order: app_control \
 and the shell (fast, exact, invisible), then the computer tools for what has no other way. Open apps in the background (app_control open, or `open -g`) and only bring one to the front \
@@ -255,6 +279,14 @@ impl<'a> Call<'a> {
                     _ => format!("Forgot \u{201C}{text}\u{201D}"),
                 }
             }
+            "messages" => match i["action"].as_str().unwrap_or("") {
+                "send" => format!("Texted {}", i["to"].as_str().unwrap_or("someone")),
+                "read" => format!(
+                    "Read messages with {}",
+                    i["with"].as_str().unwrap_or("someone")
+                ),
+                _ => "Checked your messages".into(),
+            },
             other => other.replace('_', " "),
         }
     }
@@ -268,6 +300,8 @@ impl<'a> Call<'a> {
             "app"
         } else if self.name == "memory" {
             "memory"
+        } else if self.name == "messages" {
+            "messages"
         } else {
             "file"
         }
