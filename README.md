@@ -77,8 +77,17 @@ and `label`. Tags are removed from what is shown and spoken.
 The buddy holds the pen. Drawings go on one after another as the voice
 reaches them: the buddy flies to where each one starts and moves along the
 stroke at an even pace while the ink appears (a dot of ink at its tip), so
-it looks drawn by hand. Marks stay pinned to what they mark and fade after
-12 seconds.
+it looks drawn by hand. Marks stay pinned to what they mark: to a nearby
+piece of content found through Accessibility (a line of text, an image, a
+control, never the page or a big container), followed at 60 fps, so they
+move with a web page or document as it scrolls and hide when it scrolls
+away; where there's no such element they follow the scroll wheel over
+their window. They fade after 12 seconds.
+
+While it thinks, the buddy's arrow turns into the notch's merging dots in
+a small dark orb, lit in the buddy's colour, and springs back to the arrow
+when it answers. The caption by the cursor reads along with the voice and
+grows and shrinks with its words.
 
 **Whiteboard.** To explain something (how it works, the steps, how ideas
 relate) Claude can open a glass whiteboard over your screen with
@@ -86,14 +95,17 @@ relate) Claude can open a glass whiteboard over your screen with
 boxes with an SF Symbol, `<link from to text/>` arrows between them,
 `<write x y text size/>` handwriting, and any mark above with
 `screen="board"`, in board units (1000 × 600). It works without
-screenshots, stays until you close it (✕ or Esc) and is included in the
-next screenshot, so you can ask about it.
+screenshots and is included in the next screenshot, so you can ask about
+it. When the explanation is over it closes by itself after a while (never
+while the pointer is on it), or with ✕ or Esc; every board is kept
+(boards.json) and shows under its reply in Home, to open again.
 
 **3D.** For something physical or spatial Claude can send a ```scene block
 of JSON (spheres, boxes, cylinders, cones, tori, rings, capsules,
 pyramids and planes, with colours, labels, spin, orbits, parents and links).
 It opens as a model you can turn in a floating glass panel as soon as the
-block is complete, and stays in the chat as a small 3D card. `<focus id/>`
+block is complete, closes by itself a while after the answer, and stays in
+the chat as a small 3D card that opens it again. `<focus id/>`
 then lights up a part, swings the camera to it and sends the buddy to point
 at it, in time with the voice.
 

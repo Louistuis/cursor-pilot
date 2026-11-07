@@ -183,6 +183,10 @@ final class InkController {
     /// What each mark is pinned to: the element under it when drawn, and
     /// where that element was then.
     private var pins: [UUID: (element: AXUIElement, pid: pid_t, origin: CGPoint)] = [:]
+    /// Marks on content with no element small enough to follow: they move
+    /// with the scroll wheel over their window instead.
+    private var scrollPins: [UUID: CGWindowID] = [:]
+    private var scrollMonitor: Any?
     private var pinTimer: Timer?
     private var pinTicks = 0
 
@@ -202,6 +206,7 @@ final class InkController {
     func clearMarks() {
         withAnimation(.easeOut(duration: 0.25)) { state.marks.removeAll() }
         pins.removeAll()
+        scrollPins.removeAll()
         updateVisibility()
     }
 
@@ -210,17 +215,67 @@ final class InkController {
     /// Pins a mark to the control or text under it, so it moves with the
     /// page when it scrolls and with the window when it is dragged.
     private func pin(_ mark: InkMark) {
-        guard ComputerControl.hasAccessibility, let win = BackgroundInput.window(at: mark.shape.anchor),
-              let element = BackgroundInput.element(at: mark.shape.anchor, pid: win.pid),
-              let frame = BackgroundInput.frame(element)
-        else { return }
+        guard ComputerControl.hasAccessibility, let win = BackgroundInput.window(at: mark.shape.anchor) else { return }
+        guard let element = Self.anchor(near: mark.shape.anchor, in: win), let frame = BackgroundInput.frame(element)
+        else {
+            followScroll(mark.id, window: win.windowID)
+            return
+        }
         pins[mark.id] = (element, win.pid, frame.origin)
         if pinTimer == nil {
-            let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.followPins() }
             }
             RunLoop.main.add(t, forMode: .common)
             pinTimer = t
+        }
+    }
+
+    /// Something on the page by `p` that moves with it when it scrolls: the
+    /// element right there if it's a piece of content (text, an image, a
+    /// control), else the nearest one around it. Never the page itself or a
+    /// big container, which stay put while what's in them scrolls.
+    private static func anchor(near p: CGPoint, in win: BackgroundInput.Target) -> AXUIElement? {
+        let window = win.windowID != 0 ? Workspace.window(win.windowID)?.frame : nil
+        let big = max((window?.width ?? 1200) * (window?.height ?? 800) * 0.15, 4000)
+        let offsets: [CGPoint] = [.zero, CGPoint(x: 0, y: -22), CGPoint(x: 0, y: 22), CGPoint(x: -36, y: 0),
+                                  CGPoint(x: 36, y: 0), CGPoint(x: -60, y: -40), CGPoint(x: 60, y: 40),
+                                  CGPoint(x: 60, y: -40), CGPoint(x: -60, y: 40), CGPoint(x: 0, y: -70), CGPoint(x: 0, y: 70)]
+        for o in offsets {
+            let at = CGPoint(x: p.x + o.x, y: p.y + o.y)
+            guard window?.contains(at) ?? true, let el = BackgroundInput.element(at: at, pid: win.pid),
+                  let f = BackgroundInput.frame(el), f.width * f.height >= 12, f.width * f.height < big,
+                  !["AXWebArea", "AXScrollArea", "AXWindow", "AXSplitGroup"].contains(BackgroundInput.role(el))
+            else { continue }
+            return el
+        }
+        return nil
+    }
+
+    /// Moves a mark with the scroll wheel over its window.
+    private func followScroll(_ id: UUID, window: CGWindowID) {
+        scrollPins[id] = window
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            let precise = event.hasPreciseScrollingDeltas
+            let dx = event.scrollingDeltaX * (precise ? 1 : 10), dy = event.scrollingDeltaY * (precise ? 1 : 10)
+            let mouse = NSEvent.mouseLocation
+            let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+            MainActor.assumeIsolated { self?.scrolled(dx: dx, dy: dy, at: CGPoint(x: mouse.x, y: primaryHeight - mouse.y)) }
+        }
+    }
+
+    private func scrolled(dx: CGFloat, dy: CGFloat, at p: CGPoint) {
+        scrollPins = scrollPins.filter { id, _ in state.marks.contains { $0.id == id } }
+        if scrollPins.isEmpty {
+            if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
+            scrollMonitor = nil
+            return
+        }
+        guard let window = BackgroundInput.window(at: p)?.windowID else { return }
+        for i in state.marks.indices where scrollPins[state.marks[i].id] == window {
+            state.marks[i].shift.x += dx
+            state.marks[i].shift.y += dy
         }
     }
 

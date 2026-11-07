@@ -312,12 +312,14 @@ final class SceneController: NSObject {
     private var link: CADisplayLink?
     private var focused: String?
     private var keyMonitor: Any?
+    private var closing: Task<Void, Never>?
 
     var isOpen: Bool { panel?.isVisible == true }
     var windowNumber: Int? { isOpen ? panel?.windowNumber : nil }
     var spec: SceneSpec? { model?.spec }
 
     func show(_ spec: SceneSpec) {
+        closing?.cancel()
         if spec == model?.spec, isOpen { return }
         let model = SceneModel(spec: spec)
         self.model = model
@@ -376,7 +378,22 @@ final class SceneController: NSObject {
         }
     }
 
+    /// Closes once the explanation is over, but never while the pointer is on it.
+    func closeSoon(after seconds: Double = 14) {
+        guard isOpen else { return }
+        closing?.cancel()
+        closing = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            while !Task.isCancelled, let panel = self?.panel, panel.frame.contains(NSEvent.mouseLocation) {
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard !Task.isCancelled else { return }
+            self?.close()
+        }
+    }
+
     func close() {
+        closing?.cancel()
         guard let panel else { return }
         link?.invalidate()
         link = nil
@@ -396,6 +413,7 @@ final class SceneController: NSObject {
     /// (global top-left) and its label, for the buddy to point at.
     func focus(_ id: String) async -> (CGPoint, String)? {
         guard let model, model.nodes[id] != nil else { return nil }
+        closing?.cancel()
         model.turntable.removeAllActions()
         focused = id
         model.focus(id)

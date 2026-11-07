@@ -282,6 +282,16 @@ fragment float4 cp_fluid_dots(float4 pos [[position]], constant BasicUniforms& U
     col *= 1.0 + 0.05 * sin(t * 1.0 + 1.0);
     col = pow(max(col, 0.0), float3(1.0 / 1.2));
     col = min(col, 1.0);
+    // A tint (b.yzw) colours the light, the cores staying white-hot; a
+    // negative red means the rainbow, drifting around the centre.
+    float3 tint = U.b.yzw;
+    if (tint.r < 0.0) {
+        tint = mix(dots::hue2rgb(atan2(p.y, p.x) / dots::TAU + t * 0.05), float3(1.0), 0.2);
+    }
+    if (tint.r > 0.0 || tint.g > 0.0 || tint.b > 0.0) {
+        float lum = max(col.r, max(col.g, col.b));
+        col = mix(min(tint * lum * 1.35, 1.0), float3(lum), smoothstep(0.93, 1.0, lum));
+    }
     return lightOut(col);
 }
 """#

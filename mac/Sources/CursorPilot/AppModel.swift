@@ -29,6 +29,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveSteps: [AgentStep] = []
     /// Tasks running in the background, and ones that just finished.
     @Published private(set) var jobs: [BackgroundJob] = []
+    /// Whiteboards Claude drew, to open again from the chat.
+    @Published private(set) var boards: [BoardRecord] = BoardStore.load()
+    /// The board being drawn in this reply.
+    private var boardLog: BoardRecord?
 
     // Settings
     @Published var apiKey: String {
@@ -448,7 +452,14 @@ final class AppModel: ObservableObject {
                     }
                 }
             }
-        case .board(let item):
+        case .board(let item, let raw):
+            if case .open(let title) = item {
+                keepBoard()
+                boardLog = BoardRecord(conversation: currentConversationID, title: title, at: Date(), items: [])
+            } else if boardLog == nil {
+                boardLog = BoardRecord(conversation: currentConversationID, title: "", at: Date(), items: [])
+            }
+            boardLog?.items.append(raw)
             showInTime { [weak self] in
                 self?.enqueueDraw { [weak self] in
                     guard let self else { return }
@@ -494,6 +505,7 @@ final class AppModel: ObservableObject {
             if lastError == nil, !liveSteps.isEmpty { Sounds.play(.done) }
             requestFinished = true
             activeRequest = nil
+            keepBoard()
             refreshConversations()
             reloadOpenTranscript()
             refreshMemory()
@@ -564,6 +576,27 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled, let self, self.requestFinished, !self.speaker.isSpeaking else { return }
             self.setPhase(.idle)
+            // Explained: the board and 3D view go after a while to look at them.
+            self.board.closeSoon()
+            self.scenes.closeSoon()
+        }
+    }
+
+    /// Saves the board drawn in this reply, for the chat.
+    private func keepBoard() {
+        guard var record = boardLog, record.items.count > 1 else { return boardLog = nil }
+        boardLog = nil
+        record.at = Date()
+        boards.append(record)
+        BoardStore.save(boards)
+    }
+
+    /// Boards drawn while answering one message: after the reply before it,
+    /// up to a minute after this reply was saved.
+    func boards(in conversation: String, after: Int, until: Int) -> [BoardRecord] {
+        boards.filter {
+            let t = Int($0.at.timeIntervalSince1970)
+            return $0.conversation == conversation && t > after && t <= until + 60
         }
     }
 

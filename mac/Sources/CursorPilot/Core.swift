@@ -63,8 +63,9 @@ enum CoreEvent {
     case point(x: Double, y: Double, label: String)
     /// A circle, arrow or box to draw, in the same coordinates.
     case mark(InkShape, label: String)
-    /// Something for the whiteboard, in its own units (1000 × 600).
-    case board(BoardItem)
+    /// Something for the whiteboard, in its own units (1000 × 600), and the
+    /// event as it came, to keep the board and open it again later.
+    case board(BoardItem, raw: String)
     /// Turn the 3D view to one of its parts.
     case focus(String)
     /// An agent step: "start" or "end".
@@ -319,6 +320,24 @@ private let coreEventCallback: CPEventCallback = { ctx, json in
     }
 }
 
+/// What a `board` event puts on the whiteboard.
+func boardItem(_ obj: [String: Any]) -> BoardItem? {
+    let str = { (k: String) in obj[k] as? String ?? "" }
+    let n = { (k: String) in CGFloat(obj[k] as? Double ?? 0) }
+    switch str("shape") {
+    case "open": return .open(title: str("title"))
+    case "card": return .card(id: str("id"), at: CGPoint(x: n("x"), y: n("y")), text: str("text"), icon: str("icon"))
+    case "link": return .link(from: str("from"), to: str("to"), text: str("text"))
+    case "write": return .write(at: CGPoint(x: n("x"), y: n("y")), text: str("text"), size: str("size"))
+    case "point": return .point(CGPoint(x: n("x"), y: n("y")), label: str("label"))
+    default: return inkShape(obj).map { .mark($0, label: str("label")) }
+    }
+}
+
+func boardItem(json: String) -> BoardItem? {
+    (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]).flatMap(boardItem)
+}
+
 /// A drawing from a `mark` or `board` event.
 private func inkShape(_ obj: [String: Any]) -> InkShape? {
     let n = { (k: String) in CGFloat(obj[k] as? Double ?? 0) }
@@ -359,18 +378,7 @@ private func parseEvent(_ json: String) -> CoreEvent? {
         guard let shape = inkShape(obj) else { return nil }
         return .mark(shape, label: str("label"))
     case "board":
-        let n = { (k: String) in CGFloat(obj[k] as? Double ?? 0) }
-        switch str("shape") {
-        case "open": return .board(.open(title: str("title")))
-        case "card": return .board(.card(id: str("id"), at: CGPoint(x: n("x"), y: n("y")), text: str("text"), icon: str("icon")))
-        case "link": return .board(.link(from: str("from"), to: str("to"), text: str("text")))
-        case "write":
-            return .board(.write(at: CGPoint(x: n("x"), y: n("y")), text: str("text"), size: str("size")))
-        case "point": return .board(.point(CGPoint(x: n("x"), y: n("y")), label: str("label")))
-        default:
-            guard let shape = inkShape(obj) else { return nil }
-            return .board(.mark(shape, label: str("label")))
-        }
+        return boardItem(obj).map { .board($0, raw: json) }
     case "focus": return .focus(str("id"))
     case "tool":
         return .tool(AgentStep(callID: str("id"), phase: str("phase"), kind: str("kind"), summary: str("summary"),

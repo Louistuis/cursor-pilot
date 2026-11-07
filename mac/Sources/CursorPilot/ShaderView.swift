@@ -22,6 +22,9 @@ struct ShaderInputs: Equatable {
     var speed: Float = 1
     /// Above 1 shows the effect larger than its canvas, for small places.
     var zoom: Float = 1
+    /// Colours the fluid dots (sRGB); zero leaves them white, a negative
+    /// red makes them a rainbow.
+    var tint: SIMD3<Float> = .zero
 }
 
 /// A SwiftUI view that renders one of the light effects with Metal.
@@ -158,7 +161,7 @@ private final class ShaderRenderer: NSObject, MTKViewDelegate {
 
         encoder.setRenderPipelineState(pipeline)
         var u = BasicUniforms(a: SIMD4(size.x, size.y, Float(now - start) * inputs.speed, eased),
-                              b: SIMD4(max(inputs.zoom, 0.01), 0, 0, 0))
+                              b: SIMD4(max(inputs.zoom, 0.01), inputs.tint.x, inputs.tint.y, inputs.tint.z))
         encoder.setFragmentBytes(&u, length: MemoryLayout<BasicUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
@@ -172,8 +175,9 @@ private final class ShaderRenderer: NSObject, MTKViewDelegate {
 /// Merging dots, shown while Cursor Pilot is thinking.
 struct ThinkingBlobs: View {
     var zoom: Float = 1
+    var tint: SIMD3<Float> = .zero
     var body: some View {
-        ShaderCanvas(kind: .fluidDots, inputs: ShaderInputs(zoom: zoom)).aspectRatio(1, contentMode: .fit)
+        ShaderCanvas(kind: .fluidDots, inputs: ShaderInputs(zoom: zoom, tint: tint)).aspectRatio(1, contentMode: .fit)
     }
 }
 

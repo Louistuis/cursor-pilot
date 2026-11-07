@@ -415,9 +415,20 @@ struct OverlayView: View {
 
     /// The arrow with its motion trail behind it and the click ring at its tip.
     private var buddy: some View {
-        ZStack(alignment: state.flipped ? .topTrailing : .topLeading) {
+        // While it thinks the arrow becomes the notch's merging dots, in its colour.
+        let thinking = state.mode == .thinking && state.penInk == nil
+        return ZStack(alignment: state.flipped ? .topTrailing : .topLeading) {
             MotionTrail(motion: state.motion, flipped: state.flipped)
             PilotArrow(flipped: state.flipped, active: state.mode != .idle)
+                .scaleEffect(thinking ? 0.2 : 1, anchor: .center)
+                .opacity(thinking ? 0 : 1)
+                .blur(radius: thinking ? 4 : 0)
+            if thinking {
+                ThinkingOrb()
+                    .frame(width: 32, height: 32)
+                    .offset(x: state.flipped ? 6 : -6, y: -5)
+                    .transition(.scale(scale: 0.25).combined(with: .opacity))
+            }
             ClickRing(at: state.clickAt)
             if let ink = state.penInk {
                 // The ink at the tip, where the line comes from.
@@ -430,6 +441,7 @@ struct OverlayView: View {
             }
         }
         .frame(width: 20, height: 23, alignment: state.flipped ? .topTrailing : .topLeading)
+        .animation(.spring(response: 0.42, dampingFraction: 0.78), value: thinking)
     }
 
     @ViewBuilder private var bubble: some View {
@@ -452,7 +464,8 @@ struct OverlayView: View {
                         }
                     }
                 case .thinking:
-                    GlassCapsule { ShimmerText(text: "Thinking") }
+                    // The buddy itself shows it's thinking.
+                    EmptyView()
                 case .answering, .error:
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         if state.mode == .answering {
@@ -474,6 +487,9 @@ struct OverlayView: View {
                     .padding(.vertical, 9)
                     .frame(maxWidth: 300, alignment: .leading)
                     .glassBackground(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    // The bubble grows and shrinks with the words, smoothly.
+                    .animation(.spring(response: 0.38, dampingFraction: 0.86), value: state.spoken)
+                    .animation(.spring(response: 0.38, dampingFraction: 0.86), value: state.caption.count / 14)
                 }
             }
         }
@@ -484,6 +500,32 @@ struct OverlayView: View {
     /// Keeps the bubble to the latest part of a long reply.
     private func tail(_ s: String) -> String {
         s.count > 260 ? "…" + s.suffix(260) : s
+    }
+}
+
+/// The buddy while it thinks: the notch's merging dots in a small dark orb,
+/// lit in the buddy's colour.
+struct ThinkingOrb: View {
+    var tint: BuddyTint?
+    @AppStorage("buddyTint") private var savedTint = BuddyTint.rainbow
+
+    var body: some View {
+        let t = tint ?? savedTint
+        ZStack {
+            Circle().fill(Color.black.opacity(0.85))
+            ThinkingBlobs(zoom: 2.5, tint: t.shaderTint).clipShape(Circle())
+            Circle().strokeBorder(AngularGradient(colors: t.colors, center: .center), lineWidth: 0.8).opacity(0.55)
+        }
+        .shadow(color: (t.colors.first ?? .white).opacity(0.55), radius: 7)
+    }
+}
+
+extension BuddyTint {
+    /// The colour the thinking dots take (`ShaderInputs.tint`).
+    var shaderTint: SIMD3<Float> {
+        guard self != .rainbow else { return SIMD3(-1, 0, 0) }
+        let c = NSColor(colors[min(1, colors.count - 1)]).usingColorSpace(.sRGB) ?? .white
+        return SIMD3(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent))
     }
 }
 
@@ -735,7 +777,7 @@ struct KaraokeCaption: View {
         .font(.system(size: 14, weight: .medium))
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
-        .frame(minWidth: 120, maxWidth: 300, minHeight: shown.count > 1 ? 40 : 19, alignment: .topLeading)
+        .frame(maxWidth: 300, minHeight: shown.count > 1 ? 40 : 19, alignment: .topLeading)
         .clipped()
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: current)
         .animation(.spring(response: 0.42, dampingFraction: 0.9), value: row)

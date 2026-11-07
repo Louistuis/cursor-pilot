@@ -12,6 +12,37 @@ enum BoardItem {
     case mark(InkShape, label: String)
 }
 
+/// A board Claude drew, kept so it can be opened again from the chat: the
+/// board events as they came, replayed.
+struct BoardRecord: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var conversation: String
+    var title: String
+    var at: Date
+    var items: [String]
+}
+
+/// Boards drawn in every conversation, newest last (boards.json).
+enum BoardStore {
+    private static var url: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Cursor Pilot/boards.json")
+    }
+
+    static func load() -> [BoardRecord] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([BoardRecord].self, from: data)) ?? []
+    }
+
+    static func save(_ records: [BoardRecord]) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(records.suffix(300)) { try? data.write(to: url, options: .atomic) }
+    }
+}
+
 /// One thing drawn on the board.
 struct BoardElement: Identifiable {
     enum Kind {
@@ -50,12 +81,14 @@ final class BoardController {
     /// Cards by the id Claude gave them, for links.
     private var cards: [String: CGRect] = [:]
     private var keyMonitor: Any?
+    private var closing: Task<Void, Never>?
 
     var isOpen: Bool { panel?.isVisible == true }
     var windowNumber: Int? { isOpen ? panel?.windowNumber : nil }
 
     /// Opens a fresh board (or clears the open one) on the screen with the pointer.
     func open(title: String) {
+        closing?.cancel()
         cards.removeAll()
         state.elements.removeAll()
         state.title = title
@@ -88,7 +121,37 @@ final class BoardController {
         }
     }
 
+    /// Closes the board once the explanation is over and it's been there a
+    /// while to look at, but never while the pointer is on it.
+    func closeSoon(after seconds: Double = 14) {
+        guard isOpen else { return }
+        closing?.cancel()
+        closing = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            while !Task.isCancelled, let panel = self?.panel, panel.frame.contains(NSEvent.mouseLocation) {
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard !Task.isCancelled else { return }
+            self?.close()
+        }
+    }
+
+    /// Draws a saved board again, quickly and without the pen.
+    func replay(_ record: BoardRecord) {
+        open(title: record.title)
+        state.title = record.title
+        Task {
+            for raw in record.items {
+                guard let item = boardItem(json: raw) else { continue }
+                if case .open = item { continue }
+                await add(item, overlay: nil)
+                try? await Task.sleep(for: .seconds(0.12))
+            }
+        }
+    }
+
     func close() {
+        closing?.cancel()
         guard let panel else { return }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
@@ -110,16 +173,18 @@ final class BoardController {
 
     /// Draws an item with the buddy as the pen. Opens a board first if
     /// Claude drew on one without saying so.
-    func add(_ item: BoardItem, overlay: OverlayController) async {
+    /// With no overlay (a replay) it draws quickly, without the buddy.
+    func add(_ item: BoardItem, overlay: OverlayController?) async {
         if case .open(let title) = item { return open(title: title) }
         if !isOpen { open(title: "") }
+        closing?.cancel()
         let kind: BoardElement.Kind
         let path: Path
         switch item {
         case .open:
             return
         case .point(let p, let label):
-            overlay.point(atTopLeft: global(p), label: label)
+            overlay?.point(atTopLeft: global(p), label: label)
             return
         case .card(let id, let at, let text, let icon):
             let w = min(max(CGFloat(text.count) * 11 + (icon.isEmpty ? 56 : 92), 130), 300)
@@ -145,6 +210,10 @@ final class BoardController {
             path = shape.penPath
         }
         let (points, duration) = samplePen(path, fallback: .zero)
+        guard let overlay else {
+            state.elements.append(BoardElement(kind: kind, duration: min(duration, 0.45)))
+            return
+        }
         await overlay.draw(along: points.map(global), duration: duration, ink: InkPalette.marker) {
             state.elements.append(BoardElement(kind: kind, duration: duration))
         }

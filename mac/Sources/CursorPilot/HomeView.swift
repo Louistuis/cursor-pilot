@@ -263,6 +263,14 @@ private struct ChatView: View {
                                      key: "\(model.openTranscript?.id ?? "")#\(i)",
                                      status: !isLive && turn.role == "user" && i == turns.count - 2 ? "Read" : nil)
                             .padding(.top, i > 0 && turns[i - 1].role == turn.role ? 2 : 10)
+                        if turn.role == "assistant", let id = model.openTranscript?.id {
+                            let before = turns[..<i].last { $0.role == "assistant" }?.at ?? 0
+                            ForEach(model.boards(in: id, after: before, until: turn.at)) { record in
+                                BoardChip(record: record) { model.board.replay(record) }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.top, 4)
+                            }
+                        }
                     }
                     if isLive {
                         if !model.heardText.isEmpty || model.phase == .listening {
@@ -898,5 +906,41 @@ struct JobCard: View {
         .onAppear {
             withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) { pulse = true }
         }
+    }
+}
+
+/// A whiteboard from this reply, to open again.
+struct BoardChip: View {
+    let record: BoardRecord
+    var open: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 9) {
+                Image(systemName: "rectangle.and.pencil.and.ellipsis")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(AngularGradient(colors: pilotRainbow, center: .center))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(record.title.isEmpty ? "Whiteboard" : record.title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+                    Text("Whiteboard · open again")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                Image(systemName: "arrow.up.forward")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 4)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.secondary.opacity(hover ? 0.16 : 0.09), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.secondary.opacity(0.18)))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .animation(.easeOut(duration: 0.15), value: hover)
     }
 }
