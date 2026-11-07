@@ -5,7 +5,10 @@
 //! `<circle x="412" y="230" r="40" screen="0"/>`,
 //! `<arrow x1="100" y1="80" x2="412" y2="230" screen="0"/>` or
 //! `<box x="380" y="210" w="80" h="40" screen="0"/>`, plus `<underline>`,
-//! `<highlight>`, `<trace>` and `<note>`.
+//! `<highlight>`, `<trace>`, `<note>`, `<spotlight>`, `<check>`, `<cross>`,
+//! `<step>` and `<bracket>`. The whiteboard has `<board>`, `<card>`,
+//! `<link>` and `<write>` (and takes the other shapes with
+//! `screen="board"`); `<focus>` turns the 3D view to one of its parts.
 //! Text arrives in arbitrary chunks, so a tag can be split across deltas; the
 //! filter holds back anything that might still become a tag and releases it
 //! as plain text once it clearly is not one.
@@ -14,7 +17,7 @@ use std::collections::HashMap;
 
 /// Longest run we hold back while waiting for a tag to close.
 const MAX_TAG_LEN: usize = 600;
-const TAG_NAMES: [&str; 8] = [
+const TAG_NAMES: [&str; 18] = [
     "point",
     "circle",
     "arrow",
@@ -23,7 +26,23 @@ const TAG_NAMES: [&str; 8] = [
     "highlight",
     "trace",
     "note",
+    "spotlight",
+    "check",
+    "cross",
+    "step",
+    "bracket",
+    "board",
+    "card",
+    "link",
+    "write",
+    "focus",
 ];
+
+/// The `screen` of a mark on the whiteboard: its coordinates are the
+/// board's own, `BOARD_W` by `BOARD_H`, not a screenshot's.
+pub const BOARD: usize = usize::MAX;
+pub const BOARD_W: f64 = 1000.0;
+pub const BOARD_H: f64 = 600.0;
 /// Most points kept from a trace.
 const MAX_TRACE_POINTS: usize = 40;
 /// Ring radius, in screenshot pixels, when a circle tag gives none.
@@ -48,6 +67,26 @@ pub enum Shape {
     Trace { points: Vec<(f64, f64)> },
     /// A sticky note with a few words, pinned at x, y.
     Note { x: f64, y: f64, text: String },
+    /// Dims everything but a rectangle, to make the eye go there.
+    Spotlight { x: f64, y: f64, w: f64, h: f64 },
+    /// A tick: this one, or this is right.
+    Check { x: f64, y: f64 },
+    /// A cross: not this, or this is wrong.
+    Cross { x: f64, y: f64 },
+    /// A numbered badge, for steps in order.
+    Step { x: f64, y: f64, n: u32 },
+    /// A curly bracket down the left of a span from y to y + h, grouping it.
+    Bracket { x: f64, y: f64, h: f64 },
+    /// Opens a fresh whiteboard with a title.
+    Board { title: String },
+    /// A box with a few words (and an SF Symbol) on the board, which links join.
+    Card { id: String, x: f64, y: f64, text: String, icon: String },
+    /// An arrow from one card to another, with a few words on it.
+    Link { from: String, to: String, text: String },
+    /// Handwritten text on the board; size is "title", "body" or "small".
+    Write { x: f64, y: f64, text: String, size: String },
+    /// Turns the 3D view to one of its parts.
+    Focus { id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,6 +209,13 @@ fn parse_mark(tag: &str) -> Option<Mark> {
             .and_then(|v| v.trim().parse::<f64>().ok())
             .filter(|v| v.is_finite())
     };
+    let text = |k: &str, n: usize| -> Option<String> {
+        attrs
+            .get(k)
+            .map(|t| t.trim().chars().take(n).collect::<String>())
+            .filter(|t| !t.is_empty())
+    };
+    let on_board = attrs.get("screen").is_some_and(|s| s.trim() == "board");
     let shape = match name.as_str() {
         "point" => Shape::Point {
             x: num("x")?,
@@ -229,11 +275,65 @@ fn parse_mark(tag: &str) -> Option<Mark> {
                 .take(120)
                 .collect(),
         },
+        "spotlight" => Shape::Spotlight {
+            x: num("x")?,
+            y: num("y")?,
+            w: num("w").filter(|w| *w > 0.0)?,
+            h: num("h").filter(|h| *h > 0.0)?,
+        },
+        "check" => Shape::Check {
+            x: num("x")?,
+            y: num("y")?,
+        },
+        "cross" => Shape::Cross {
+            x: num("x")?,
+            y: num("y")?,
+        },
+        "step" => Shape::Step {
+            x: num("x")?,
+            y: num("y")?,
+            n: num("n").map(|n| n.clamp(1.0, 99.0) as u32).unwrap_or(1),
+        },
+        "bracket" => Shape::Bracket {
+            x: num("x")?,
+            y: num("y")?,
+            h: num("h").filter(|h| *h > 0.0)?,
+        },
+        "board" => Shape::Board {
+            title: text("title", 80).unwrap_or_default(),
+        },
+        "card" => Shape::Card {
+            id: text("id", 40)?,
+            x: num("x")?,
+            y: num("y")?,
+            text: text("text", 60)?,
+            icon: text("icon", 60).unwrap_or_default(),
+        },
+        "link" => Shape::Link {
+            from: text("from", 40)?,
+            to: text("to", 40)?,
+            text: text("text", 40).unwrap_or_default(),
+        },
+        "write" => Shape::Write {
+            x: num("x")?,
+            y: num("y")?,
+            text: text("text", 200)?,
+            size: text("size", 10).unwrap_or_else(|| "body".into()),
+        },
+        "focus" => Shape::Focus { id: text("id", 40)? },
         _ => return None,
     };
+    let board_only = matches!(
+        shape,
+        Shape::Board { .. } | Shape::Card { .. } | Shape::Link { .. } | Shape::Write { .. }
+    );
     Some(Mark {
         shape,
-        screen: num("screen").map(|s| s.max(0.0) as usize).unwrap_or(0),
+        screen: if on_board || board_only {
+            BOARD
+        } else {
+            num("screen").map(|s| s.max(0.0) as usize).unwrap_or(0)
+        },
         label: attrs.get("label").cloned().unwrap_or_default(),
     })
 }
@@ -308,6 +408,30 @@ mod tests {
             Piece::Text(t) => emit_text(all, t),
             other => all.push(other),
         }
+    }
+
+    #[test]
+    fn whiteboard_and_new_marks() {
+        let got = run(&[
+            "<board title=\"How DNS works\"/>A <card id=\"pc\" x=\"120\" y=\"300\" text=\"Your Mac\" icon=\"laptopcomputer\"/>",
+            "<link from=\"pc\" to=\"dns\" text=\"asks\"/><circle x=\"500\" y=\"300\" r=\"60\" screen=\"board\"/>",
+            "<step x=\"10\" y=\"20\" n=\"2\" screen=\"1\"/><focus id=\"nucleus\"/>",
+        ]);
+        let marks: Vec<&Mark> = got
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Mark(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marks.len(), 6);
+        assert_eq!(marks[0].shape, Shape::Board { title: "How DNS works".into() });
+        assert_eq!(marks[0].screen, BOARD);
+        assert!(matches!(&marks[1].shape, Shape::Card { id, icon, .. } if id == "pc" && icon == "laptopcomputer"));
+        assert_eq!(marks[3].screen, BOARD);
+        assert_eq!(marks[4].shape, Shape::Step { x: 10.0, y: 20.0, n: 2 });
+        assert_eq!(marks[4].screen, 1);
+        assert_eq!(marks[5].shape, Shape::Focus { id: "nucleus".into() });
     }
 
     #[test]

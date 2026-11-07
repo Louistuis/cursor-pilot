@@ -29,6 +29,8 @@ final class OverlayState: ObservableObject {
     @Published var clickAt: Date?
     /// Bubble sits left of the buddy when the cursor is near the right edge.
     @Published var flipped = false
+    /// The buddy is drawing: its tip carries a dot of this ink.
+    @Published var penInk: Color?
 }
 
 /// A click-through panel that follows the mouse and flies to points the
@@ -81,6 +83,15 @@ final class OverlayController: NSObject {
     private var lastAnchor = CGPoint.zero
     private var velocity = CGVector.zero
 
+    /// A stroke the buddy is drawing: it moves along these points (Cocoa
+    /// coordinates, evenly spaced) at an even pace, as the ink goes on.
+    private struct PenStroke {
+        var points: [CGPoint]
+        var start: CFTimeInterval
+        var duration: CFTimeInterval
+    }
+    private var pen: PenStroke?
+
     override init() {
         panel = NSPanel(
             contentRect: CGRect(origin: .zero, size: Self.size),
@@ -124,10 +135,44 @@ final class OverlayController: NSObject {
         wake()
     }
 
+    /// Draws with the buddy as the pen: it flies to where the stroke starts,
+    /// calls `begin` (which puts the ink on), and moves along `points`
+    /// (global top-left, evenly spaced) for `duration` seconds in step with
+    /// it. Returns when the stroke is done. With the buddy off, it only draws.
+    func draw(along points: [CGPoint], duration: Double, ink: Color, begin: () -> Void) async {
+        guard enabled, let first = points.first else {
+            begin()
+            return
+        }
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let cocoa = points.map { CGPoint(x: $0.x, y: primaryHeight - $0.y) }
+        let start = CGPoint(x: first.x, y: primaryHeight - first.y)
+        targets.removeAll()
+        isPointing = true
+        state.pointLabel = nil
+        holdUntil = .infinity
+        wake()
+        let distance = hypot(start.x - anchor.x, start.y - anchor.y)
+        if distance > 2 {
+            let d = min(0.5, 0.16 + Double(distance) / 3600)
+            fly(to: start, duration: d)
+            try? await Task.sleep(for: .seconds(d))
+        }
+        state.penInk = ink
+        begin()
+        pen = PenStroke(points: cocoa, start: CACurrentMediaTime(), duration: max(duration, 0.05))
+        try? await Task.sleep(for: .seconds(duration))
+        state.penInk = nil
+        // Linger by the drawing a moment, then go home (unless more follows).
+        holdUntil = CACurrentMediaTime() + 0.7
+    }
+
     /// Drops queued points and returns to the cursor.
     func clearPoints() {
         targets.removeAll()
         holdUntil = 0
+        pen = nil
+        state.penInk = nil
     }
 
     // MARK: The agent's pointer
@@ -199,7 +244,15 @@ final class OverlayController: NSObject {
         let dt = CGFloat(lastFrame == 0 ? 1.0 / 60 : min(max(now - lastFrame, 0), 1.0 / 20))
         lastFrame = now
 
-        if let f = flight {
+        if let p = pen {
+            let t = min(1, (now - p.start) / p.duration)
+            let f = CGFloat(t) * CGFloat(p.points.count - 1)
+            let i = min(Int(f), p.points.count - 1), j = min(i + 1, p.points.count - 1)
+            let k = f - CGFloat(i)
+            anchor = CGPoint(x: p.points[i].x + (p.points[j].x - p.points[i].x) * k,
+                             y: p.points[i].y + (p.points[j].y - p.points[i].y) * k)
+            if t >= 1 { pen = nil }
+        } else if let f = flight {
             let t = min(1, (now - f.start) / f.duration)
             anchor = arc(from: f.from, to: f.to, t: ease(t))
             if t >= 1 { flight = nil }
@@ -221,13 +274,14 @@ final class OverlayController: NSObject {
             followY.step(to: p.y, dt: dt, omega: 38)
             anchor = CGPoint(x: followX.x, y: followY.x)
         }
-        if flight != nil || isPointing || agentDriving {
+        if flight != nil || pen != nil || isPointing || agentDriving {
             followX = Spring(anchor.x)
             followY = Spring(anchor.y)
         }
         trackMotion(dt: dt)
 
-        let busy = state.mode != .idle || state.notice != nil || isPointing || flight != nil || !targets.isEmpty || agentDriving
+        let busy = state.mode != .idle || state.notice != nil || isPointing || flight != nil || pen != nil
+            || !targets.isEmpty || agentDriving
         if busy { lastActive = now }
         let visible = !state.backgroundWork && (!autoHide || now - lastActive < Self.idleHide)
         // Quick to appear, slow to leave.
@@ -365,6 +419,15 @@ struct OverlayView: View {
             MotionTrail(motion: state.motion, flipped: state.flipped)
             PilotArrow(flipped: state.flipped, active: state.mode != .idle)
             ClickRing(at: state.clickAt)
+            if let ink = state.penInk {
+                // The ink at the tip, where the line comes from.
+                Circle()
+                    .fill(ink)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: ink.opacity(0.8), radius: 4)
+                    .offset(x: state.flipped ? 3.5 : -3.5, y: -3.5)
+                    .transition(.scale.combined(with: .opacity))
+            }
         }
         .frame(width: 20, height: 23, alignment: state.flipped ? .topTrailing : .topLeading)
     }

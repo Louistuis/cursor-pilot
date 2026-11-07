@@ -28,6 +28,7 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("Charts"),
                 .linkedFramework("LinkPresentation"),
+                .linkedFramework("SceneKit"),
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("Security"),
                 .linkedFramework("Speech"),

@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 /// preview. Each sits on lines of its own in the text.
 enum MediaPart {
     case chart(ChartSpec)
+    case scene(SceneSpec)
     case image(URL, alt: String)
     case link(URL)
 
@@ -19,6 +20,7 @@ enum MediaPart {
         guard blocks.count == 1 else { return nil }
         switch blocks[0] {
         case .chart(let spec): return .chart(spec)
+        case .scene(let spec): return .scene(spec)
         case .image(let url, let alt): return .image(url, alt: alt)
         case .link(let url): return .link(url)
         default: return nil

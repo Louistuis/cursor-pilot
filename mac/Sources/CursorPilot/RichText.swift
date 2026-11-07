@@ -51,6 +51,8 @@ struct RichText: View {
             .fixedSize(horizontal: false, vertical: true)
         case .chart(let spec):
             ChartCard(spec: spec, compact: size < 13, fill: subtle.opacity(0.07))
+        case .scene(let spec):
+            SceneCard(spec: spec)
         case .image(let url, let alt):
             ImageCard(url: url, alt: alt, compact: size < 13)
         case .link(let url):
@@ -93,6 +95,8 @@ enum RichBlock: Equatable {
     case code(String)
     /// A ```chart block that holds a valid chart.
     case chart(ChartSpec)
+    /// A ```scene block that holds a valid 3D model.
+    case scene(SceneSpec)
     /// `![alt](src)` on a line of its own.
     case image(URL, String)
     /// A web address on a line of its own: shown as a preview card.
@@ -114,6 +118,8 @@ enum RichBlock: Equatable {
                     let body = c.joined(separator: "\n")
                     if codeTag == "chart", let spec = ChartSpec.parse(body) {
                         blocks.append(.chart(spec))
+                    } else if codeTag == "scene", let spec = SceneSpec.parse(body) {
+                        blocks.append(.scene(spec))
                     } else {
                         blocks.append(.code(body))
                     }

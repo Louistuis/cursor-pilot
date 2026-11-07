@@ -47,6 +47,8 @@ cursor-pilot/
 │       ├── Shaders.swift        Metal light effects: voice wave, fluid dots
 │       ├── ShaderView.swift     SwiftUI canvas that renders them
 │       ├── Ink.swift            Claude's circles/arrows/boxes, the pen, sketch toolbar
+│       ├── Board.swift          the whiteboard Claude draws explanations on
+│       ├── Scene3D.swift        3D models from scene blocks, the 3D panel and chat card
 │       ├── Glow.swift           neon edge frame shader (from Zero OCR)
 │       ├── ScreenGlow.swift     lights the screen edges while Cursor Pilot works
 │       ├── HomeView.swift       chat window and history
@@ -67,9 +69,33 @@ coordinates. Swift animates the buddy along an arc to each point.
 The model shows things by writing tags in its reply, all in screenshot
 pixels: `<point x y/>` flies the buddy there, `<circle x y r/>` rings an area,
 `<arrow x1 y1 x2 y2/>` shows a direction or drag, `<box x y w h/>` highlights a
-rectangle. Each takes `screen` and `label`. Tags are removed from what is
-shown and spoken; circles, arrows and boxes are drawn on screen like marker
-strokes and fade after 12 seconds.
+rectangle, and `<underline>`, `<highlight>`, `<trace>`, `<note>`,
+`<spotlight>` (dims all but one spot), `<step n>` (numbered badges),
+`<check>`, `<cross>` and `<bracket>` do what they say. Each takes `screen`
+and `label`. Tags are removed from what is shown and spoken.
+
+The buddy holds the pen. Drawings go on one after another as the voice
+reaches them: the buddy flies to where each one starts and moves along the
+stroke at an even pace while the ink appears (a dot of ink at its tip), so
+it looks drawn by hand. Marks stay pinned to what they mark and fade after
+12 seconds.
+
+**Whiteboard.** To explain something (how it works, the steps, how ideas
+relate) Claude can open a glass whiteboard over your screen with
+`<board title/>` and draw on it while it talks: `<card id x y text icon/>`
+boxes with an SF Symbol, `<link from to text/>` arrows between them,
+`<write x y text size/>` handwriting, and any mark above with
+`screen="board"`, in board units (1000 × 600). It works without
+screenshots, stays until you close it (✕ or Esc) and is included in the
+next screenshot, so you can ask about it.
+
+**3D.** For something physical or spatial Claude can send a ```scene block
+of JSON (spheres, boxes, cylinders, cones, tori, rings, capsules,
+pyramids and planes, with colours, labels, spin, orbits, parents and links).
+It opens as a model you can turn in a floating glass panel as soon as the
+block is complete, and stays in the chat as a small 3D card. `<focus id/>`
+then lights up a part, swings the camera to it and sends the buddy to point
+at it, in time with the voice.
 
 ### Working on your Mac
 
@@ -204,6 +230,9 @@ Debug launch flags, for design work:
 | `-CPAsk "question"` | asks a typed question at launch, without screenshots |
 | `-CPRenderArrowPreview file.png` | renders the buddy arrow large and at real size to a PNG, then quits |
 | `-CPRenderInkPreview file.png` | renders sample ink marks and the sketch toolbar to a PNG, then quits |
+| `-CPRenderBoardPreview out.png` | renders a finished sample whiteboard |
+| `-CPRenderScenePreview out.png` | renders the sample 3D model, whole and in focus (`out-focus.png`) |
+| `-CPShow "question" -CPOut f.png` | asks for real with the screen (nothing spoken) and saves a screenshot every two seconds while it answers |
 | `-CPRenderGlowPreview file.png` | renders the screen glow (listening, thinking, sketching) to `file-<mode>.png`, then quits |
 | `-CPRenderTrailPreview file.png` | renders the buddy still and moving ever faster, plus its click ring, in every colour, then quits |
 | `-CPRunActions steps.json` | runs agent actions (`apps`, `computer`, `wait` steps) like the agent would, writes what each returned to `-CPOut` (default `steps.json.out.json`), then quits |
@@ -343,6 +372,9 @@ Done:
 - **Co-user**: the agent uses your own mouse and keyboard like a person,
   with natural pointer paths, click timing and typing rhythm, and waits when
   you take over; background mode stays as an option.
+- **Explains visually**: the buddy draws with a pen it holds, on screen
+  or on a whiteboard it opens for explanations, and shows 3D models you
+  can turn, lighting up each part as it talks about it.
 - **No prompts while working**: one Set Up Everything step asks for every
   permission up front; at work it only checks.
 - **Background tasks**: the agent can hand a whole task to an independent

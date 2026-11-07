@@ -14,7 +14,7 @@ use crate::agent::{self, Call, Editor, Host, Shell};
 use crate::claude::{self, ApiError, Settings};
 use crate::conversation::{now, Session, Store, Turn};
 use crate::drawings::Drawings;
-use crate::markup::{MarkupFilter, Piece, Shape};
+use crate::markup::{self, MarkupFilter, Piece, Shape};
 use crate::memory::{self, Memory};
 use crate::speech::SentenceChunker;
 
@@ -61,9 +61,43 @@ of text.
 - <trace points=\"100,200 180,240 260,210\" screen=\"0\" label=\"Route\"/> draws a freehand line \
 through the points, to follow a path, an outline or a chart.
 - <note x=\"640\" y=\"412\" text=\"Export first\" screen=\"0\"/> sticks a note of a few words there.
-Drawings appear as your voice reaches them and stay pinned to what they mark. Labels are two to \
-four words. Use several tags in order to walk through steps, but no more than a handful per reply. Never read coordinates aloud or describe the tags, and only mark things you \
-can actually see. Without screenshots, do not use tags.
+- <spotlight x=\"600\" y=\"390\" w=\"120\" h=\"44\" screen=\"0\"/> dims everything else, for the one \
+thing that matters most.
+- <step x=\"640\" y=\"412\" n=\"1\" screen=\"0\"/> puts a numbered badge there, for steps in order.
+- <check x=\"640\" y=\"412\" screen=\"0\"/> ticks something right; <cross …/> crosses out something wrong.
+- <bracket x=\"110\" y=\"300\" h=\"120\" screen=\"0\"/> groups a span with a curly bracket down its left.
+You hold the pen: the buddy flies to each drawing and draws it as your voice reaches it, and \
+drawings stay pinned to what they mark. Labels are two to four words. Use several tags in order to \
+walk through steps, but no more than a handful per reply. Never read coordinates aloud or describe \
+the tags, and only mark things you can actually see. Without screenshots, do not use tags on screens.
+
+When the user wants something explained or taught (how something works, why, the steps of a process, \
+how ideas relate), you can open a whiteboard over their screen and draw the explanation on it while \
+you talk, like a teacher at a board. Start with <board title=\"How DNS works\"/>, then add to it as \
+you speak, each piece right where you say it. The board is 1000 wide and 600 high, from its top-left:
+- <card id=\"mac\" x=\"150\" y=\"300\" text=\"Your Mac\" icon=\"laptopcomputer\"/> a box with a few \
+words centred at x, y; icon is an optional SF Symbol name.
+- <link from=\"mac\" to=\"dns\" text=\"asks\"/> an arrow from one card to another.
+- <write x=\"500\" y=\"540\" text=\"Cached for an hour\" size=\"body\"/> handwriting centred at x, \
+y; size is title, body or small. Formulas are fine as text, e.g. E = mc².
+- Any screen drawing with screen=\"board\", e.g. <circle x=\"150\" y=\"300\" r=\"80\" screen=\"board\"/>, \
+<trace points=\"…\" screen=\"board\"/> for a curve, a graph or a sketch, <step …/> to number parts.
+Lay it out with room to spare, left to right or top to bottom, about three to seven cards. The board \
+works without screenshots and stays open until the user closes it or asks something new.
+
+For something physical or spatial (an atom, the solar system, an engine, a molecule, a cell, a \
+building), you can show a 3D model the user can turn: a fenced block tagged scene holding JSON, \
+before you talk about it:
+```scene
+{\"title\": \"Helium atom\", \"objects\": [{\"id\": \"nucleus\", \"shape\": \"sphere\", \"radius\": 0.5, \"color\": \"#ff7a59\", \"label\": \"Nucleus\"}, {\"id\": \"e1\", \"shape\": \"sphere\", \"radius\": 0.12, \"position\": [2, 0, 0], \"color\": \"#5ac8fa\", \"label\": \"Electron\", \"orbit\": \"nucleus\"}]}
+```
+shape is sphere, box, cylinder, cone, torus, capsule, pyramid, plane or ring; position is [x, y, z] \
+with y up, in units of about a metre at the scale of the model; size is [w, h, d] for boxes, \
+pyramids and planes; radius and height for the rest; color is a hex colour; opacity is 0 to 1; \
+\"spin\": true turns an object; \"orbit\": \"id\" circles it around another; \"parent\": \"id\" places it \
+relative to another; \"links\": [{\"from\": \"a\", \"to\": \"b\"}] draws lines between objects. Keep it \
+to about 3 to 20 objects. Then, as you talk, <focus id=\"nucleus\"/> turns the view to that part and \
+lights it up. Use a board or a model when it truly helps, not for quick answers.
 
 If the user drew on their screen, their freehand pen strokes are visible in the screenshot; \
 they are the user's own marks pointing at what they mean, not part of any app.";
@@ -1073,48 +1107,81 @@ impl ReplyStream {
                     }
                 }
                 Piece::Mark(m) => {
-                    let Some(&(frame, iw, ih)) = self.screens.get(m.screen) else {
-                        continue;
-                    };
-                    if iw <= 0.0 || ih <= 0.0 {
+                    if let Shape::Focus { id } = &m.shape {
+                        emit(json!({"type": "focus", "id": id}));
                         continue;
                     }
-                    // Screenshot pixels → global top-left-origin points.
-                    let (sx, sy) = (frame.w / iw, frame.h / ih);
-                    let gx = |x: f64| frame.x + x.clamp(0.0, iw) * sx;
-                    let gy = |y: f64| frame.y + y.clamp(0.0, ih) * sy;
+                    let board = m.screen == markup::BOARD;
+                    // Screenshot pixels → global top-left-origin points; the
+                    // board's own units stay as they are.
+                    let (ox, oy, sx, sy, iw, ih) = if board {
+                        (0.0, 0.0, 1.0, 1.0, markup::BOARD_W, markup::BOARD_H)
+                    } else {
+                        let Some(&(frame, iw, ih)) = self.screens.get(m.screen) else {
+                            continue;
+                        };
+                        if iw <= 0.0 || ih <= 0.0 {
+                            continue;
+                        }
+                        (frame.x, frame.y, frame.w / iw, frame.h / ih, iw, ih)
+                    };
+                    let gx = |x: f64| ox + x.clamp(0.0, iw) * sx;
+                    let gy = |y: f64| oy + y.clamp(0.0, ih) * sy;
+                    let rect = |x: f64, y: f64, w: f64, h: f64| {
+                        json!({"x": gx(x), "y": gy(y), "w": gx(x + w) - gx(x), "h": gy(y + h) - gy(y)})
+                    };
+                    let with = |mut v: Value, shape: &str| {
+                        v["shape"] = json!(shape);
+                        v
+                    };
                     let mut event = match m.shape {
-                        Shape::Point { x, y } => json!({"type": "point", "x": gx(x), "y": gy(y)}),
+                        Shape::Point { x, y } => json!({"shape": "point", "x": gx(x), "y": gy(y)}),
                         Shape::Circle { x, y, r } => {
-                            json!({"type": "mark", "shape": "circle", "x": gx(x), "y": gy(y), "r": r * sx})
+                            json!({"shape": "circle", "x": gx(x), "y": gy(y), "r": r * sx})
                         }
                         Shape::Arrow { x1, y1, x2, y2 } => json!({
-                            "type": "mark", "shape": "arrow",
-                            "x1": gx(x1), "y1": gy(y1), "x2": gx(x2), "y2": gy(y2),
+                            "shape": "arrow", "x1": gx(x1), "y1": gy(y1), "x2": gx(x2), "y2": gy(y2),
                         }),
-                        Shape::Box { x, y, w, h } => json!({
-                            "type": "mark", "shape": "box",
-                            "x": gx(x), "y": gy(y),
-                            "w": (x.clamp(0.0, iw) + w).min(iw) * sx - x.clamp(0.0, iw) * sx,
-                            "h": (y.clamp(0.0, ih) + h).min(ih) * sy - y.clamp(0.0, ih) * sy,
-                        }),
+                        Shape::Box { x, y, w, h } => with(rect(x, y, w, h), "box"),
                         Shape::Underline { x, y, w } => json!({
-                            "type": "mark", "shape": "underline",
-                            "x": gx(x), "y": gy(y), "w": gx(x + w) - gx(x),
+                            "shape": "underline", "x": gx(x), "y": gy(y), "w": gx(x + w) - gx(x),
                         }),
-                        Shape::Highlight { x, y, w, h } => json!({
-                            "type": "mark", "shape": "highlight",
-                            "x": gx(x), "y": gy(y), "w": gx(x + w) - gx(x), "h": gy(y + h) - gy(y),
-                        }),
+                        Shape::Highlight { x, y, w, h } => with(rect(x, y, w, h), "highlight"),
+                        Shape::Spotlight { x, y, w, h } => with(rect(x, y, w, h), "spotlight"),
                         Shape::Trace { points } => json!({
-                            "type": "mark", "shape": "trace",
+                            "shape": "trace",
                             "points": points.iter().map(|&(x, y)| json!([gx(x), gy(y)])).collect::<Vec<_>>(),
                         }),
-                        Shape::Note { x, y, text } => json!({
-                            "type": "mark", "shape": "note", "x": gx(x), "y": gy(y), "text": text,
+                        Shape::Note { x, y, text } => {
+                            json!({"shape": "note", "x": gx(x), "y": gy(y), "text": text})
+                        }
+                        Shape::Check { x, y } => json!({"shape": "check", "x": gx(x), "y": gy(y)}),
+                        Shape::Cross { x, y } => json!({"shape": "cross", "x": gx(x), "y": gy(y)}),
+                        Shape::Step { x, y, n } => json!({"shape": "step", "x": gx(x), "y": gy(y), "n": n}),
+                        Shape::Bracket { x, y, h } => {
+                            json!({"shape": "bracket", "x": gx(x), "y": gy(y), "h": gy(y + h) - gy(y)})
+                        }
+                        Shape::Board { title } => json!({"shape": "open", "title": title}),
+                        Shape::Card { id, x, y, text, icon } => json!({
+                            "shape": "card", "id": id, "x": gx(x), "y": gy(y), "text": text, "icon": icon,
                         }),
+                        Shape::Link { from, to, text } => {
+                            json!({"shape": "link", "from": from, "to": to, "text": text})
+                        }
+                        Shape::Write { x, y, text, size } => json!({
+                            "shape": "write", "x": gx(x), "y": gy(y), "text": text, "size": size,
+                        }),
+                        Shape::Focus { .. } => unreachable!(),
                     };
-                    event["screen"] = json!(m.screen);
+                    // A point on a screen flies the buddy; everything else is drawn.
+                    event["type"] = json!(if board {
+                        "board"
+                    } else if event["shape"] == "point" {
+                        "point"
+                    } else {
+                        "mark"
+                    });
+                    event["screen"] = json!(if board { -1 } else { m.screen as i64 });
                     event["label"] = json!(m.label);
                     if !m.label.is_empty() {
                         self.labels.push(m.label);

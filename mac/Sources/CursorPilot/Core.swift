@@ -63,6 +63,10 @@ enum CoreEvent {
     case point(x: Double, y: Double, label: String)
     /// A circle, arrow or box to draw, in the same coordinates.
     case mark(InkShape, label: String)
+    /// Something for the whiteboard, in its own units (1000 × 600).
+    case board(BoardItem)
+    /// Turn the 3D view to one of its parts.
+    case focus(String)
     /// An agent step: "start" or "end".
     case tool(AgentStep)
     /// A helper agent started, did a step, left a note or finished.
@@ -315,6 +319,30 @@ private let coreEventCallback: CPEventCallback = { ctx, json in
     }
 }
 
+/// A drawing from a `mark` or `board` event.
+private func inkShape(_ obj: [String: Any]) -> InkShape? {
+    let n = { (k: String) in CGFloat(obj[k] as? Double ?? 0) }
+    let at = CGPoint(x: n("x"), y: n("y"))
+    let rect = CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h"))
+    switch obj["shape"] as? String ?? "" {
+    case "circle": return .circle(center: at, radius: n("r"))
+    case "arrow": return .arrow(from: CGPoint(x: n("x1"), y: n("y1")), to: CGPoint(x: n("x2"), y: n("y2")))
+    case "box": return .box(rect)
+    case "underline": return .underline(from: at, width: n("w"))
+    case "highlight": return .highlight(rect)
+    case "spotlight": return .spotlight(rect)
+    case "trace":
+        let pts = (obj["points"] as? [[Double]] ?? []).compactMap { $0.count == 2 ? CGPoint(x: $0[0], y: $0[1]) : nil }
+        return pts.count >= 2 ? .trace(pts) : nil
+    case "note": return .note(at: at, text: obj["text"] as? String ?? "")
+    case "check": return .check(at)
+    case "cross": return .cross(at)
+    case "step": return .step(at, obj["n"] as? Int ?? 1)
+    case "bracket": return .bracket(top: at, height: n("h"))
+    default: return nil
+    }
+}
+
 private func parseEvent(_ json: String) -> CoreEvent? {
     guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
           let type = obj["type"] as? String
@@ -328,22 +356,22 @@ private func parseEvent(_ json: String) -> CoreEvent? {
         guard let x = obj["x"] as? Double, let y = obj["y"] as? Double else { return nil }
         return .point(x: x, y: y, label: str("label"))
     case "mark":
-        let n = { (k: String) in CGFloat(obj[k] as? Double ?? 0) }
-        let shape: InkShape
-        switch str("shape") {
-        case "circle": shape = .circle(center: CGPoint(x: n("x"), y: n("y")), radius: n("r"))
-        case "arrow": shape = .arrow(from: CGPoint(x: n("x1"), y: n("y1")), to: CGPoint(x: n("x2"), y: n("y2")))
-        case "box": shape = .box(CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h")))
-        case "underline": shape = .underline(from: CGPoint(x: n("x"), y: n("y")), width: n("w"))
-        case "highlight": shape = .highlight(CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h")))
-        case "trace":
-            let pts = (obj["points"] as? [[Double]] ?? []).compactMap { $0.count == 2 ? CGPoint(x: $0[0], y: $0[1]) : nil }
-            guard pts.count >= 2 else { return nil }
-            shape = .trace(pts)
-        case "note": shape = .note(at: CGPoint(x: n("x"), y: n("y")), text: str("text"))
-        default: return nil
-        }
+        guard let shape = inkShape(obj) else { return nil }
         return .mark(shape, label: str("label"))
+    case "board":
+        let n = { (k: String) in CGFloat(obj[k] as? Double ?? 0) }
+        switch str("shape") {
+        case "open": return .board(.open(title: str("title")))
+        case "card": return .board(.card(id: str("id"), at: CGPoint(x: n("x"), y: n("y")), text: str("text"), icon: str("icon")))
+        case "link": return .board(.link(from: str("from"), to: str("to"), text: str("text")))
+        case "write":
+            return .board(.write(at: CGPoint(x: n("x"), y: n("y")), text: str("text"), size: str("size")))
+        case "point": return .board(.point(CGPoint(x: n("x"), y: n("y")), label: str("label")))
+        default:
+            guard let shape = inkShape(obj) else { return nil }
+            return .board(.mark(shape, label: str("label")))
+        }
+    case "focus": return .focus(str("id"))
     case "tool":
         return .tool(AgentStep(callID: str("id"), phase: str("phase"), kind: str("kind"), summary: str("summary"),
                                ok: obj["ok"] as? Bool ?? true))

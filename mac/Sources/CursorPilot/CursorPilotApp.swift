@@ -136,6 +136,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
                 return
             }
+            // `-CPRenderBoardPreview out.png`: a finished whiteboard.
+            if let path = UserDefaults.standard.string(forKey: "CPRenderBoardPreview") {
+                let renderer = ImageRenderer(content: BoardPreview())
+                renderer.scale = 2
+                if let image = renderer.cgImage,
+                   let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                NSApp.terminate(nil)
+                return
+            }
+            // `-CPRenderScenePreview out.png`: the sample 3D model, whole and
+            // with its nucleus in focus (out-focus.png).
+            if let path = UserDefaults.standard.string(forKey: "CPRenderScenePreview") {
+                for (focus, file) in [(nil, path), ("nucleus", path.replacingOccurrences(of: ".png", with: "-focus.png"))] {
+                    if let image = ScenePreview.image(size: CGSize(width: 1000, height: 760), focus: focus),
+                       let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: file))
+                    }
+                }
+                NSApp.terminate(nil)
+                return
+            }
             // `-CPRenderJobsPreview out.png`: background tasks' cards, at work and done.
             if let path = UserDefaults.standard.string(forKey: "CPRenderJobsPreview") {
                 let jobs = [

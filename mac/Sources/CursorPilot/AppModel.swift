@@ -105,6 +105,15 @@ final class AppModel: ObservableObject {
     let overlay = OverlayController()
     let ink = InkController()
     let glow = GlowController()
+    /// The whiteboard Claude draws explanations on.
+    let board = BoardController()
+    /// The 3D view of what Claude explains.
+    let scenes = SceneController()
+    /// Drawings, board pieces and pointing, one after another: the buddy
+    /// holds the pen, so it does one thing at a time.
+    private var drawQueue: Task<Void, Never>?
+    /// ```scene blocks in this reply already opened.
+    private var scenesShown = 0
     private var subscriptions: Set<AnyCancellable> = []
     private var drawHotKey: HotKey?
     private(set) var notch: NotchController?
@@ -352,6 +361,7 @@ final class AppModel: ObservableObject {
         overlay.state.readAlong = speakReplies
         heardText = text
         replyText = ""
+        scenesShown = 0
         lastError = nil
         liveSteps = []
         backgroundWork = false
@@ -377,7 +387,9 @@ final class AppModel: ObservableObject {
                 // Captured when you pressed the talk key.
             } else if ScreenCapture.hasPermission {
                 do {
-                    screens = try await ScreenCapture.captureAll(includingWindows: sketch ? ink.windowNumbers : [])
+                    // The board and 3D view stay in the picture, for questions about them.
+                    let open = [board.windowNumber, scenes.windowNumber].compactMap { $0 }
+                    screens = try await ScreenCapture.captureAll(includingWindows: (sketch ? ink.windowNumbers : []) + open)
                 } catch {
                     NSLog("Cursor Pilot: screen capture failed: \(error)")
                 }
@@ -405,15 +417,52 @@ final class AppModel: ObservableObject {
             replyText += t
             if phase == .thinking { setPhase(.answering) }
             overlay.state.caption = captionText(replyText)
+            // A 3D model opens as soon as its block is complete, before it's talked about.
+            if t.contains("`") {
+                let blocks = SceneSpec.blocks(in: replyText)
+                if blocks.count > scenesShown {
+                    scenesShown = blocks.count
+                    if let spec = SceneSpec.parse(blocks[blocks.count - 1]) { scenes.show(spec) }
+                }
+            }
         case .speak(let sentence):
             if speakReplies {
                 speaker.speak(sentence, number: sentencesQueued)
                 sentencesQueued += 1
             }
         case .point(let x, let y, let label):
-            showInTime { [weak self] in self?.overlay.point(atTopLeft: CGPoint(x: x, y: y), label: label) }
+            showInTime { [weak self] in
+                self?.enqueueDraw { [weak self] in
+                    self?.overlay.point(atTopLeft: CGPoint(x: x, y: y), label: label)
+                    try? await Task.sleep(for: .seconds(1.1))
+                }
+            }
         case .mark(let shape, let label):
-            showInTime { [weak self] in self?.ink.add(InkMark(shape: shape, label: label)) }
+            showInTime { [weak self] in
+                self?.enqueueDraw { [weak self] in
+                    guard let self else { return }
+                    let (points, duration) = shape.penStroke()
+                    let ink: Color = if case .check = shape { InkPalette.check } else { InkPalette.marker }
+                    await overlay.draw(along: points, duration: duration, ink: ink) {
+                        self.ink.add(InkMark(shape: shape, label: label, duration: duration))
+                    }
+                }
+            }
+        case .board(let item):
+            showInTime { [weak self] in
+                self?.enqueueDraw { [weak self] in
+                    guard let self else { return }
+                    await board.add(item, overlay: overlay)
+                }
+            }
+        case .focus(let id):
+            showInTime { [weak self] in
+                self?.enqueueDraw { [weak self] in
+                    guard let self, let (at, label) = await scenes.focus(id) else { return }
+                    overlay.point(atTopLeft: at, label: label)
+                    try? await Task.sleep(for: .seconds(1.2))
+                }
+            }
         case .tool(let step):
             switch step.phase {
             case "start":
@@ -537,7 +586,19 @@ final class AppModel: ObservableObject {
         for v in due { v.show() }
     }
 
+    /// Runs `job` after the drawings before it are done.
+    private func enqueueDraw(_ job: @escaping @MainActor () async -> Void) {
+        let previous = drawQueue
+        drawQueue = Task { @MainActor in
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await job()
+        }
+    }
+
     func interrupt() {
+        drawQueue?.cancel()
+        drawQueue = nil
         heldVisuals.removeAll()
         sentencesQueued = 0
         sentenceSpoken = -1

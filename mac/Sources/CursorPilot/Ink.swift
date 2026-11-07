@@ -10,6 +10,11 @@ enum InkShape: Equatable {
     case highlight(CGRect)
     case trace([CGPoint])
     case note(at: CGPoint, text: String)
+    case spotlight(CGRect)
+    case check(CGPoint)
+    case cross(CGPoint)
+    case step(CGPoint, Int)
+    case bracket(top: CGPoint, height: CGFloat)
 
     /// Where the shape sits: which screen shows it, and what it is pinned to.
     var anchor: CGPoint {
@@ -19,7 +24,9 @@ enum InkShape: Equatable {
         case .box(let r), .highlight(let r): CGPoint(x: r.midX, y: r.midY)
         case .underline(let a, let w): CGPoint(x: a.x + w / 2, y: a.y - 6)
         case .trace(let pts): pts[pts.count / 2]
-        case .note(let p, _): p
+        case .note(let p, _), .check(let p), .cross(let p), .step(let p, _): p
+        case .spotlight(let r): CGPoint(x: r.midX, y: r.midY)
+        case .bracket(let t, let h): CGPoint(x: t.x, y: t.y + h / 2)
         }
     }
 
@@ -32,14 +39,74 @@ enum InkShape: Equatable {
         case .highlight(let r): .highlight(r.offsetBy(dx: -o.x, dy: -o.y))
         case .trace(let pts): .trace(pts.map { $0 - o })
         case .note(let p, let t): .note(at: p - o, text: t)
+        case .spotlight(let r): .spotlight(r.offsetBy(dx: -o.x, dy: -o.y))
+        case .check(let p): .check(p - o)
+        case .cross(let p): .cross(p - o)
+        case .step(let p, let n): .step(p - o, n)
+        case .bracket(let t, let h): .bracket(top: t - o, height: h)
         }
     }
+
+    /// The same shape `k` times larger, about the origin (board units → points).
+    func scaled(_ k: CGFloat) -> InkShape {
+        func s(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * k, y: p.y * k) }
+        func s(_ r: CGRect) -> CGRect { CGRect(x: r.minX * k, y: r.minY * k, width: r.width * k, height: r.height * k) }
+        return switch self {
+        case .circle(let c, let r): .circle(center: s(c), radius: r * k)
+        case .arrow(let a, let b): .arrow(from: s(a), to: s(b))
+        case .box(let r): .box(s(r))
+        case .underline(let a, let w): .underline(from: s(a), width: w * k)
+        case .highlight(let r): .highlight(s(r))
+        case .trace(let pts): .trace(pts.map(s))
+        case .note(let p, let t): .note(at: s(p), text: t)
+        case .spotlight(let r): .spotlight(s(r))
+        case .check(let p): .check(s(p))
+        case .cross(let p): .cross(s(p))
+        case .step(let p, let n): .step(s(p), n)
+        case .bracket(let t, let h): .bracket(top: s(t), height: h * k)
+        }
+    }
+
+    /// The path the pen takes to draw it, for the buddy to follow.
+    var penPath: Path {
+        switch self {
+        case .highlight(let r):
+            var p = Path()
+            p.move(to: CGPoint(x: r.minX, y: r.midY))
+            p.addLine(to: CGPoint(x: r.maxX, y: r.midY))
+            return p
+        case .note(let at, _):
+            var p = Path()
+            p.move(to: CGPoint(x: at.x + 14, y: at.y + 18))
+            p.addLine(to: CGPoint(x: at.x + 120, y: at.y + 20))
+            p.addLine(to: CGPoint(x: at.x + 24, y: at.y + 34))
+            p.addLine(to: CGPoint(x: at.x + 100, y: at.y + 36))
+            return p
+        default:
+            return MarkPath(shape: self, seed: 1).path(in: .zero)
+        }
+    }
+
+    /// Evenly spaced points along the pen's path, and how long drawing it
+    /// takes: longer strokes take longer, like a hand.
+    func penStroke() -> (points: [CGPoint], duration: Double) { samplePen(penPath, fallback: anchor) }
+}
+
+/// Evenly spaced points along `path` for the buddy's pen, and how long
+/// drawing it takes: longer strokes take longer, like a hand.
+func samplePen(_ path: Path, fallback: CGPoint, samples n: Int = 48) -> (points: [CGPoint], duration: Double) {
+    guard !path.isEmpty else { return ([fallback], 0.35) }
+    let pts = (0...n).map { i in path.trimmedPath(from: 0, to: CGFloat(i) / CGFloat(n)).currentPoint ?? fallback }
+    let length = zip(pts, pts.dropFirst()).reduce(0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }
+    return (pts, min(max(0.3 + Double(length) / 1300, 0.4), 1.5))
 }
 
 struct InkMark: Identifiable, Equatable {
     let id = UUID()
     var shape: InkShape
     var label: String
+    /// How long the pen takes to draw it.
+    var duration: Double = 0.6
     /// How far what it marks has moved since (scrolled, window dragged).
     var shift: CGPoint = .zero
     /// What it marks is out of sight: scrolled away or covered.
@@ -61,6 +128,8 @@ enum InkPalette {
     static let marker = Color(red: 1.0, green: 0.34, blue: 0.24)
     /// Claude's highlighter and sticky notes.
     static let highlighter = Color(red: 1.0, green: 0.86, blue: 0.2)
+    /// Ticks.
+    static let check = Color(red: 0.2, green: 0.82, blue: 0.42)
     /// The user's pens.
     static let pens: [Color] = [
         Color(red: 1.0, green: 0.18, blue: 0.62),
@@ -331,7 +400,8 @@ struct InkCanvas: View {
             }
             strokesLayer.allowsHitTesting(false)
             ForEach(state.marks.filter { bounds.contains($0.placed.anchor) }) { mark in
-                MarkView(shape: mark.placed.offset(by: origin), label: mark.label, seed: mark.id.hashValue)
+                MarkView(shape: mark.placed.offset(by: origin), label: mark.label, seed: mark.id.hashValue,
+                         duration: mark.duration)
                     .opacity(mark.hidden ? 0 : 1)
                     .allowsHitTesting(false)
                     .transition(.opacity)
@@ -402,18 +472,49 @@ struct MarkView: View {
     let shape: InkShape
     let label: String
     let seed: Int
+    let duration: Double
     @State private var progress: CGFloat
 
     /// `animated: false` draws it complete at once (previews, snapshots).
-    init(shape: InkShape, label: String, seed: Int, animated: Bool = true) {
+    /// The stroke goes on at an even pace over `duration`, in step with the
+    /// buddy's pen.
+    init(shape: InkShape, label: String, seed: Int, duration: Double = 0.6, animated: Bool = true) {
         self.shape = shape
         self.label = label
         self.seed = seed
+        self.duration = duration
         _progress = State(initialValue: animated ? 0 : 1)
+    }
+
+    private var ink: Color {
+        switch shape {
+        case .check: InkPalette.check
+        case .spotlight: .white
+        default: InkPalette.marker
+        }
     }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
+            if case .spotlight(let r) = shape {
+                // Everything but the spot dims; a big frame so it covers any canvas.
+                Path { p in
+                    p.addRect(CGRect(x: -8000, y: -8000, width: 20000, height: 20000))
+                    p.addRoundedRect(in: r.insetBy(dx: -10, dy: -10), cornerSize: CGSize(width: 14, height: 14))
+                }
+                .fill(Color.black.opacity(0.5 * progress), style: FillStyle(eoFill: true))
+            }
+            if case .step(let p, let n) = shape {
+                Text("\(n)")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(InkPalette.marker, in: Circle())
+                    .shadow(color: InkPalette.marker.opacity(0.5), radius: 5)
+                    .scaleEffect(0.4 + 0.6 * progress)
+                    .opacity(progress)
+                    .position(p)
+            }
             if case .box(let r) = shape {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(Color.yellow.opacity(0.18 * progress))
@@ -445,8 +546,9 @@ struct MarkView: View {
             }
             MarkPath(shape: shape, seed: seed)
                 .trim(from: 0, to: progress)
-                .stroke(InkPalette.marker, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
-                .shadow(color: InkPalette.marker.opacity(0.5), radius: 4)
+                .stroke(ink.opacity(isSpotlight ? 0.8 : 1),
+                        style: StrokeStyle(lineWidth: isSpotlight ? 2 : 4, lineCap: .round, lineJoin: .round))
+                .shadow(color: ink.opacity(0.5), radius: 4)
             if !label.isEmpty {
                 Text(label)
                     .font(.system(size: 12, weight: .semibold))
@@ -461,8 +563,13 @@ struct MarkView: View {
         }
         .onAppear {
             guard progress < 1 else { return }
-            withAnimation(.easeOut(duration: 0.6)) { progress = 1 }
+            withAnimation(.linear(duration: duration)) { progress = 1 }
         }
+    }
+
+    private var isSpotlight: Bool {
+        if case .spotlight = shape { return true }
+        return false
     }
 
     private var labelPosition: CGPoint {
@@ -473,6 +580,9 @@ struct MarkView: View {
         case .underline(let a, let w): CGPoint(x: a.x + w / 2, y: a.y + 20)
         case .trace(let pts): CGPoint(x: pts[0].x, y: pts[0].y - 16)
         case .note(let p, _): p
+        case .spotlight(let r): CGPoint(x: r.midX, y: r.minY - 26)
+        case .check(let p), .cross(let p), .step(let p, _): CGPoint(x: p.x, y: p.y - 30)
+        case .bracket(let t, let h): CGPoint(x: t.x - 60, y: t.y + h / 2)
         }
     }
 }
@@ -529,6 +639,30 @@ struct MarkPath: Shape {
             p = smoothPath(pts)
         case .highlight, .note:
             break
+        case .spotlight(let r):
+            p.addRoundedRect(in: r.insetBy(dx: -10, dy: -10), cornerSize: CGSize(width: 14, height: 14))
+        case .check(let c):
+            // A quick tick, the long stroke a touch curved.
+            p.move(to: CGPoint(x: c.x - 13, y: c.y + 1))
+            p.addLine(to: CGPoint(x: c.x - 4, y: c.y + 11))
+            p.addQuadCurve(to: CGPoint(x: c.x + 16, y: c.y - 15), control: CGPoint(x: c.x + 3, y: c.y - 2))
+        case .cross(let c):
+            p.move(to: CGPoint(x: c.x - 12, y: c.y - 12))
+            p.addLine(to: CGPoint(x: c.x + 12, y: c.y + 13))
+            p.move(to: CGPoint(x: c.x + 12, y: c.y - 13))
+            p.addLine(to: CGPoint(x: c.x - 13, y: c.y + 12))
+        case .step(let c, _):
+            p.addEllipse(in: CGRect(x: c.x - 17, y: c.y - 17, width: 34, height: 34))
+        case .bracket(let t, let h):
+            // A curly bracket down the left of the span, its point facing left.
+            let w: CGFloat = min(14, h * 0.15), mid = t.y + h / 2
+            p.move(to: CGPoint(x: t.x, y: t.y))
+            p.addQuadCurve(to: CGPoint(x: t.x - w, y: t.y + w), control: CGPoint(x: t.x - w, y: t.y))
+            p.addLine(to: CGPoint(x: t.x - w, y: mid - w))
+            p.addQuadCurve(to: CGPoint(x: t.x - 2 * w, y: mid), control: CGPoint(x: t.x - w, y: mid))
+            p.addQuadCurve(to: CGPoint(x: t.x - w, y: mid + w), control: CGPoint(x: t.x - w, y: mid))
+            p.addLine(to: CGPoint(x: t.x - w, y: t.y + h - w))
+            p.addQuadCurve(to: CGPoint(x: t.x, y: t.y + h), control: CGPoint(x: t.x - w, y: t.y + h))
         case .box(let r):
             let j: CGFloat = 3
             p.move(to: CGPoint(x: r.minX - j, y: r.minY + 1))
@@ -628,6 +762,11 @@ struct InkPreview: View {
             MarkView(shape: .trace([CGPoint(x: 120, y: 330), CGPoint(x: 170, y: 300), CGPoint(x: 230, y: 320),
                                     CGPoint(x: 270, y: 290), CGPoint(x: 330, y: 300)]), label: "Route", seed: 8, animated: false)
             MarkView(shape: .note(at: CGPoint(x: 690, y: 160), text: "Export as PDF first, then send it."), label: "", seed: 9, animated: false)
+            MarkView(shape: .step(CGPoint(x: 160, y: 200), 1), label: "", seed: 10, animated: false)
+            MarkView(shape: .check(CGPoint(x: 700, y: 273)), label: "", seed: 11, animated: false)
+            MarkView(shape: .cross(CGPoint(x: 800, y: 330)), label: "", seed: 12, animated: false)
+            MarkView(shape: .bracket(top: CGPoint(x: 92, y: 300), height: 120), label: "Steps", seed: 13, animated: false)
+            MarkView(shape: .spotlight(CGRect(x: 480, y: 250, width: 200, height: 46)), label: "", seed: 14, animated: false)
             InkCanvas(state: state, displayID: 1, origin: .zero, size: CGSize(width: 900, height: 600),
                       ask: { _ in }, save: {}, done: {})
         }

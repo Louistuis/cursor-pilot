@@ -18,6 +18,34 @@ enum TestHooks {
             await ask(question, to: defaults.string(forKey: "CPOut") ?? "/dev/stdout")
             return true
         }
+        // `-CPShow "question" -CPOut frame.png`: asks for real, with the screen,
+        // and saves a screenshot every two seconds while it answers (frame-1.png…),
+        // to see drawings, the board and 3D views live. Nothing is spoken.
+        if let question = defaults.string(forKey: "CPShow") {
+            let model = AppModel.shared
+            if !model.hasAPIKey { await model.loadAPIKey() }
+            let speak = model.speakReplies
+            model.speakReplies = false
+            defer { model.speakReplies = speak }
+            let out = defaults.string(forKey: "CPOut") ?? "/tmp/cpshow.png"
+            Task { await model.ask(question, includeScreen: true) }
+            let started = Date()
+            var frame = 0, doneAt: Date?
+            while Date().timeIntervalSince(started) < 150 {
+                try? await Task.sleep(for: .seconds(2))
+                frame += 1
+                let file = out.replacingOccurrences(of: ".png", with: "-\(frame).png")
+                let shot = Process()
+                shot.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                shot.arguments = ["-x", "-m", file]
+                try? shot.run()
+                shot.waitUntilExit()
+                if model.requestFinished, doneAt == nil { doneAt = Date() }
+                if let doneAt, Date().timeIntervalSince(doneAt) > 8 { break }
+            }
+            write(["frames": frame, "reply": model.replyText], to: out.replacingOccurrences(of: ".png", with: ".json"))
+            return true
+        }
         // `-CPPermissions out.json`: what's allowed, checked without asking.
         if let out = defaults.string(forKey: "CPPermissions") {
             let p = PermissionStatus.current()

@@ -532,6 +532,7 @@ private struct Bubble: View {
             // Charts, pictures and links come on their own, like in Messages.
             switch media {
             case .chart(let spec): ChartCard(spec: spec)
+            case .scene(let spec): SceneCard(spec: spec)
             case .image(let url, let alt): ImageCard(url: url, alt: alt)
             case .link(let url): LinkCard(url: url)
             }
