@@ -1,0 +1,27 @@
+name: Bug report
+description: Something doesn't work the way it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Cursor Pilot version
+      description: Home › Settings, or the release you downloaded.
+      placeholder: "0.1.0"
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.1"
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else?
+      description: Screenshots or steps to reproduce. Please don't paste API keys.

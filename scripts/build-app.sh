@@ -24,7 +24,7 @@ SWIFT_SCRATCH="$BUILD_ROOT/swift"
 BUNDLE="$BUILD_ROOT/Cursor Pilot.app"
 export CARGO_TARGET_DIR
 # Match LSMinimumSystemVersion so C code in Rust dependencies links cleanly.
-export MACOSX_DEPLOYMENT_TARGET=14.0
+export MACOSX_DEPLOYMENT_TARGET=15.0
 
 echo "==> Rust core"
 cargo build --release --manifest-path "$APP_DIR/core/Cargo.toml"

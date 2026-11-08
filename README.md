@@ -1,571 +1,130 @@
-# Cursor Pilot
+<p align="center">
+  <img src="docs/images/banner.png" alt="Cursor Pilot: a co-worker that lives next to your cursor" width="840">
+</p>
 
-A small helper that lives next to your mouse cursor on macOS. Hold **⌃⌥** (Control + Option),
-ask a question out loud, and Cursor Pilot looks at your screens, answers in a
-spoken voice, and flies over to point at the thing you need. Give it access
-and it works on your Mac like a co-user: runs shell commands, edits files,
-and uses your apps with your own mouse and keyboard the way a person would,
-handing them back the moment you move the mouse. (Or, if you prefer, with its
-own pointer in the background.)
+<p align="center">
+  <b>Hold <kbd>⌃</kbd> <kbd>⌥</kbd> and ask out loud.</b><br>
+  Cursor Pilot looks at your screen, answers, points at what you need, or just does it for you.
+</p>
 
-Native Swift/SwiftUI app on top of a Rust core. Talks to Claude with your own
-Anthropic API key.
+<p align="center">
+  <a href="https://github.com/Louistuis/cursor-pilot/releases/latest/download/Cursor-Pilot.zip"><img src="https://img.shields.io/badge/Download_for_Mac-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for Mac" height="44"></a>
+</p>
 
-## How it fits together
+<p align="center">
+  <a href="https://github.com/Louistuis/cursor-pilot/releases/latest"><img src="https://img.shields.io/github/v/release/Louistuis/cursor-pilot?label=version&color=6b7aff" alt="Latest version"></a>
+  <img src="https://img.shields.io/badge/macOS-15%2B-black?logo=apple" alt="macOS 15 or later">
+  <img src="https://img.shields.io/badge/Apple_Silicon-native-black" alt="Apple Silicon">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-b866ff" alt="MIT license"></a>
+</p>
 
-```
-cursor-pilot/
-├── core/                 Rust: everything that is not UI
-│   ├── src/claude.rs        streaming Messages API client (raw HTTP + SSE)
-│   ├── src/engine.rs        one request: prompt, screenshots, the agent loop, reply routing
-│   ├── src/agent.rs         tools: persistent shell, file editor, app control; the agent prompt
-│   ├── src/memory.rs        facts Claude remembers about you between chats
-│   ├── src/markup.rs        pulls <point/circle/arrow/box …/> tags out of the reply
-│   ├── src/drawings.rs      saved drawings (PNG + JSON)
-│   ├── src/speech.rs        splits the reply into sentences to speak early
-│   ├── src/conversation.rs  live history + saved transcripts
-│   ├── src/lib.rs           C ABI (JSON in, JSON events out)
-│   └── include/cursor_pilot_core.h
-├── mac/                  Swift package for the app
-│   └── Sources/CursorPilot/
-│       ├── AppModel.swift       hotkey → voice → screenshots → core → speech/overlay
-│       ├── Overlay.swift        click-through buddy panel that follows the cursor
-│       ├── VoiceInput.swift     push-to-talk speech recognition, two languages at once
-│       ├── ScreenCapture.swift  ScreenCaptureKit, every display, downscaled JPEG
-│       ├── Speaker.swift        spoken replies, in order, per sentence language and engine
-│       ├── CloudSpeech.swift    OpenRouter speech: MAI / Scribe / GPT hearing, MAI-Voice / Eleven v4 voices
-│       ├── LocalSpeech.swift    Whisper and Kokoro on the Neural Engine, audio queue and recorder
-│       ├── Agent.swift          screenshots and the computer tool's clicks, typing and keys
-│       ├── Pointer.swift        background input and the app_control tool (Accessibility)
-│       ├── CoUser.swift         the real mouse and keyboard, moved and typed like a person
-│       ├── Setup.swift          one-time permission setup; checks that never prompt
-│       ├── Keychain.swift       API key in the login keychain, prompt-free across rebuilds
-│       ├── Sounds.swift         quiet system sounds for listen, send, done, error
-│       ├── TestHooks.swift      launch flags that test actions and speech without a person
-│       ├── HotKey.swift         Carbon hot key, hold ⌃⌥, double-tap ⌃
-│       ├── Shortcut.swift       user-chosen shortcut + recorder
-│       ├── Notch.swift          panel that drops out of the notch
-│       ├── Onboarding.swift     first-run setup
-│       ├── Shaders.swift        Metal light effects: voice wave, fluid dots
-│       ├── ShaderView.swift     SwiftUI canvas that renders them
-│       ├── Ink.swift            Claude's circles/arrows/boxes, the pen, sketch toolbar
-│       ├── Board.swift          the whiteboard Claude draws explanations on
-│       ├── Scene3D.swift        3D models from scene blocks, the 3D panel and chat card
-│       ├── Glow.swift           neon edge frame shader (from Zero OCR)
-│       ├── ScreenGlow.swift     lights the screen edges while Cursor Pilot works
-│       ├── HomeView.swift       chat window and history
-│       └── SettingsView.swift   key, model, effort, permissions
-└── scripts/
-    ├── build-app.sh             builds core + app, assembles, signs and installs Cursor Pilot.app
-    ├── dev-signing-identity.sh  one-time local signing identity so permissions survive rebuilds
-    ├── make-icon.sh             draws the app icon with the glow shader (mac/Resources/AppIcon.icns)
-    └── icon/main.swift          the icon drawing itself
-```
+<p align="center">
+  <a href="https://cursorpilot.lou15.com">Website</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#what-it-does">What it does</a> ·
+  <a href="docs/how-it-works.md">How it works</a> ·
+  <a href="https://github.com/Louistuis/cursor-pilot/releases">Releases</a>
+</p>
 
-A request flows like this: Swift captures the displays and sends
-`{text, screens[]}` to the core. The core streams Claude's reply and emits
-events back: `text` deltas for the bubble, `speak` sentences for the voice,
-and `point` events already converted from screenshot pixels to global screen
-coordinates. Swift animates the buddy along an arc to each point.
+---
 
-The model shows things by writing tags in its reply, all in screenshot
-pixels: `<point x y/>` flies the buddy there, `<circle x y r/>` rings an area,
-`<arrow x1 y1 x2 y2/>` shows a direction or drag, `<box x y w h/>` highlights a
-rectangle, and `<underline>`, `<highlight>`, `<trace>`, `<note>`,
-`<spotlight>` (dims all but one spot), `<step n>` (numbered badges),
-`<check>`, `<cross>` and `<bracket>` do what they say. Each takes `screen`
-and `label`. Tags are removed from what is shown and spoken.
+## Install
 
-The buddy holds the pen. Drawings go on one after another as the voice
-reaches them: the buddy flies to where each one starts and moves along the
-stroke at an even pace while the ink appears (a dot of ink at its tip), so
-it looks drawn by hand. Marks stay pinned to what they mark: to a nearby
-piece of content found through Accessibility (a line of text, an image, a
-control, never the page or a big container), followed at 60 fps, so they
-move with a web page or document as it scrolls and hide when it scrolls
-away; where there's no such element they follow the scroll wheel over
-their window. They fade after 12 seconds.
+1. **[Download Cursor Pilot](https://github.com/Louistuis/cursor-pilot/releases/latest/download/Cursor-Pilot.zip)** and open the zip.
+2. Drag **Cursor Pilot** into your **Applications** folder.
+3. Open it. The first time, macOS says it can't check the app, because it isn't
+   notarised by Apple yet. Click **Done**, then open
+   **System Settings › Privacy & Security**, scroll down and click **Open Anyway**.
+4. Paste your [Anthropic API key](https://console.anthropic.com/settings/keys)
+   and click **Set Up Everything** to grant the permissions once.
 
-While it thinks, the buddy's arrow turns into the notch's merging dots in
-a small dark orb, lit in the buddy's colour, and springs back to the arrow
-when it answers. The caption by the cursor reads along with the voice and
-grows and shrinks with its words.
+That's it. Hold <kbd>⌃</kbd> <kbd>⌥</kbd> anywhere and talk.
 
-**Whiteboard.** To explain something (how it works, the steps, how ideas
-relate) Claude can open a glass whiteboard over your screen with
-`<board title/>` and draw on it while it talks: `<card id x y text icon/>`
-boxes with an SF Symbol, `<link from to text/>` arrows between them,
-`<write x y text size/>` handwriting, and any mark above with
-`screen="board"`, in board units (1000 × 600). It works without
-screenshots and is included in the next screenshot, so you can ask about
-it. When the explanation is over it closes by itself after a while (never
-while the pointer is on it), or with ✕ or Esc; every board is kept
-(boards.json) and shows under its reply in Home, to open again.
+> Needs macOS 15 or later on an Apple Silicon Mac. It's at its best on macOS 26.
+> To update, download the new version and replace the old app.
 
-**3D.** For something physical or spatial Claude can send a ```scene block
-of JSON (spheres, boxes, cylinders, cones, tori, rings, capsules,
-pyramids and planes, with colours, labels, spin, orbits, parents and links).
-It opens as a model you can turn in a floating glass panel as soon as the
-block is complete, closes by itself a while after the answer, and stays in
-the chat as a small 3D card that opens it again. `<focus id/>`
-then lights up a part, swings the camera to it and sends the buddy to point
-at it, in time with the voice.
+## What it does
 
-### Working on your Mac
+- **Answers about what's on your screen.** Ask out loud from any app. It sees
+  every display, answers in a natural voice, and its glass buddy cursor flies
+  over to point, circle or draw on the thing you mean.
+- **Does the job for you.** Give it access once and it runs shell commands,
+  edits files (keeping a backup of each), uses your apps and searches the web.
+  It says each step out loud before it takes it.
+- **Keeps you in charge.** It uses your mouse and keyboard like a person and
+  hands them back the moment you move the mouse, or works with a pointer of
+  its own so yours stays free.
+- **Works while you keep talking.** Bigger jobs go to background agents, up to
+  three at once, and you can talk to it mid-task to add to or change what it's
+  doing.
+- **Lives in the notch.** When the work doesn't need your screen, the buddy
+  waits in the notch, which lights up while it works. Live captions follow its
+  voice word by word.
+- **Feels like Messages.** Home keeps your chats, drawings and settings, with
+  replies that can carry charts, images and link previews.
 
-Turn it on once, in onboarding or Settings › Working on your Mac, and
-consent. From then on Cursor Pilot works on its own with no permission
-prompts, in the background, and says what it's doing as it goes. It is off
-until you turn it on. Tools, all run by the app on your Mac:
+<p align="center">
+  <img src="docs/images/tasks.webp" alt="Background tasks in Home: renewing library books, finding train times, and a finished one that sorted the Downloads folder" width="760">
+</p>
+<p align="center">
+  <img src="docs/images/charts.webp" alt="Charts drawn natively in a reply: rain this week, Bergen against Oslo, disk usage and steps" width="760">
+</p>
 
-- **bash**: one persistent login `zsh` per conversation (`cd` and variables
-  carry over), 3-minute timeout per command, stopped when you interrupt.
-- **str_replace_based_edit_tool**: view, create and edit files; every edit
-  keeps a backup under the app's data folder in `backups/`.
-- **app_control** (ours): works with apps by name through Accessibility, in
-  the background: list apps, open them without bringing them forward, list
-  a window's controls, press buttons, fill in fields, read text, choose menu
-  items. A control can be named directly (`press`, app `Calculator`,
-  find `7`), so most steps need no screenshot at all.
-- **computer** (`computer_toolset_20260801` on the 5.5 models): screenshots,
-  clicks, typing, keys, scrolling and drags. Needs Accessibility.
-- **memory** (ours, also without Mac access): remembers short facts about you
-  between chats.
-- **delegate** (ours): sends a helper agent off on part of the task. Up to
-  five helpers (Mint, Sunset, Rose, Violet, Ocean) work at once, each with
-  its own loop, shell and pointer: a small cursor in its colour with a tag
-  saying what it's doing. Their steps stay out of the chat; each shows as one
-  step until it reports back. They take turns with the real pointer and
-  keyboard when an app needs them.
+## Shortcuts
 
-  Each helper has its own workspace. macOS doesn't let apps make desktops
-  (Spaces) of their own, so a workspace is the set of windows the helper
-  opened. Its screenshots show only its current window, captured even where
-  your windows cover it, with coordinates tied to that window; its clicks,
-  typing and scrolling go to that window (Accessibility hit tests are checked
-  against it), and the real pointer is only borrowed where the window is
-  uncovered. Web pages open in a browser of its own: a separate copy of
-  Chrome (or Brave, Edge, Chromium, Vivaldi) with a private profile in
-  `~/Library/Application Support/Cursor Pilot/Helpers/<name>`, kept drawing
-  while covered, quit when the task ends; `shared: true` uses your browser
-  instead. If an app opened in the background brings itself forward, your
-  app is put back in front. A helper's cursor fades while it works under
-  your windows.
-- **background_task** (ours): hands a task to an independent background
-  agent that does all of it on its own while you carry on and keep talking.
-  It works like a helper (own cursor, shell, windows and private browser)
-  but outlives the request: the main agent answers at once, a card in Home
-  shows what the task is doing with a stop button, and when it's done you
-  hear a sound, its report lands in the chat and is read aloud, and the
-  main agent is told on your next message. Up to three run at once.
-- **web_search** and **web_fetch** (reads a page in full) on the models
-  that support them.
-- **plan** (ours): a checklist Claude keeps for tasks with several steps;
-  the step in progress shows by the buddy ("Step 2 of 4: …").
+| Keys | What it does |
+|---|---|
+| Hold <kbd>⌃</kbd> <kbd>⌥</kbd> | Talk. Let go to send. Works mid-task too. |
+| Double-tap <kbd>⌃</kbd> | Type a question in the notch instead. |
+| <kbd>⌃</kbd> <kbd>⌥</kbd> <kbd>D</kbd> | Draw on your screen, then ask about the drawing. |
 
-The system prompt asks it to work like an engineer in a terminal: do the work
-in the background with the shell, files, app_control and the web, use the
-pointer only for what has no other way, plan bigger tasks, look before
-changing things and check each change, and make independent calls in one
-turn. A request may take up to 300 rounds (helpers 150), and a shell command
-up to 5 minutes.
+You can change the talk shortcut, or turn on hands-free conversation, in Settings.
 
-By default the agent works like a person sitting at your Mac (Settings ›
-Working on your Mac › It works). It moves your real pointer on a slightly
-curved path that speeds up and settles like a hand (Fitts-timed, with a small
-correction after long moves), presses and releases clicks, types with a human
-rhythm and brings an app forward before using it. app_control presses and
-fills in fields by clicking and typing on screen, and falls back to
-Accessibility for controls that are off screen. Move the mouse and it hands
-over: it notices the pointer isn't where it left it, says "You've got it",
-and waits until you have stopped for a moment. Helpers always work in their
-own space.
+## Privacy
 
-While the agent has your pointer, macOS's arrow turns into the buddy: the
-system cursor is hidden (the window server lets a background app do this once
-its connection sets `SetsCursorInBackground`) and the buddy's tip sits exactly
-on the pointer. The agent's events carry a marker in `eventSourceUserData`, so
-the first movement of your own hand brings your arrow straight back, as does
-1.4 s without the agent touching the pointer. Apps that show the cursor
-themselves as it moves (video players) are countered by hiding it again on
-each move; every hide is counted and undone.
+- **No account and no server of ours.** Requests go straight from your Mac to
+  the provider you chose, using your own API key, which is kept in your keychain.
+- **No tracking.** The app has no analytics.
+- **Speech your way.** On-device by default, or a cloud voice or OpenAI's live
+  voice if you turn them on ([details](docs/voice-and-models.md)).
+- **Nothing it touches is lost.** Every file edit keeps a backup first.
 
-While a task works in the background (shell, files, web, app_control
-reading), the buddy flies up into the notch and melts into the notch's
-thinking dots, and the notch lights up: the buddy's colours turn slowly
-around its edge with a glow spilling out, the step's icon pulses in the left
-wing and the command shows in its header when open. The screen frame is off
-meanwhile. The buddy flies back down to the cursor to talk, or to click and
-type on screen (computer steps, app_control presses and fields). Each change
-has to last a moment (0.35 s up, 0.2 s down, and 0.25/0.45 s for the dots)
-so quick steps and pauses between sentences never make it bounce. With the
-notch turned off, the buddy stays by the cursor as the thinking dots, with a
-capsule beside it showing the latest step. A background agent at work also
-lights the notch. Helpers and background agents work the same way: their
-cursors wait unseen in the notch and fly out only to click and type on
-screen, then go back up after 3.5 s without on-screen work.
+## Cost
 
-Every change of state is animated so it reads at a glance: the buddy shrinks
-and fades as it flies into the notch (its words go first) and the notch's
-dots take a gulp as it lands, then it grows back out on the way down; each
-new step slides up in place of the last one, by the buddy and in the notch's
-header, and step icons morph into each other; a finished task pops a green
-check into the notch's left wing; an error shakes the bubble like a "no".
+The app is free and open source. You pay Anthropic only for what you use, with
+your own key. The optional live voice and cloud voices use your own OpenAI or
+OpenRouter key the same way.
 
-It talks as it works, like a person next to you: before each action or
-group of actions it says in one short sentence what it's about to do
-("Opening your Downloads."), read aloud while the buddy stays in the notch.
-Visible actions (clicks, typing, app_control) wait until that line has
-started playing (at most 2.5 s), so it's said before it's done.
+## Build it yourself
 
-**Talk any time while it works**, with every speech engine: holding the
-talk key (or cutting in, hands-free) during a task stops what it's saying
-but not the work. What you say goes to the running agent with the result of
-its current step (`cp_core_tell`, an inbox per request), the way a note is
-passed to someone mid-task: it can add to the task, change it, ask how it's
-going, or stop it, and the agent answers in a few words and carries on.
-Background agents keep running throughout. Said too late to be read (the
-agent was already answering), it becomes the next question. With the live
-voice, the realtime model hears you while Claude works, answers "how's it
-going?" from the progress it has been told, and passes anything for the
-task to the agent the same way. `-CPAsk … -CPTell "text"` tests it.
-
-**Hands-free conversation** (Settings › Talking, off by default; hold the talk key otherwise): after an
-answer the mic stays open for up to 7 seconds so you can just reply; it ends
-itself 0.9 s after you stop talking, and the screen frame stays off until
-you actually speak. While it talks the mic listens too, with voice
-processing (echo cancellation) on, and you can cut in by talking: three or
-more words it isn't saying itself, heard while the mic is loud, stop it and
-it listens to you (background tasks carry on). The talk key works as before.
-
-The agent you talk to stays free: anything that takes more than a few quick
-steps (research, building or fixing something, going through many files or
-pages) goes to a background agent right away, and it answers in a line, so
-you can keep talking to it while the work goes on.
-
-In background mode the agent has its own pointer: the buddy flies to where it clicks (with
-motion blur when it moves fast and a ring when it clicks), and the click
-goes to the app under it without moving your pointer. Cursor Pilot first
-presses, focuses or selects the control there through Accessibility; if
-there is none it posts the click to that app's process. Typing goes to the
-app it last clicked in, as text inserted through Accessibility or as key
-events sent to that app, so you can keep typing elsewhere. A few apps only
-react to the real pointer: when a click at the same spot is repeated, and for
-drags, Cursor Pilot moves your pointer there for a split second and puts it
-back (Settings › Working on your Mac turns that off).
-
-Shell, file and web work happens out of sight: the buddy hides and the menu
-bar and notch show a terminal. The buddy comes back only for work in apps.
-In Home the current step shows under the typing bubble, and a folded
-"n steps" line stays under the reply. Up to 60 tool rounds per request.
-
-### Memory
-
-When you tell Cursor Pilot something worth keeping ("I'm on a German
-keyboard", "keep answers short") or say "remember that…", it saves one short
-fact to `memory.json` in its data folder and gets those facts in every later
-chat. Settings › Memory lists them; remove one or forget everything there.
-
-Home's chat reads like a text thread: your messages on the right, Cursor
-Pilot's short replies on the left, one bubble per thought.
-
-Press **⌃⌥D** to draw on the screen yourself. Ask about the drawing from the
-toolbar (or hold the talk shortcut): the screenshot then includes your strokes
-and Claude is told they are yours. Save keeps a snapshot in Home › Drawings.
-
-## Build
-
-Needs Xcode (Swift 5.10+) and Rust (`rustup`).
+Needs Xcode and Rust.
 
 ```bash
+git clone https://github.com/Louistuis/cursor-pilot.git
+cd cursor-pilot
 scripts/build-app.sh
 ```
 
-The app lands in `build/Cursor Pilot.app` and is copied to
-`~/Applications` (`INSTALL_DIR=` skips that). To keep it in `/Applications`
-instead, copy it there once with your password and make it yours; later
-builds then update it in place:
+The app lands in `~/Applications`. See [Building from source](docs/building.md)
+for signing, test flags and the core's tests.
 
-```bash
-sudo ditto ~/Applications/"Cursor Pilot.app" "/Applications/Cursor Pilot.app"
-sudo chown -R "$USER" "/Applications/Cursor Pilot.app"
-```
+## Documentation
 
-Put build output elsewhere with `BUILD_ROOT=/some/folder`.
-
-Signing uses `CODESIGN_IDENTITY`, else your first Apple Development or
-Developer ID identity, else a local "Cursor Pilot Development" identity.
-Without any of them it signs ad hoc, and macOS asks for Microphone, Speech,
-Screen Recording and Accessibility again after every rebuild. To stop
-that, run this once (it adds a self-signed code-signing certificate to your
-login keychain; no admin password, no trust changes):
-
-```bash
-scripts/dev-signing-identity.sh
-```
-
-Debug launch flags, for design work:
-
-| Flag | Effect |
+| | |
 |---|---|
-| `-CPPinNotch YES` | keeps the notch panel open |
-| `-CPShaderGallery YES` | opens a window with every light effect |
-| `-CPSkipKeychain YES` | does not read the saved API key (no keychain prompt) |
-| `-CPOpenHome settings` | opens Home on `settings`, `drawings` or `chat` |
-| `-CPBuddyDemo listening` | holds the buddy in `listening`, `thinking` or `answering` |
-| `-CPAsk "question"` | asks a typed question at launch, without screenshots |
-| `-CPRenderArrowPreview file.png` | renders the buddy arrow large and at real size to a PNG, then quits |
-| `-CPRenderInkPreview file.png` | renders sample ink marks and the sketch toolbar to a PNG, then quits |
-| `-CPRenderBoardPreview out.png` | renders a finished sample whiteboard |
-| `-CPRenderScenePreview out.png` | renders the sample 3D model, whole and in focus (`out-focus.png`) |
-| `-CPShow "question" -CPOut f.png` | asks for real with the screen (nothing spoken) and saves a screenshot every two seconds while it answers |
-| `-CPRenderGlowPreview file.png` | renders the screen glow (listening, thinking, sketching) to `file-<mode>.png`, then quits |
-| `-CPRenderTrailPreview file.png` | renders the buddy still and moving ever faster, plus its click ring, in every colour, then quits |
-| `-CPRunActions steps.json` | runs agent actions (`apps`, `computer`, `wait` steps) like the agent would, writes what each returned to `-CPOut` (default `steps.json.out.json`), then quits |
-| `-CPAsk "question"` | sends one typed question through the whole agent (helpers included, no screen, nothing spoken), writes the text, steps, helper events and timings to `-CPOut`, then quits |
-| `-CPRenderHelperPreview out.png` | renders the helpers' cursors and tags |
-| `-CPRenderChartPreview out.png` | renders the kinds of chart a reply can send |
-| `-CPRenderJobsPreview out.png` | renders background tasks' cards, at work and done |
-| `-CPPermissions out.json` | writes which permissions are allowed, checked without asking |
-| `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, then the chosen engine, writes what each heard to `-CPOut`, then quits |
-| `-CPSay "Hello.\|Hei."` | renders each line with the chosen engine (`-speechEngine cloud\|local\|apple`) to `<-CPOut>-N.wav` without playing it, timings in `<-CPOut>.json` |
-| `-CPCursorTest out` | moves the real pointer 80 pt and back like the agent, screenshots it (cursor included) as the buddy takes it over and after it hands it back, writes whether the arrow was hidden to `out.json` |
-| `-CPMorphPreview out` | plays the buddy turning into the thinking dots and back on white and dark, saving frames as `out-NN.png` | `-CPNotchDemo chat|caption` fills it with a sample exchange or a live caption.
+| [How it works](docs/how-it-works.md) | The architecture, drawing, the whiteboard, 3D, the agent and its tools |
+| [Voice, models and keys](docs/voice-and-models.md) | Speech engines, the live voice, models and which key does what |
+| [Permissions](docs/permissions.md) | What each permission is for, and how to reset one |
+| [Building from source](docs/building.md) | Build script, signing, debug and test flags |
+| [Releasing](docs/releasing.md) | How versions are built and published |
+| [Roadmap](docs/roadmap.md) | What's done and what's next |
 
-Test flags run best in a second copy, so the one you use keeps running:
+## Contributing
 
-```bash
-open -n "/Applications/Cursor Pilot.app" --args -CPRunActions ~/steps.json
-```
-
-```bash
-open "build/Cursor Pilot.app" --args -CPShaderGallery YES
-```
-
-With ad-hoc signing every rebuild is a new app to macOS, so it asks again
-for privacy permissions. A free Apple Development certificate (Xcode ›
-Settings › Accounts › Manage Certificates) gives builds a stable identity;
-the build script uses it automatically.
-
-The API key is saved in the login keychain through `/usr/bin/security`,
-which owns the item, so the keychain never asks to allow access, not even
-after a rebuild. (Keys saved by older builds move over once, with one last
-prompt.)
-
-Rust tests and a command-line check of the core:
-
-```bash
-cd core && cargo test
-ANTHROPIC_API_KEY=sk-ant-… cargo run --example ask -- "Why is the sky blue?"
-```
-
-## Permissions
-
-| Permission | Why |
-|---|---|
-| Microphone, Speech Recognition | push-to-talk questions |
-| Screen Recording | screenshots sent with each question |
-| Accessibility | only for working in apps (pressing controls, clicking, typing) once you let Cursor Pilot work on your Mac |
-| Full Disk Access | reading Messages, and files anywhere without macOS asking per folder |
-| Contacts | names instead of numbers in messages |
-| Automation (Messages, Finder, System Events) | sending texts, and the few scripts the agent may run |
-| Local Network | reaching devices and servers on your network from a task |
-
-Everything is asked for once, up front: Settings › Permissions › **Set Up
-Everything** (and the onboarding's Allow Everything) shows the dialogs that
-can appear in place one after the other, then opens System Settings at each
-switch still off. While it works Cursor Pilot never asks: it only checks,
-and when something is missing it says what to set up instead of putting a
-dialog in front of you. The agent is told not to script other apps, which
-would make macOS ask. macOS doesn't let apps grant themselves permissions,
-so the switches stay yours. `-CPPermissions out.json` reports what's
-allowed without asking.
-
-If a permission is switched on but Cursor Pilot still can't use it, the
-entry was made by an older build signed another way (for example ad hoc,
-before you ran `dev-signing-identity.sh`). Reset it and allow it again:
-
-```bash
-tccutil reset Accessibility com.louistuis.cursorpilot   # or ScreenCapture
-```
-
-Talking needs no Accessibility permission: the shortcut is a Carbon hot key
-and the buddy only reads the mouse position.
-
-## Voice
-
-Settings › Speech picks the engine that hears you and reads replies:
-
-| Engine | Hears you | Speaks |
-| --- | --- | --- |
-| **Cloud** (OpenRouter) | Microsoft MAI-Transcribe 2, ElevenLabs Scribe v2, Google Gemini 3.5 Transcribe, Mistral Voxtral Small Transcribe 3 or OpenAI GPT Transcribe | Microsoft MAI-Voice 2.1 (Flash or full), ElevenLabs Eleven v4 (Turbo or full) or Google Gemini 3.8 Flash TTS (Lite or full) |
-| **On this Mac** | Whisper large-v3 turbo on the Neural Engine | Kokoro-82M for English, Apple's voices otherwise |
-| **Apple** | SpeechAnalyzer / SFSpeechRecognizer | the best installed system voice |
-
-- Cloud is the default when an OpenRouter key is found: the one saved in
-  Settings, else `$OPENROUTER_API_KEY`, else the first line of
-  `~/.config/openrouter.key`. Cloud is only used for speech; recordings and
-  reply sentences go to OpenRouter.
-- The lists are ordered best first as of November 2026. Hearing, by
-  Artificial Analysis word error rate: MAI-Transcribe 2 (2.0%), Voxtral
-  Small Transcribe 3 (2.1%), Scribe v2 (2.2%), Gemini 3.5 Transcribe (2.6%).
-  Voices: Eleven v4 Turbo is the most natural fast voice (Speech Arena Elo
-  1335, about 190 ms to first audio at the source, 0.7–1.0 s a sentence
-  through OpenRouter here) and speaks Norwegian; MAI-Voice 2.1 Flash is
-  close (0.6–1.7 s here); Gemini's voices take 1.4–2.7 s. OpenRouter's speech
-  endpoints are batch only: streaming recognition (MAI-Transcribe 2
-  Streaming, about 0.13 s to a final transcript; ElevenLabs Scribe v2
-  Realtime, about 0.15 s) needs those providers' own WebSocket APIs and keys.
-- Each voice model keeps its own voice. Microsoft's voices are one name in
-  several languages (Harper and Grant speak English and Norwegian); ElevenLabs
-  voices speak every language themselves. Picking a voice plays a sample, in
-  Norwegian too when you speak it.
-- Apple's recognizers always run while you talk, for the live caption. When
-  you let go, the chosen engine writes the transcript from the recording; if
-  it fails or times out, Apple's is used. Whisper's known phantom lines out of
-  silence are dropped.
-- Reply sentences are rendered in order, the next while the one before
-  plays, and played through one audio queue; the caption follows the words by
-  their length. A sentence a neural voice can't speak (or a failed request)
-  falls back to an Apple voice.
-- The local models (about 2 GB) download once, the first time that engine is
-  picked, and only with 5 GB free on the disk. MLX models such as Chatterbox
-  (which speaks Norwegian) need Xcode's Metal toolchain to build, so they are
-  not included.
-- With the language on Automatic, Cursor Pilot listens for the first two
-  languages in your Mac's language list at once, say Norwegian and English.
-  Live text shows the language you spoke last.
-- Double-tap **⌃** to type a question in the notch instead of saying it.
-- Quiet system sounds mark listening, sending, a finished task and errors
-  (Settings › On screen › Sound effects).
-
-## Claude settings
-
-- Default model `claude-opus-5-5` at `low` effort, because replies are spoken
-  and speed matters. Model and effort are in Settings.
-- Server-side refusal fallback (`fallbacks: "default"`) is on for the models
-  that support it, so a declined request is retried on another model instead
-  of failing.
-- Automatic prompt caching is on; history is append-only (thinking blocks are
-  replayed unchanged) and a conversation starts over after 15 idle minutes or
-  20 exchanges.
-- Sign-in is by API key only. Anthropic does not allow third-party apps to
-  route requests through Claude.ai subscription plans.
-- abliteration.ai models (`abliterated-model-large-flash`, `abliterated-model`,
-  `abliterated-model-large-v2`) are in the same model picker, with their own
-  key (keychain service `com.louistuis.cursorpilot.abliteration`, or
-  `$ABLIT_KEY`). abliteration.ai speaks the Messages API, so the same client
-  is used against `https://api.abliteration.ai` with
-  `anthropic-version: 2023-06-01`. Claude's built-in tool types are not sent
-  there: bash and the file editor go as plain tools with the same input shape,
-  and computer use and web search are left out. `abliterated-model-large-v2`
-  is text only, so screenshots are replaced by a short note.
-- An OpenAI key (keychain service `com.louistuis.cursorpilot.openai`, or
-  `$OPENAI_API_KEY`) is kept for the live voice.
-- **Live voice** (Settings › Speech › Live voice): OpenAI's
-  `gpt-realtime-2.1` over its Realtime WebSocket
-  (`wss://api.openai.com/v1/realtime`) hears you and talks back in one
-  connection, PCM16 at 24 kHz both ways through one AVAudioEngine with voice
-  processing (echo cancellation). It doesn't do the work: anything beyond
-  small talk goes to Claude (the model chosen above) through its
-  `cursor_pilot` tool. Claude's lines before each step are said as
-  out-of-band responses (`conversation: "none"`), and its answer goes back as
-  the tool's output for the voice to tell. Hold the talk key to talk (audio is
-  committed on release), or turn on hands-free for semantic VAD with cut-in;
-  talking over it truncates its reply where you cut in. OpenRouter has no
-  realtime model or WebSocket, so this needs the OpenAI key and credits.
-  `-CPLiveTest out.json` checks the connection with typed lines.
-  Following OpenAI's voice guidance: the prompt uses its sections (Role and
-  Objective, Personality and Tone, Language with English default and Norwegian
-  on a substantive Norwegian utterance, Verbosity, Preambles, Tools, Unclear
-  Audio, Variety); instructions and tools never change mid-session so the
-  cache holds; turns are written down by `gpt-transcribe`; long sessions keep
-  80% when full (`truncation: retention_ratio 0.8`) and reasoning is `low`,
-  both sent as separate optional updates whose errors are ignored. Settings
-  also offers `gpt-realtime-2.1-mini`. Cost: user audio is 600 tokens a minute,
-  its speech 1,200 a minute, and every reply re-reads the conversation
-  (mostly cached), so a conversation runs about $0.05–0.10 a minute on 2.1.
-- Each key row in Settings has a Paste button that saves the key on the
-  clipboard without showing it.
-
-## Roadmap
-
-Done:
-
-- **Phase 1**: voice questions, multi-display screenshots, streamed and
-  spoken answers, pointing, chat history, settings.
-- **Visuals**: native Metal light effects. A chromatic wave that follows
-  your voice while listening and speaks with Cursor Pilot, and metaball dots
-  that merge, scatter and gather while it thinks. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- **Phase 2**: notch panel (wings show listening / thinking / answering;
-  hover the notch for the latest exchange and a quick-ask field), custom
-  hold-to-talk shortcut, first-run onboarding.
-
-- **Phase 3, Ink**: Claude circles, arrows and highlights things on screen;
-  you can draw on the screen (⌃⌥D) and ask about your drawing; drawings
-  are saved to Home.
-- **Screen glow**: the colourful frame from Zero OCR lights the edges of
-  every display while Cursor Pilot listens, thinks and answers, and softly
-  while you draw (Settings › On screen to turn it off). It is bright for the
-  first 3 seconds of an exchange, then eases down to about 40% and stays
-  calm; talking again brings it back up. The frame is for when it looks at or uses the screen
-  (hearing you, thinking about a screen question, clicking and typing): it
-  goes off while the work is in the background, and a task that never
-  touched the screen answers without it.
-- **Feel pass**: hold ⌃⌥ alone to talk (no extra permission); the buddy
-  follows the cursor on the display's refresh and fades away when idle;
-  Home is a native sidebar app (chats by date with search, rename, delete
-  and resume; Drawings; Settings with voice, language, speed and
-  permissions); type or click the mic to talk in Home, read any reply
-  aloud; one-click permissions with a restart button; Screen Recording is
-  asked once instead of on every question; app icon.
-- **Agent**: shell, file editing, computer use and web search after a
-  one-time consent, with no prompts; the buddy only shows for mouse and
-  keyboard work; texting-style chat; better speech recognition and voices.
-- **Own pointer**: the agent clicks, types and scrolls in apps in the
-  background without taking your mouse or keyboard; app_control works with
-  apps by name; motion blur and click rings on the buddy; memory between
-  chats; Norwegian and English recognised automatically; double-tap ⌃ to
-  type; buddy colours; sound effects; an option to keep Cursor Pilot out of
-  screenshots and recordings; no keychain prompts after rebuilds.
-- **Co-user**: the agent uses your own mouse and keyboard like a person,
-  with natural pointer paths, click timing and typing rhythm, and waits when
-  you take over; background mode stays as an option.
-- **Explains visually**: the buddy draws with a pen it holds, on screen
-  or on a whiteboard it opens for explanations, and shows 3D models you
-  can turn, lighting up each part as it talks about it.
-- **No prompts while working**: one Set Up Everything step asks for every
-  permission up front; at work it only checks.
-- **Background tasks**: the agent can hand a whole task to an independent
-  agent that finishes it on its own while you keep going.
-- **Visuals in chat**: replies can send charts (a ```chart JSON block, drawn
-  with Swift Charts: bar, line, area, point and pie, growing in, hover for
-  values), images (`![alt](path or URL)`, shown like photos in Messages) and
-  link preview cards (a link on its own line, via LinkPresentation). None of
-  it is read aloud, and the notch shows them too.
-- **Helpers**: the agent sends helper agents off in parallel, each with its
-  own coloured cursor; works on its own without asking for what it can find
-  out; notes while working are shown quietly and only the first line and the
-  answer are read aloud; a calm glow during long tasks.
-
-Next phases:
-
-1. **Lessons**: record a step-by-step walkthrough once, replay it later with
-   the buddy pointing at each step.
-2. **Background jobs**: longer agent tasks in a work folder, with progress
-   cards and results in Home.
-3. **Polish**: reading the open document for full-file answers, app icon,
-   notarised releases with auto-update.
-
-## Website
-
-The landing page lives in `site/` (plain HTML, CSS and JS) and is served at
-https://cursorpilot.lou15.com by a static Cloudflare Worker. To deploy:
-
-```bash
-npx wrangler@4 deploy
-```
+Bug reports and ideas are welcome in [Issues](https://github.com/Louistuis/cursor-pilot/issues),
+and pull requests too. Cursor Pilot is an independent project and isn't
+affiliated with Anthropic or Apple.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+[MIT](LICENSE). Third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

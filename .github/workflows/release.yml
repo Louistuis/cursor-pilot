@@ -1,0 +1,70 @@
+# Builds Cursor Pilot.app on GitHub's Macs and publishes it.
+#
+#   Push a tag like v0.2.0  -> builds and publishes the release "Cursor Pilot 0.2.0"
+#                              with Cursor-Pilot.zip, so the README's download
+#                              link always points at the newest version.
+#   Run it by hand          -> builds only; the zip is attached to the run as
+#   (Actions › Release)        an artifact, nothing is published.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set the version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          plutil -replace CFBundleShortVersionString -string "$VERSION" mac/Resources/Info.plist
+          plutil -replace CFBundleVersion -string "${{ github.run_number }}" mac/Resources/Info.plist
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          xcodebuild -version
+          swift --version
+
+      - name: Build
+        run: INSTALL_DIR= BUILD_ROOT="$RUNNER_TEMP/build" scripts/build-app.sh
+
+      - name: Package
+        run: |
+          APP="$RUNNER_TEMP/build/Cursor Pilot.app"
+          codesign --verify --deep --strict "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" Cursor-Pilot.zip
+          shasum -a 256 Cursor-Pilot.zip | tee Cursor-Pilot.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cursor-Pilot
+          path: |
+            Cursor-Pilot.zip
+            Cursor-Pilot.zip.sha256
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" Cursor-Pilot.zip Cursor-Pilot.zip.sha256 \
+            --title "Cursor Pilot $VERSION" \
+            --notes-file .github/release-notes.md \
+            --generate-notes \
+            --verify-tag

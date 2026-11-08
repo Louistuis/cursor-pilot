@@ -25,35 +25,35 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>15.0</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSContactsUsageDescription</key>
-	<string>Cursor Pilot shows names instead of numbers when it reads or sends your messages.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Cursor Pilot scripts your apps when you ask it to do something for you, such as making a note or renaming files.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+	</array>
+	<key>NSContactsUsageDescription</key>
+	<string>Cursor Pilot shows names instead of numbers when it reads or sends your messages.</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>Cursor Pilot works with files on your Desktop when you ask it to.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>Cursor Pilot works with your documents when you ask it to.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>Cursor Pilot works with your downloads when you ask it to.</string>
-	<key>NSRemovableVolumesUsageDescription</key>
-	<string>Cursor Pilot works with files on your drives when you ask it to.</string>
-	<key>NSNetworkVolumesUsageDescription</key>
-	<string>Cursor Pilot works with files on network drives when you ask it to.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Cursor Pilot reaches devices and servers on your network when a task needs them.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_http._tcp</string>
-	</array>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT License</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Cursor Pilot reaches devices and servers on your network when a task needs them.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Cursor Pilot listens while you hold the talk shortcut so you can ask questions by voice.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Cursor Pilot works with files on network drives when you ask it to.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Cursor Pilot works with files on your drives when you ask it to.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Cursor Pilot looks at your screen when you ask it something, so it can explain and point at what you see.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
