@@ -137,11 +137,23 @@ private final class HelperCursor: NSObject {
     private var leaving = false
     private var onGone: (() -> Void)?
     private var lastFrame: CFTimeInterval = 0
+    /// Resting in the notch, unseen: the helper works in the background and
+    /// only comes out to click and type on screen.
+    private var docked = false
+    /// When it last did something on screen (a move, a click).
+    private var lastOnScreen: CFTimeInterval = 0
+
+    /// Where helpers wait while they work unseen: the notch, when it's on.
+    private static var notchSpot: CGPoint? {
+        AppModel.shared.showNotch ? AppModel.shared.notch?.parkingSpot : nil
+    }
 
     init(state: HelperCursorState, at p: CGPoint) {
         self.state = state
-        anchor = p
-        lastAnchor = p
+        let start = Self.notchSpot ?? p
+        docked = Self.notchSpot != nil
+        anchor = start
+        lastAnchor = start
         panel = NSPanel(contentRect: CGRect(origin: .zero, size: HelperLayout.size),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
@@ -169,12 +181,16 @@ private final class HelperCursor: NSObject {
         let target = CGPoint(x: p.x, y: primaryHeight - p.y)
         let distance = hypot(target.x - anchor.x, target.y - anchor.y)
         guard distance > 1.5 else { return }
-        let duration = min(0.6, 0.16 + Double(distance) / 3400)
+        // Out of the notch for the on-screen part, a little slower the first time.
+        let duration = docked ? 0.55 : min(0.6, 0.16 + Double(distance) / 3400)
+        docked = false
+        lastOnScreen = CACurrentMediaTime() + duration
         flight = (anchor, target, CACurrentMediaTime(), duration)
         try? await Task.sleep(for: .seconds(duration + 0.02))
     }
 
     func click() {
+        lastOnScreen = CACurrentMediaTime()
         let at = Date()
         state.clickAt = at
         Task { @MainActor [weak self] in
@@ -216,7 +232,14 @@ private final class HelperCursor: NSObject {
             state.motion = velocity
         }
 
-        alpha += ((leaving ? 0 : 1) - alpha) * min(1, (leaving ? 5 : 10) * dt)
+        // Nothing on screen for a while: back up into the notch, fading as it goes.
+        if !docked, !leaving, flight == nil, state.finished == nil, let spot = Self.notchSpot,
+           now - lastOnScreen > 3.5 {
+            docked = true
+            flight = (anchor, spot, now, 0.6)
+        }
+        let shown = !leaving && !docked
+        alpha += ((shown ? 1 : 0) - alpha) * min(1, (shown ? 10 : 5) * dt)
         panel.alphaValue = alpha
         if leaving, alpha < 0.01 {
             link.invalidate()

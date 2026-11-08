@@ -201,7 +201,9 @@ has to last a moment (0.35 s up, 0.2 s down, and 0.25/0.45 s for the dots)
 so quick steps and pauses between sentences never make it bounce. With the
 notch turned off, the buddy stays by the cursor as the thinking dots, with a
 capsule beside it showing the latest step. A background agent at work also
-lights the notch.
+lights the notch. Helpers and background agents work the same way: their
+cursors wait unseen in the notch and fly out only to click and type on
+screen, then go back up after 3.5 s without on-screen work.
 
 Every change of state is animated so it reads at a glance: the buddy shrinks
 and fades as it flies into the notch (its words go first) and the notch's
