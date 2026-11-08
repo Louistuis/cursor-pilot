@@ -448,6 +448,8 @@ Settings › Speech picks the engine that hears you and reads replies:
   there: bash and the file editor go as plain tools with the same input shape,
   and computer use and web search are left out. `abliterated-model-large-v2`
   is text only, so screenshots are replaced by a short note.
+- An OpenAI key (keychain service `com.louistuis.cursorpilot.openai`, or
+  `$OPENAI_API_KEY`) is kept for the live voice layer (GPT-Live-1).
 - Each key row in Settings has a Paste button that saves the key on the
   clipboard without showing it.
 

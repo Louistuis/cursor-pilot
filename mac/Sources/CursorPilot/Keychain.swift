@@ -114,6 +114,29 @@ enum Keychain {
         _ = security(["-i"], input: "add-generic-password -U -s \(abliterationService) -a abliteration -X \(hex)\n")
     }
 
+    // MARK: OpenAI
+
+    private static let openAIService = "com.louistuis.cursorpilot.openai"
+
+    /// The OpenAI key, for the live voice: the one saved in Settings, else
+    /// $OPENAI_API_KEY. Call it off the main thread.
+    static func loadOpenAIKey() -> String {
+        let saved = security(["find-generic-password", "-s", openAIService, "-a", "openai", "-w"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !saved.isEmpty { return saved }
+        return ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    static func saveOpenAIKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            _ = security(["delete-generic-password", "-s", openAIService, "-a", "openai"])
+            return
+        }
+        let hex = Data(trimmed.utf8).map { String(format: "%02x", $0) }.joined()
+        _ = security(["-i"], input: "add-generic-password -U -s \(openAIService) -a openai -X \(hex)\n")
+    }
+
     /// Runs /usr/bin/security and returns what it printed.
     private static func security(_ arguments: [String], input: String? = nil) -> String {
         let task = Process()

@@ -55,6 +55,7 @@ struct SettingsView: View {
             Section {
                 KeyRow(title: "Anthropic key", prompt: "sk-ant-…", key: $model.apiKey)
                 KeyRow(title: "abliteration.ai key", prompt: "ak_…", key: $model.abliterationKey)
+                KeyRow(title: "OpenAI key", prompt: "sk-…", key: $model.openAIKey)
                 Picker("Model", selection: $model.model) {
                     Section("Claude") {
                         ForEach(AppModel.claudeModels, id: \.self) { Text(Self.modelName($0)).tag($0) }

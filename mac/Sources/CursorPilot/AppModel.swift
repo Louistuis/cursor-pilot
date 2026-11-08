@@ -46,6 +46,15 @@ final class AppModel: ObservableObject {
         }
     }
     private var isLoadingKey = false
+    /// The OpenAI key, for the live voice (GPT-Live).
+    @Published var openAIKey: String {
+        didSet {
+            if !isLoadingKey {
+                let key = openAIKey
+                Task.detached { Keychain.saveOpenAIKey(key) }
+            }
+        }
+    }
     /// The abliteration.ai key, for the abliterated models.
     @Published var abliterationKey: String {
         didSet {
@@ -191,6 +200,7 @@ final class AppModel: ObservableObject {
 
         apiKey = ""
         abliterationKey = ""
+        openAIKey = ""
         model = defaults.string(forKey: "model") ?? Self.models[0]
         effort = defaults.string(forKey: "effort") ?? "low"
         speakReplies = defaults.object(forKey: "speakReplies") as? Bool ?? true
@@ -277,10 +287,13 @@ final class AppModel: ObservableObject {
     /// `-CPSkipKeychain YES` skips it, for UI work without prompts.
     func loadAPIKey() async {
         guard !defaults.bool(forKey: "CPSkipKeychain") else { return }
-        let (key, ablit) = await Task.detached { (Keychain.loadAPIKey(), Keychain.loadAbliterationKey()) }.value
+        let (key, ablit, openai) = await Task.detached {
+            (Keychain.loadAPIKey(), Keychain.loadAbliterationKey(), Keychain.loadOpenAIKey())
+        }.value
         isLoadingKey = true
         apiKey = key
         abliterationKey = ablit
+        openAIKey = openai
         isLoadingKey = false
     }
 
