@@ -199,7 +199,7 @@ final class AppModel: ObservableObject {
         showGlow = defaults.object(forKey: "showGlow") as? Bool ?? true
         hideFromRecordings = defaults.bool(forKey: "hideFromRecordings")
         doubleTapToType = defaults.object(forKey: "doubleTapToType") as? Bool ?? true
-        handsFree = defaults.object(forKey: "handsFree") as? Bool ?? true
+        handsFree = defaults.object(forKey: "handsFree") as? Bool ?? false
         hideBuddyWhenIdle = defaults.object(forKey: "hideBuddyWhenIdle") as? Bool ?? true
         talkKey = defaults.string(forKey: "talkKey").flatMap(TalkKey.init(rawValue:)) ?? .controlOption
         listenLocale = defaults.string(forKey: "listenLocale") ?? ""

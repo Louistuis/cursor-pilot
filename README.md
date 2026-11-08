@@ -216,7 +216,7 @@ group of actions it says in one short sentence what it's about to do
 Visible actions (clicks, typing, app_control) wait until that line has
 started playing (at most 2.5 s), so it's said before it's done.
 
-**Hands-free conversation** (Settings › Talking, on by default): after an
+**Hands-free conversation** (Settings › Talking, off by default; hold the talk key otherwise): after an
 answer the mic stays open for up to 7 seconds so you can just reply; it ends
 itself 0.9 s after you stop talking, and the screen frame stays off until
 you actually speak. While it talks the mic listens too, with voice
