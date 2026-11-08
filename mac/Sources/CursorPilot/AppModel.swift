@@ -641,6 +641,7 @@ final class AppModel: ObservableObject {
     }
 
     func interrupt() {
+        CursorTakeover.end()
         drawQueue?.cancel()
         drawQueue = nil
         heldVisuals.removeAll()

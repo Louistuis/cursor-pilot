@@ -41,16 +41,23 @@ enum CloudSpeech {
         let detail: String
     }
 
+    /// Best first, as of November 2026 (FLEURS multilingual and Artificial
+    /// Analysis word error rates; all handle Norwegian except where noted).
     static let hearingModels: [Model] = [
-        Model(id: "microsoft/mai-transcribe-2", name: "Microsoft MAI-Transcribe 2", detail: "60 languages, mixed-language speech"),
-        Model(id: "elevenlabs/scribe-v2", name: "ElevenLabs Scribe v2", detail: "90+ languages"),
-        Model(id: "openai/gpt-transcribe", name: "OpenAI GPT Transcribe", detail: "High accuracy"),
+        Model(id: "microsoft/mai-transcribe-2", name: "Microsoft MAI-Transcribe 2", detail: "#1 multilingual, fastest"),
+        Model(id: "elevenlabs/scribe-v2", name: "ElevenLabs Scribe v2", detail: "Very accurate, 90+ languages"),
+        Model(id: "google/gemini-3.5-transcribe", name: "Google Gemini 3.5 Transcribe", detail: "Mixed languages"),
+        Model(id: "mistralai/voxtral-small-transcribe-3-0", name: "Mistral Voxtral Small Transcribe 3", detail: "Accurate English"),
+        Model(id: "openai/gpt-transcribe", name: "OpenAI GPT Transcribe", detail: "Fallback"),
     ]
+    /// Best first for spoken replies: natural, quick to start, Norwegian.
     static let voiceModels: [Model] = [
-        Model(id: "microsoft/mai-voice-2.1-flash", name: "Microsoft MAI-Voice 2.1 Flash", detail: "Fast, natural"),
+        Model(id: "microsoft/mai-voice-2.1-flash", name: "Microsoft MAI-Voice 2.1 Flash", detail: "Fast, real Norwegian voices"),
+        Model(id: "elevenlabs/eleven-v4-turbo", name: "ElevenLabs Eleven v4 Turbo", detail: "Most natural, fast"),
         Model(id: "microsoft/mai-voice-2.1", name: "Microsoft MAI-Voice 2.1", detail: "Finest Microsoft voice"),
-        Model(id: "elevenlabs/eleven-v4-turbo", name: "ElevenLabs Eleven v4 Turbo", detail: "Expressive, low latency"),
-        Model(id: "elevenlabs/eleven-v4", name: "ElevenLabs Eleven v4", detail: "Most expressive"),
+        Model(id: "elevenlabs/eleven-v4", name: "ElevenLabs Eleven v4", detail: "#1 naturalness, slower"),
+        Model(id: "google/gemini-3.8-flash-lite-tts", name: "Google Gemini 3.8 Flash Lite TTS", detail: "Expressive, cheapest"),
+        Model(id: "google/gemini-3.8-flash-tts", name: "Google Gemini 3.8 Flash TTS", detail: "Expressive, slowest to start"),
     ]
 
     static var hearingModel: String {
@@ -59,10 +66,12 @@ enum CloudSpeech {
     static var voiceModel: String {
         UserDefaults.standard.string(forKey: "cloudVoiceModel") ?? voiceModels[0].id
     }
-    /// Microsoft's voices are one name in several languages; ElevenLabs'
-    /// voices speak every language themselves.
+    /// Microsoft's voices are one name in several languages; ElevenLabs' and
+    /// Google's voices speak every language themselves.
     static func isMicrosoft(_ model: String) -> Bool { model.hasPrefix("microsoft/") }
-    static func defaultVoice(for model: String) -> String { isMicrosoft(model) ? "Harper" : "sarah" }
+    static func defaultVoice(for model: String) -> String {
+        isMicrosoft(model) ? "Harper" : model.hasPrefix("google/") ? "Kore" : "sarah"
+    }
     /// The chosen voice for `model` (each model remembers its own).
     static func voiceName(for model: String) -> String {
         UserDefaults.standard.string(forKey: "cloudVoice.\(model)") ?? defaultVoice(for: model)

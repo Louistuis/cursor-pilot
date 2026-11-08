@@ -55,6 +55,10 @@ enum TestHooks {
                    "everything": p.everything], to: out)
             return true
         }
+        if let out = defaults.string(forKey: "CPCursorTest") {
+            await cursorTest(to: out)
+            return true
+        }
         if let text = defaults.string(forKey: "CPSay") {
             await say(text.components(separatedBy: "|"), to: defaults.string(forKey: "CPOut") ?? "/tmp/cpsay")
             return true
@@ -177,6 +181,43 @@ enum TestHooks {
             FileManager.default.createFile(atPath: file, contents: bytes)
             return "image saved to \(file)"
         }
+    }
+
+    /// `-CPCursorTest out` moves the real pointer a little and back like the
+    /// agent does, screenshots it (cursor included) while the buddy stands in
+    /// for it and after it hands it back, and writes what it saw to out.json.
+    private static func cursorTest(to out: String) async {
+        let model = AppModel.shared
+        model.overlay.show()
+        try? await Task.sleep(for: .milliseconds(600))
+        let home = HumanInput.location
+        let away = CGPoint(x: home.x + 80, y: home.y + 40)
+        shot(around: home, to: out + "-0-before.png")
+        CursorTakeover.touch()
+        try? await Task.sleep(for: .milliseconds(500))
+        shot(around: home, to: out + "-1-taken.png")
+        await HumanInput.move(to: away)
+        try? await Task.sleep(for: .milliseconds(400))
+        let during = CursorTakeover.hidden
+        shot(around: away, to: out + "-during.png")
+        await HumanInput.move(to: home)
+        try? await Task.sleep(for: .milliseconds(300))
+        let stillDuring = CursorTakeover.hidden
+        try? await Task.sleep(for: .seconds(1.8))
+        let after = CursorTakeover.hidden
+        shot(around: home, to: out + "-after.png")
+        let result: [String: Any] = ["hiddenWhileMoving": during, "hiddenAfterReturn": stillDuring, "hiddenAfterLinger": after]
+        let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+        FileManager.default.createFile(atPath: out + ".json", contents: data)
+    }
+
+    /// A screenshot of the area around `p` (global top-left), cursor included.
+    private static func shot(around p: CGPoint, to path: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        task.arguments = ["-x", "-C", "-R", "\(Int(p.x) - 60),\(Int(p.y) - 60),160,140", path]
+        try? task.run()
+        task.waitUntilExit()
     }
 
     /// Waits for the on-device models when that engine is chosen.

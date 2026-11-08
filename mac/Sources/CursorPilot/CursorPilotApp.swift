@@ -94,14 +94,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // few points of a long sentence.
             if let path = UserDefaults.standard.string(forKey: "CPRenderCaptionPreview") {
                 let sentence = "Open the File menu, choose Export as PDF, then pick the Desktop folder and press Save to finish."
-                let ns = sentence as NSString
+                let samples: [(String, String)] = [("Sure.", "Sure."), ("It's right there.", "there."),
+                                                   (sentence, "File"), (sentence, "PDF,"), (sentence, "finish.")]
                 let view = VStack(alignment: .leading, spacing: 16) {
-                    ForEach(["File", "PDF,", "Desktop", "finish."], id: \.self) { word in
-                        KaraokeCaption(spoken: SpokenWord(sentence: sentence, word: ns.range(of: word)))
+                    ForEach(samples.indices, id: \.self) { i in
+                        let (text, word) = samples[i]
+                        KaraokeCaption(spoken: SpokenWord(sentence: text, word: (text as NSString).range(of: word)))
+                            .hugWidth(300)
                             .padding(.horizontal, 13).padding(.vertical, 9)
                             .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 16))
                     }
+                    Text("Thinking about where the export button is")
+                        .hugWidth(300)
+                        .padding(.horizontal, 13).padding(.vertical, 9)
+                        .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 16))
+                    Text("That's the export button. Click it, then pick PDF in the menu that opens, and choose where to save it.")
+                        .font(.system(size: 13))
+                        .hugWidth(300)
+                        .padding(.horizontal, 13).padding(.vertical, 9)
+                        .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 16))
                 }
+                .frame(width: 520, alignment: .leading)
                 .padding(24)
                 .background(Color(white: 0.3))
                 .environment(\.colorScheme, .dark)

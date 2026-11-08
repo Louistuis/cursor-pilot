@@ -32,7 +32,7 @@ struct SettingsView: View {
             let speaking = CloudSpeech.voiceModels.first { $0.id == cloudVoiceModel }?.name ?? "the voice model"
             let languages = CloudSpeech.isMicrosoft(cloudVoiceModel)
                 ? (cloudVoiceNorwegian ? " \(Self.voiceTitle(cloudVoice)) speaks English and Norwegian in the same voice." : " \(Self.voiceTitle(cloudVoice)) has no Norwegian version; Norwegian replies use another Microsoft voice.")
-                : " ElevenLabs voices speak every language themselves."
+                : " This voice speaks every language itself, Norwegian included."
             return "\(hearing) writes down what you say and \(speaking) reads replies, through your OpenRouter account, so recordings and replies go to OpenRouter." + languages
         case .local: return "Everything stays on this Mac. Whisper understands Norwegian, English and many more; Kokoro reads English replies, and other languages use Apple's voices. The models download once (about 2 GB)."
         case .apple: return "macOS’s own speech recognition and voices."

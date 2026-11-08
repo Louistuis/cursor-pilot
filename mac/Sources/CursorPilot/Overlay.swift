@@ -80,6 +80,9 @@ final class OverlayController: NSObject {
     /// The agent is moving the buddy as its own pointer, so it stays where
     /// the agent put it instead of following the user's cursor.
     private var agentDriving = false
+    /// The agent is moving the real pointer and the system cursor is
+    /// hidden: the buddy's tip sits exactly on the pointer, standing in for it.
+    private(set) var onCursor = false
     private var lastAnchor = CGPoint.zero
     private var velocity = CGVector.zero
 
@@ -177,6 +180,22 @@ final class OverlayController: NSObject {
 
     // MARK: The agent's pointer
 
+    /// Puts the buddy on the real pointer's tip (true) while the system
+    /// cursor is hidden, or back beside it (false).
+    func takeCursor(_ on: Bool) {
+        guard onCursor != on else { return }
+        onCursor = on
+        wake()
+        if on {
+            targets.removeAll()
+            isPointing = false
+            state.pointLabel = nil
+            fly(to: NSEvent.mouseLocation, duration: 0.14)
+        } else {
+            fly(to: followPoint(), duration: 0.28)
+        }
+    }
+
     /// Flies the buddy to `p` (global top-left points) as the agent's own
     /// pointer, and returns once it's there. The user's cursor doesn't move.
     func agentMove(toTopLeft p: CGPoint) async {
@@ -253,9 +272,13 @@ final class OverlayController: NSObject {
                              y: p.points[i].y + (p.points[j].y - p.points[i].y) * k)
             if t >= 1 { pen = nil }
         } else if let f = flight {
+            // On the pointer, the flight chases it as it moves.
+            let to = onCursor ? NSEvent.mouseLocation : f.to
             let t = min(1, (now - f.start) / f.duration)
-            anchor = arc(from: f.from, to: f.to, t: ease(t))
+            anchor = onCursor ? lerp(f.from, to, ease(t)) : arc(from: f.from, to: to, t: ease(t))
             if t >= 1 { flight = nil }
+        } else if onCursor {
+            anchor = NSEvent.mouseLocation
         } else if now >= holdUntil, !targets.isEmpty {
             let (target, label) = targets.removeFirst()
             fly(to: target, duration: 0.6)
@@ -274,14 +297,14 @@ final class OverlayController: NSObject {
             followY.step(to: p.y, dt: dt, omega: 38)
             anchor = CGPoint(x: followX.x, y: followY.x)
         }
-        if flight != nil || pen != nil || isPointing || agentDriving {
+        if flight != nil || pen != nil || isPointing || agentDriving || onCursor {
             followX = Spring(anchor.x)
             followY = Spring(anchor.y)
         }
         trackMotion(dt: dt)
 
         let busy = state.mode != .idle || state.notice != nil || isPointing || flight != nil || pen != nil
-            || !targets.isEmpty || agentDriving
+            || !targets.isEmpty || agentDriving || onCursor
         if busy { lastActive = now }
         let visible = !state.backgroundWork && (!autoHide || now - lastActive < Self.idleHide)
         // Quick to appear, slow to leave.
@@ -333,6 +356,10 @@ final class OverlayController: NSObject {
         let y = anchor.y + inset - Self.size.height
         let origin = CGPoint(x: x.rounded(), y: y.rounded())
         if panel.frame.origin != origin { panel.setFrameOrigin(origin) }
+    }
+
+    private func lerp(_ a: CGPoint, _ b: CGPoint, _ t: Double) -> CGPoint {
+        CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
     }
 
     private func ease(_ t: Double) -> Double { t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2 }
@@ -439,7 +466,7 @@ struct OverlayView: View {
             if let label = state.pointLabel ?? state.notice {
                 GlassCapsule { Text(label).font(.system(size: 12, weight: .semibold)) }
             } else if let activity = state.activity, state.mode != .idle {
-                GlassCapsule { ShimmerText(text: activity).lineLimit(1).frame(maxWidth: 280, alignment: .leading) }
+                GlassCapsule { ShimmerText(text: activity).lineLimit(1).hugWidth(280) }
             } else {
                 switch state.mode {
                 case .idle:
@@ -473,9 +500,9 @@ struct OverlayView: View {
                                 .lineLimit(5)
                         }
                     }
+                    .hugWidth(300)
                     .padding(.horizontal, 13)
                     .padding(.vertical, 9)
-                    .frame(maxWidth: 300, alignment: .leading)
                     .glassBackground(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     // The bubble grows and shrinks with the words, smoothly.
                     .animation(.spring(response: 0.38, dampingFraction: 0.86), value: state.spoken)
@@ -774,6 +801,28 @@ struct SpokenWord: Equatable {
 /// Spoken replies, read along: the line the voice is on and the next one,
 /// with a soft highlight that glides onto each word as it is said and the
 /// lines rolling up as the voice moves on.
+/// Offers its content up to `max` points of width and takes only what the
+/// content uses: short text gets a small bubble, long text wraps at `max`.
+/// (A plain `.frame(maxWidth:)` takes the whole width whenever there's room.)
+struct HugWidth: Layout {
+    var max: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        let width = Swift.min(proposal.width ?? max, max)
+        let size = child.sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return CGSize(width: Swift.min(size.width, max), height: size.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+    }
+}
+
+extension View {
+    func hugWidth(_ max: CGFloat) -> some View { HugWidth(max: max) { self } }
+}
+
 struct KaraokeCaption: View {
     var spoken: SpokenWord
     @Namespace private var focus
@@ -816,7 +865,7 @@ struct KaraokeCaption: View {
         .font(.system(size: 14, weight: .medium))
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
-        .frame(maxWidth: 300, minHeight: shown.count > 1 ? 40 : 19, alignment: .topLeading)
+        .frame(minHeight: shown.count > 1 ? 40 : 19, alignment: .topLeading)
         .clipped()
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: current)
         .animation(.spring(response: 0.42, dampingFraction: 0.9), value: row)

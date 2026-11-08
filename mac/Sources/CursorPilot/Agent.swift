@@ -170,6 +170,7 @@ final class ComputerControl {
     /// The task is over: the buddy goes back to the user's cursor.
     func endTask() {
         if agent == 0 { AppModel.shared.overlay.agentRelease() }
+        CursorTakeover.end()
     }
 
     /// Moves this agent's cursor: the buddy, or the helper's own.

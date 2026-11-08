@@ -192,5 +192,93 @@ enum HumanInput {
         try? await Task.sleep(for: .milliseconds(160))
     }
 
-    private static func post(_ e: CGEvent?) { e?.post(tap: .cghidEventTap) }
+    /// Marks the agent's own events, so they can be told from the user's.
+    static let marker: Int64 = 0x4350_494C // "CPIL"
+
+    private static func post(_ e: CGEvent?) {
+        guard let e else { return }
+        e.setIntegerValueField(.eventSourceUserData, value: marker)
+        if e.type != .keyDown, e.type != .keyUp, e.type != .flagsChanged { CursorTakeover.touch() }
+        e.post(tap: .cghidEventTap)
+    }
+}
+
+/// While the agent moves the real pointer, the system cursor turns into the
+/// buddy: macOS's arrow is hidden and the buddy's tip sits on the pointer.
+/// The arrow comes back the moment the user moves the mouse, and once the
+/// agent has left the pointer alone for a moment.
+@MainActor
+enum CursorTakeover {
+    private(set) static var hidden = false
+    private static var hides = 0
+    private static var lastHide: CFTimeInterval = 0
+    private static var release: Task<Void, Never>?
+    private static var monitor: Any?
+    /// How long after the agent's last pointer event the arrow comes back.
+    private static let linger: Double = 1.4
+
+    /// The agent is using the pointer now.
+    static func touch() {
+        release?.cancel()
+        release = Task {
+            try? await Task.sleep(for: .seconds(linger))
+            guard !Task.isCancelled else { return }
+            end()
+        }
+        guard AppModel.shared.showBuddy else { return }
+        // Apps in front (a video player, say) show the cursor again on their
+        // own as it moves, so keep hiding it while the agent moves it. Every
+        // hide is counted and undone when the user gets it back.
+        let now = CACurrentMediaTime()
+        if hidden {
+            if now - lastHide > 0.05 {
+                lastHide = now
+                CGDisplayHideCursor(CGMainDisplayID())
+                hides += 1
+            }
+            return
+        }
+        hidden = true
+        lastHide = now
+        WindowServer.allowCursorHidingInBackground()
+        CGDisplayHideCursor(CGMainDisplayID())
+        hides = 1
+        AppModel.shared.overlay.takeCursor(true)
+        // The user's own hand on the mouse gets their arrow back at once.
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .rightMouseDown,
+                                                               .leftMouseDragged, .scrollWheel]) { event in
+            guard event.cgEvent?.getIntegerValueField(.eventSourceUserData) != HumanInput.marker else { return }
+            Task { @MainActor in end() }
+        }
+    }
+
+    /// Gives the user back their own arrow.
+    static func end() {
+        release?.cancel()
+        release = nil
+        guard hidden else { return }
+        hidden = false
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        for _ in 0..<hides { CGDisplayShowCursor(CGMainDisplayID()) }
+        hides = 0
+        AppModel.shared.overlay.takeCursor(false)
+    }
+}
+
+/// The window server lets only the app in front hide the cursor, unless the
+/// connection says it may from the background (as cursor utilities do).
+@_silgen_name("_CGSDefaultConnection") private func cgsDefaultConnection() -> Int32
+@_silgen_name("CGSSetConnectionProperty")
+private func cgsSetConnectionProperty(_ cid: Int32, _ target: Int32, _ key: CFString, _ value: CFTypeRef) -> Int32
+
+@MainActor
+private enum WindowServer {
+    private static var done = false
+    static func allowCursorHidingInBackground() {
+        guard !done else { return }
+        done = true
+        let cid = cgsDefaultConnection()
+        _ = cgsSetConnectionProperty(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+    }
 }

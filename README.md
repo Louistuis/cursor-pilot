@@ -171,6 +171,15 @@ over: it notices the pointer isn't where it left it, says "You've got it",
 and waits until you have stopped for a moment. Helpers always work in their
 own space.
 
+While the agent has your pointer, macOS's arrow turns into the buddy: the
+system cursor is hidden (the window server lets a background app do this once
+its connection sets `SetsCursorInBackground`) and the buddy's tip sits exactly
+on the pointer. The agent's events carry a marker in `eventSourceUserData`, so
+the first movement of your own hand brings your arrow straight back, as does
+1.4 s without the agent touching the pointer. Apps that show the cursor
+themselves as it moves (video players) are countered by hiding it again on
+each move; every hide is counted and undone.
+
 In background mode the agent has its own pointer: the buddy flies to where it clicks (with
 motion blur when it moves fast and a ring when it clicks), and the click
 goes to the app under it without moving your pointer. Cursor Pilot first
@@ -257,6 +266,7 @@ Debug launch flags, for design work:
 | `-CPPermissions out.json` | writes which permissions are allowed, checked without asking |
 | `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, then the chosen engine, writes what each heard to `-CPOut`, then quits |
 | `-CPSay "Hello.\|Hei."` | renders each line with the chosen engine (`-speechEngine cloud\|local\|apple`) to `<-CPOut>-N.wav` without playing it, timings in `<-CPOut>.json` |
+| `-CPCursorTest out` | moves the real pointer 80 pt and back like the agent, screenshots it (cursor included) as the buddy takes it over and after it hands it back, writes whether the arrow was hidden to `out.json` |
 | `-CPMorphPreview out` | plays the buddy turning into the thinking dots and back on white and dark, saving frames as `out-NN.png` |
 
 Test flags run best in a second copy, so the one you use keeps running:
@@ -325,7 +335,7 @@ Settings › Speech picks the engine that hears you and reads replies:
 
 | Engine | Hears you | Speaks |
 | --- | --- | --- |
-| **Cloud** (OpenRouter) | Microsoft MAI-Transcribe 2, ElevenLabs Scribe v2 or OpenAI GPT Transcribe | Microsoft MAI-Voice 2.1 (Flash or full) or ElevenLabs Eleven v4 (Turbo or full) |
+| **Cloud** (OpenRouter) | Microsoft MAI-Transcribe 2, ElevenLabs Scribe v2, Google Gemini 3.5 Transcribe, Mistral Voxtral Small Transcribe 3 or OpenAI GPT Transcribe | Microsoft MAI-Voice 2.1 (Flash or full), ElevenLabs Eleven v4 (Turbo or full) or Google Gemini 3.8 Flash TTS (Lite or full) |
 | **On this Mac** | Whisper large-v3 turbo on the Neural Engine | Kokoro-82M for English, Apple's voices otherwise |
 | **Apple** | SpeechAnalyzer / SFSpeechRecognizer | the best installed system voice |
 
@@ -333,6 +343,10 @@ Settings › Speech picks the engine that hears you and reads replies:
   Settings, else `$OPENROUTER_API_KEY`, else the first line of
   `~/.config/openrouter.key`. Cloud is only used for speech; recordings and
   reply sentences go to OpenRouter.
+- The lists are ordered best first as of November 2026: MAI-Transcribe 2
+  leads multilingual accuracy (FLEURS) and is the fastest; MAI-Voice 2.1
+  Flash and Eleven v4 Turbo start speaking quickest (about 0.6–1.7 s a
+  sentence through OpenRouter), Gemini's voices take 1.4–2.7 s.
 - Each voice model keeps its own voice. Microsoft's voices are one name in
   several languages (Harper and Grant speak English and Norwegian); ElevenLabs
   voices speak every language themselves. Picking a voice plays a sample, in
