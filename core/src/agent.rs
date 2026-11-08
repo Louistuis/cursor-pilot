@@ -28,7 +28,7 @@ const WEB_SEARCH_MODELS: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5", "cl
 
 /// Output beyond this is cut from the middle.
 const MAX_OUTPUT: usize = 30_000;
-const BASH_TIMEOUT: Duration = Duration::from_secs(180);
+const BASH_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn tool_definitions(settings: &Settings) -> Vec<Value> {
     if !mac_access(&settings.access) {
@@ -49,7 +49,9 @@ pub fn tool_definitions(settings: &Settings) -> Vec<Value> {
     }
     if WEB_SEARCH_MODELS.contains(&settings.model.as_str()) {
         tools.push(json!({"type": "web_search_20260209", "name": "web_search", "max_uses": 5}));
+        tools.push(json!({"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 8}));
     }
+    tools.push(plan_tool());
     tools.push(app_control_tool());
     tools.push(messages_tool());
     tools
@@ -160,6 +162,52 @@ work, keep any text between tool calls to a few words about the next step; it sh
 }
 
 /// Our tool for the user's iMessages and texts.
+/// A checklist for longer tasks: Claude keeps it current as it works, and
+/// the user sees the step it's on.
+pub fn plan_tool() -> Value {
+    json!({
+        "name": "plan",
+        "description": "Keep a short checklist for a task with several steps (three or more), and keep it \
+    current as you work: send the whole list each time, with exactly one step in_progress while you work \
+    on it, and mark steps completed as soon as they are done. Skip it for quick tasks. The user sees the \
+    step in progress.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "The step, a few words, e.g. \"Finding the invoices\"."},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                        },
+                        "required": ["text", "status"]
+                    }
+                }
+            },
+            "required": ["steps"]
+        }
+    })
+}
+
+/// What a plan update says to the user, e.g. "Step 2 of 4: Finding the invoices".
+pub fn plan_summary(input: &Value) -> String {
+    let steps = input["steps"].as_array().cloned().unwrap_or_default();
+    let done = steps.iter().filter(|s| s["status"] == "completed").count();
+    let current = steps.iter().position(|s| s["status"] == "in_progress");
+    match current {
+        Some(i) => format!(
+            "Step {} of {}: {}",
+            i + 1,
+            steps.len(),
+            clip(steps[i]["text"].as_str().unwrap_or(""), 60)
+        ),
+        None if !steps.is_empty() && done == steps.len() => format!("All {} steps done", steps.len()),
+        None => format!("Planned {} steps", steps.len()),
+    }
+}
+
 /// The shell tool as a plain tool, for hosts other than Anthropic's.
 fn bash_tool() -> Value {
     json!({
@@ -300,15 +348,25 @@ never needs the app in front.\n\
 type, press keys and scroll. Coordinates are pixels in your latest screenshot. {pointer} End each \
 group of actions with a screenshot (or an elements listing) to check the result.\n\
 - messages reads the user's Messages conversations and sends texts for them.\n\
-- web_search, when present, finds current information.\n\
+- web_search, when present, finds current information, and web_fetch reads a page in full.\n\
+- plan keeps a checklist for a task with several steps; the user sees the step you're on.\n\
 How to work: do what the user asked, completely, the way they asked, as an autonomous agent: \
 the user wants it done, not a list of steps for them to do. Never hand a step back to the user that \
 you could do yourself, and don't ask for confirmation, preferences or details you can find out \
 (look on the screen, in files, apps, Messages or memory) or choose sensibly yourself; pick the \
 obvious reasonable option and mention it in your reply. Ask only when you truly can't go on: \
 something only the user knows, or before something risky that can't be undone. If a step fails, try \
-another way, and another, before giving up. Prefer, in order: app_control and the shell (fast, exact, \
-invisible), then the computer tools for what has no other way. {manner}\n\
+another way, and another, before giving up.\n\
+Do the work in the background, the way a developer works in a terminal: think, look things up and get \
+things done with the shell, files, app_control, Messages and the web, which are fast, exact and invisible, \
+and the user keeps their screen meanwhile. Use the computer tools (the pointer and keyboard) only for a \
+step that has no other way, such as clicking something only reachable on screen. {manner}\n\
+Work like a careful engineer: for anything bigger than one step, make a plan first; look before you \
+change things (read the file, check the state); after each change, check it worked (run it, read it back, \
+look at the result) and fix what didn't; when several calls don't depend on each other (reading a few \
+files, a few searches), make them all in one turn. Use the shell's full power: find, grep (or rg if \
+installed), sed, curl, python3, git, mdfind (Spotlight), sips, pbcopy and pbpaste, defaults, open. Long \
+jobs that take minutes go to a background task; separate parts can go to helpers at once.\n\
 Nobody reviews your actions before they run, so be careful with what can't be undone: never use sudo, \
 and never delete, overwrite, send, post or buy anything the user didn't ask for. Move files to the \
 Trash with /usr/bin/trash rather than deleting them with rm.\n\
@@ -463,6 +521,7 @@ impl<'a> Call<'a> {
                 "stop" => "Stopped a background task".into(),
                 _ => "Checked the background tasks".into(),
             },
+            "plan" => plan_summary(i),
             "messages" => match i["action"].as_str().unwrap_or("") {
                 "send" => format!("Texted {}", i["to"].as_str().unwrap_or("someone")),
                 "read" => format!(
@@ -486,6 +545,8 @@ impl<'a> Call<'a> {
             "memory"
         } else if self.name == "messages" {
             "messages"
+        } else if self.name == "plan" {
+            "plan"
         } else if self.name == "delegate" || self.name == "background_task" {
             "agent"
         } else {

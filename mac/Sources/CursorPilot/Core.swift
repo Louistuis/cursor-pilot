@@ -125,6 +125,7 @@ struct AgentStep: Identifiable, Equatable {
         case "memory": "brain"
         case "messages": "message"
         case "web": "globe"
+        case "plan": "checklist"
         case "agent": "person.2"
         default: "sparkles"
         }

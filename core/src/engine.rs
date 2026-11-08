@@ -135,9 +135,9 @@ pub struct Request {
 }
 
 /// Tool rounds one request may take before it is stopped.
-const MAX_ROUNDS: usize = 120;
+const MAX_ROUNDS: usize = 300;
 /// Tool rounds a helper may take for its part.
-const HELPER_ROUNDS: usize = 80;
+const HELPER_ROUNDS: usize = 150;
 
 /// Who is acting: the main agent (0) or one of its helpers, each with its
 /// own shell. The app gives each its own pointer by `id`.
@@ -371,9 +371,15 @@ impl Engine {
                     .content
                     .iter()
                     .filter(|b| b["type"] == "server_tool_use")
+                    // Other server steps (the page reader's own filtering) aren't the user's concern.
+                    .filter(|b| b["name"] == "web_search" || b["name"] == "web_fetch")
                 {
                     let q = b["input"]["query"].as_str().unwrap_or("");
-                    let summary = if q.is_empty() {
+                    let url = b["input"]["url"].as_str().unwrap_or("");
+                    let summary = if b["name"] == "web_fetch" {
+                        let site = url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("");
+                        if site.is_empty() { "Read a web page".to_string() } else { format!("Read a page on {site}") }
+                    } else if q.is_empty() {
                         "Searched the web".to_string()
                     } else {
                         format!("Searched the web for \u{201C}{q}\u{201D}")
@@ -502,7 +508,7 @@ impl Engine {
                 ));
                 continue;
             }
-            if !access && call.name != "memory" {
+            if !access && call.name != "memory" && call.name != "plan" {
                 results[index] = Some(tool_result(
                     call,
                     json!("Mac access is off in Cursor Pilot's settings."),
@@ -559,6 +565,10 @@ impl Engine {
                 }
                 (false, "app_control") => from_host(json!({"type": "apps", "input": call.input})),
                 (false, "messages") => from_host(json!({"type": "messages", "input": call.input})),
+                (false, "plan") => (
+                    json!("Plan updated. Keep it current as you go, and mark each step completed when it's done."),
+                    false,
+                ),
                 (false, "memory") => self.memory.run(call.input, &agent::date_string(now())),
                 (false, "background_task") if worker.id == 0 => self.background(call.input, settings),
                 (false, "background_task") => (

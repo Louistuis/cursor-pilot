@@ -89,6 +89,12 @@ final class AppModel: ObservableObject {
     /// The agent is running commands or editing files rather than using the
     /// screen: the buddy hides and the menu bar and notch show a terminal.
     @Published var backgroundWork = false { didSet { overlay.state.backgroundWork = backgroundWork } }
+    /// A request is under way (from sending it until it finishes).
+    private var requestActive = false
+    /// A sentence is being read aloud right now.
+    private var speakingNow = false
+    /// The answer is being read: the task's work is over.
+    private var presentingAnswer = false
     /// Whether Cursor Pilot may work on the Mac by itself (consented in onboarding or Settings).
     @Published var macAccess: Bool { didSet { defaults.set(macAccess ? "on" : "off", forKey: "accessLevel"); configureCore() } }
     /// "person": it uses your own mouse and keyboard. "background": its own pointer.
@@ -197,6 +203,8 @@ final class AppModel: ObservableObject {
         }
         speaker.onIdle = { [weak self] in
             guard let self else { return }
+            speakingNow = false
+            refreshWorking()
             releaseVisuals(upTo: .max)
             // The last line stays, fully read, until the bubble goes away.
             if let spoken = overlay.state.spoken {
@@ -212,6 +220,14 @@ final class AppModel: ObservableObject {
                 releaseVisuals(upTo: number)
             }
             overlay.state.spoken = SpokenWord(sentence: text, word: NSRange(location: 0, length: 0))
+            speakingNow = true
+            // Speech after a step is the answer (narration while working is silent).
+            if !liveSteps.isEmpty && !presentingAnswer {
+                presentingAnswer = true
+                overlay.state.activity = nil
+                overlay.state.activityIcon = nil
+            }
+            refreshWorking()
         }
         speaker.onWord = { [weak self] range in
             guard let self, let spoken = overlay.state.spoken else { return }
@@ -402,6 +418,8 @@ final class AppModel: ObservableObject {
         scenesShown = 0
         lastError = nil
         liveSteps = []
+        requestActive = true
+        presentingAnswer = false
         backgroundWork = false
         requestFinished = false
         ComputerControl.shared.beginTask()
@@ -512,9 +530,8 @@ final class AppModel: ObservableObject {
             switch step.phase {
             case "start":
                 liveSteps.append(step)
-                // Shell, file and web work shows the thinking dots by the
-                // cursor and, quietly, what's running (a command as typed).
-                backgroundWork = step.kind != "computer" && step.kind != "app"
+                // What's running shows quietly by the thinking dots (a
+                // command as typed) and stays until the next step replaces it.
                 overlay.state.activityIcon = AgentStep.icon(for: step.kind)
                 overlay.state.activityIsCommand = step.kind == "shell" && step.summary.hasPrefix("Ran ")
                 overlay.state.activity = overlay.state.activityIsCommand ? String(step.summary.dropFirst(4)) : step.summary
@@ -526,13 +543,8 @@ final class AppModel: ObservableObject {
                 } else {
                     liveSteps.append(step)
                 }
-                overlay.state.activity = nil
-                overlay.state.activityIcon = nil
-                // Done: the buddy comes back to talk (unless the next step starts).
-                if !liveSteps.contains(where: { $0.phase == "start" && ["shell", "file", "web", "memory", "messages", "agent"].contains($0.kind) }) {
-                    backgroundWork = false
-                }
             }
+            refreshWorking()
         case .helper(let e):
             handle(helper: e)
         case .done(let text):
@@ -541,6 +553,7 @@ final class AppModel: ObservableObject {
         case .error(let kind, let message):
             if kind != "cancelled" { showError(message) }
         case .finished:
+            requestActive = false
             backgroundWork = false
             overlay.state.activity = nil
             overlay.state.activityIcon = nil
@@ -685,7 +698,11 @@ final class AppModel: ObservableObject {
         if let id = activeRequest { core.cancel(id) }
         ComputerControl.endAll()
         overlay.state.activity = nil
+        overlay.state.activityIcon = nil
         activeRequest = nil
+        requestActive = false
+        speakingNow = false
+        backgroundWork = false
         speaker.stop()
         voice.cancel()
         overlay.clearPoints()
@@ -774,6 +791,19 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(for: .seconds(text.count > 40 ? 4 : 2))
             if self?.overlay.state.notice == text { self?.overlay.state.notice = nil }
         }
+    }
+
+    /// While a task is under way the buddy stays the thinking dots, the
+    /// work going on in the background; it turns back into the arrow only to
+    /// talk or to use the pointer.
+    private func refreshWorking() {
+        // Steps that click or type on screen (app_control mostly works unseen).
+        let pointer = liveSteps.contains {
+            $0.phase == "start" && ($0.kind == "computer"
+                || ($0.kind == "app" && ($0.summary.hasPrefix("Pressed") || $0.summary.hasPrefix("Filled"))))
+        }
+        let working = requestActive && !presentingAnswer && !speakingNow && !pointer
+        if backgroundWork != working { backgroundWork = working }
     }
 
     private func setPhase(_ p: Phase) {

@@ -158,7 +158,17 @@ until you turn it on. Tools, all run by the app on your Mac:
   shows what the task is doing with a stop button, and when it's done you
   hear a sound, its report lands in the chat and is read aloud, and the
   main agent is told on your next message. Up to three run at once.
-- **web_search** on the models that support it.
+- **web_search** and **web_fetch** (reads a page in full) on the models
+  that support them.
+- **plan** (ours): a checklist Claude keeps for tasks with several steps;
+  the step in progress shows by the buddy ("Step 2 of 4: …").
+
+The system prompt asks it to work like an engineer in a terminal: do the work
+in the background with the shell, files, app_control and the web, use the
+pointer only for what has no other way, plan bigger tasks, look before
+changing things and check each change, and make independent calls in one
+turn. A request may take up to 300 rounds (helpers 150), and a shell command
+up to 5 minutes.
 
 By default the agent works like a person sitting at your Mac (Settings ›
 Working on your Mac › It works). It moves your real pointer on a slightly
@@ -180,13 +190,17 @@ the first movement of your own hand brings your arrow straight back, as does
 themselves as it moves (video players) are countered by hiding it again on
 each move; every hide is counted and undone.
 
-Shell, file and web steps don't hide the buddy: while one runs, it turns
-into the thinking dots and a small capsule beside it shows what's running,
-a shell command as typed in monospace with a pulsing terminal icon (a
-document or globe for file and web work). The notch shows the same: the
+While a task is under way the buddy stays the thinking dots for all of it,
+the work going on in the background, and turns back into the arrow only to
+talk or to click and type on screen (computer steps, app_control presses and
+fields). A small capsule beside the dots shows the latest step, a shell
+command as typed in monospace with a pulsing terminal icon (a document,
+globe or checklist for file, web and plan steps); it stays until the next
+step replaces it. A change has to last a moment (0.25 s to the dots, 0.45 s
+back to the arrow) before the buddy follows it, so quick steps and pauses
+between sentences never make it flicker. The notch shows the same: the
 step's icon pulsing on the left, the dots on the right, and the command in
-its header when open. When the step ends the buddy is back for the answer
-and its caption.
+its header when open.
 
 In background mode the agent has its own pointer: the buddy flies to where it clicks (with
 motion blur when it moves fast and a ring when it clicks), and the click

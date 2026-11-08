@@ -485,6 +485,9 @@ struct OverlayView: View {
                             .hugWidth(260)
                     }
                 }
+            } else if state.backgroundWork && state.spoken == nil && state.mode == .answering {
+                // Working in the background: the dots say it all.
+                EmptyView()
             } else {
                 switch state.mode {
                 case .idle:
@@ -578,14 +581,21 @@ struct BuddyMorph: View {
         .onChange(of: thinking) { _, now in
             turn += 1
             let mine = turn
-            if now {
-                withAnimation(.easeIn(duration: 0.17)) { phase = .orb }
-            } else if phase != .arrow {
-                // Let the dots pull together first, then unfold the arrow.
-                phase = .gathering
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
-                    guard turn == mine else { return }
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.62)) { phase = .arrow }
+            // A change has to last a moment before the buddy follows it, so
+            // quick back-and-forth (a step ending as the next one starts, a
+            // pause between spoken sentences) never makes it flicker.
+            DispatchQueue.main.asyncAfter(deadline: .now() + (now ? 0.25 : 0.45)) {
+                guard turn == mine else { return }
+                if now {
+                    guard phase != .orb else { return }
+                    withAnimation(.easeIn(duration: 0.17)) { phase = .orb }
+                } else if phase != .arrow {
+                    // Let the dots pull together first, then unfold the arrow.
+                    phase = .gathering
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+                        guard turn == mine else { return }
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.62)) { phase = .arrow }
+                    }
                 }
             }
         }
