@@ -35,6 +35,15 @@ final class OverlayState: ObservableObject {
     @Published var flipped = false
     /// The buddy is drawing: its tip carries a dot of this ink.
     @Published var penInk: Color?
+    /// 0 by the cursor, 1 inside the notch: the buddy shrinks and fades as
+    /// it flies in, and grows back as it comes out.
+    @Published var dock: CGFloat = 0
+    /// The buddy has landed in the notch (the notch's dots take a gulp).
+    @Published var docked = false
+    /// Bumped when a task finishes well (a check in the notch) or fails (the
+    /// bubble shakes).
+    @Published var doneBump = 0
+    @Published var errorBump = 0
 }
 
 /// A click-through panel that follows the mouse and flies to points the
@@ -68,6 +77,8 @@ final class OverlayController: NSObject {
         var to: CGPoint
         var start: CFTimeInterval
         var duration: CFTimeInterval
+        /// Into the notch (true), out of it (false), or neither.
+        var docking: Bool?
     }
 
     private var enabled = false
@@ -283,7 +294,15 @@ final class OverlayController: NSObject {
             let to = onCursor ? NSEvent.mouseLocation : f.to
             let t = min(1, (now - f.start) / f.duration)
             anchor = onCursor ? lerp(f.from, to, ease(t)) : arc(from: f.from, to: to, t: ease(t))
-            if t >= 1 { flight = nil }
+            switch f.docking {
+            case true?: setDock(smooth((t - 0.35) / 0.65))
+            case false?: setDock(1 - smooth(t / 0.55))
+            case nil: break
+            }
+            if t >= 1 {
+                flight = nil
+                if f.docking == true, parkedAt != nil, !state.docked { state.docked = true }
+            }
         } else if onCursor {
             anchor = NSEvent.mouseLocation
         } else if now >= holdUntil, !targets.isEmpty {
@@ -300,7 +319,9 @@ final class OverlayController: NSObject {
             // Stay where the agent left its pointer.
         } else if let spot = parkedAt, !isPointing {
             anchor = spot
+            setDock(1)
         } else if !isPointing {
+            if parkedAt == nil, state.dock != 0 { setDock(0) }
             let p = followPoint()
             followX.step(to: p.x, dt: dt, omega: 38)
             followY.step(to: p.y, dt: dt, omega: 38)
@@ -356,14 +377,28 @@ final class OverlayController: NSObject {
         wake()
         guard !onCursor, !agentDriving, pen == nil else { return }
         if let spot {
-            fly(to: spot, duration: 0.55)
+            fly(to: spot, duration: 0.6)
+            flight?.docking = true
         } else if let from {
             // Out of the notch, where it was resting (asleep, it may have
             // been put back by the cursor meanwhile).
             anchor = from
             lastAnchor = from
-            fly(to: followPoint(), duration: 0.45)
+            fly(to: followPoint(), duration: 0.5)
+            flight?.docking = false
+            if state.docked { state.docked = false }
         }
+    }
+
+    /// Publishes how far into the notch the buddy is, in small steps.
+    private func setDock(_ v: CGFloat) {
+        let q = (min(max(v, 0), 1) * 40).rounded() / 40
+        if state.dock != q { state.dock = q }
+    }
+
+    private func smooth(_ x: Double) -> CGFloat {
+        let t = min(max(x, 0), 1)
+        return CGFloat(t * t * (3 - 2 * t))
     }
 
     private func fly(to target: CGPoint, duration: CFTimeInterval) {
@@ -463,6 +498,8 @@ struct OverlayView: View {
         .padding(8)
         .frame(width: OverlayController.content.width, height: OverlayController.content.height,
                alignment: state.flipped ? .topTrailing : .topLeading)
+        .scaleEffect(1 - 0.7 * state.dock, anchor: state.flipped ? .topTrailing : .topLeading)
+        .opacity(1 - 0.75 * state.dock)
         .padding(OverlayController.margin)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: state.mode)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: state.pointLabel)
@@ -505,10 +542,17 @@ struct OverlayView: View {
                                 .symbolEffect(.pulse, options: .repeating)
                                 .contentTransition(.symbolEffect(.replace))
                         }
-                        ShimmerText(text: activity, command: state.activityIsCommand)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .hugWidth(260)
+                        // Each new step slides up in place of the last one.
+                        ZStack(alignment: .leading) {
+                            ShimmerText(text: activity, command: state.activityIsCommand)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .id(activity)
+                                .transition(.asymmetric(insertion: .push(from: .bottom), removal: .push(from: .bottom))
+                                    .combined(with: .opacity))
+                        }
+                        .clipped()
+                        .hugWidth(260)
                     }
                 }
             } else if state.backgroundWork && state.spoken == nil && state.mode == .answering {
@@ -558,6 +602,20 @@ struct OverlayView: View {
             }
         }
         .padding(.top, 12)
+        // Something went wrong: a quick shake, like a "no".
+        .keyframeAnimator(initialValue: CGFloat(0), trigger: state.errorBump) { view, x in
+            view.offset(x: x)
+        } keyframes: { _ in
+            KeyframeTrack {
+                CubicKeyframe(-7, duration: 0.06)
+                CubicKeyframe(6, duration: 0.08)
+                CubicKeyframe(-4, duration: 0.08)
+                CubicKeyframe(2, duration: 0.07)
+                CubicKeyframe(0, duration: 0.08)
+            }
+        }
+        // On its way into the notch the words go first.
+        .opacity(max(0, 1 - 2.5 * state.dock))
         .transition(.scale(scale: 0.85, anchor: state.flipped ? .topTrailing : .topLeading).combined(with: .opacity))
     }
 

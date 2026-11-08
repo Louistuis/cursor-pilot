@@ -568,7 +568,10 @@ final class AppModel: ObservableObject {
             overlay.state.activityIcon = nil
             if !speaker.isSpeaking { releaseVisuals(upTo: .max) }
             ComputerControl.endAll()
-            if lastError == nil, !liveSteps.isEmpty { Sounds.play(.done) }
+            if lastError == nil, !liveSteps.isEmpty {
+                Sounds.play(.done)
+                overlay.state.doneBump += 1
+            }
             requestFinished = true
             activeRequest = nil
             keepBoard()
@@ -869,6 +872,7 @@ final class AppModel: ObservableObject {
 
     private func showError(_ message: String) {
         Sounds.play(.error)
+        overlay.state.errorBump += 1
         lastError = message
         phase = .answering
         requestFinished = true

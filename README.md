@@ -203,6 +203,13 @@ notch turned off, the buddy stays by the cursor as the thinking dots, with a
 capsule beside it showing the latest step. A background agent at work also
 lights the notch.
 
+Every change of state is animated so it reads at a glance: the buddy shrinks
+and fades as it flies into the notch (its words go first) and the notch's
+dots take a gulp as it lands, then it grows back out on the way down; each
+new step slides up in place of the last one, by the buddy and in the notch's
+header, and step icons morph into each other; a finished task pops a green
+check into the notch's left wing; an error shakes the bubble like a "no".
+
 The agent you talk to stays free: anything that takes more than a few quick
 steps (research, building or fixing something, going through many files or
 pages) goes to a background agent right away, and it answers in a line, so

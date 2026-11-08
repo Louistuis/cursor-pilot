@@ -224,8 +224,9 @@ struct NotchRootView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var state: NotchState
     @ObservedObject var buddy: OverlayState
+    @State private var doneFlash = false
 
-    private var isActive: Bool { model.phase != .idle || model.hasRunningJobs }
+    private var isActive: Bool { model.phase != .idle || model.hasRunningJobs || doneFlash }
     /// Work going on in the background: this task's or a background agent's.
     private var working: Bool { buddy.backgroundWork || model.hasRunningJobs }
 
@@ -262,11 +263,19 @@ struct NotchRootView: View {
 
     private var wings: some View {
         HStack {
-            if working {
+            if doneFlash {
+                // Finished: a green check pops in for a moment.
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white, Color(red: 0.3, green: 0.85, blue: 0.5))
+                    .symbolEffect(.bounce, value: doneFlash)
+                    .transition(.scale(scale: 0.3).combined(with: .opacity))
+            } else if working {
                 Image(systemName: buddy.backgroundWork ? buddy.activityIcon ?? "terminal" : "square.stack.3d.up.fill")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.85))
                     .symbolEffect(.pulse, isActive: true)
+                    .contentTransition(.symbolEffect(.replace))
                     .transition(.scale.combined(with: .opacity))
             } else {
                 PilotArrow(flipped: false).scaleEffect(0.8)
@@ -274,10 +283,28 @@ struct NotchRootView: View {
             }
             Spacer()
             PhaseIndicator(phase: model.phase, level: buddy.level, working: working)
+                // The buddy landing in (or leaving) the dots: they take a gulp.
+                .keyframeAnimator(initialValue: CGFloat(1), trigger: buddy.docked) { view, k in
+                    view.scaleEffect(k)
+                } keyframes: { _ in
+                    KeyframeTrack {
+                        SpringKeyframe(1.35, duration: 0.16, spring: .snappy)
+                        SpringKeyframe(1, duration: 0.45, spring: .bouncy)
+                    }
+                }
         }
         .padding(.horizontal, 18)
         .frame(height: state.notchSize.height)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: working)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: buddy.activityIcon)
+        .animation(.spring(response: 0.35, dampingFraction: 0.6), value: doneFlash)
+        .onChange(of: buddy.doneBump) { _, _ in
+            doneFlash = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.8))
+                doneFlash = false
+            }
+        }
     }
 }
 
@@ -341,11 +368,18 @@ private struct NotchExpandedView: View {
                     Image(systemName: buddy.activityIcon ?? "terminal")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.6))
-                    ShimmerText(text: activity, command: buddy.activityIsCommand)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .hugWidth(220)
+                        .contentTransition(.symbolEffect(.replace))
+                    ZStack(alignment: .leading) {
+                        ShimmerText(text: activity, command: buddy.activityIsCommand)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .id(activity)
+                            .transition(.push(from: .bottom).combined(with: .opacity))
+                    }
+                    .clipped()
+                    .hugWidth(220)
                 }
+                .animation(.spring(response: 0.32, dampingFraction: 0.82), value: activity)
                 .transition(.opacity)
             } else {
                 Text(statusText).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.7))
