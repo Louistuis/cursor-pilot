@@ -142,7 +142,7 @@ tool calls to a few words about the next step; it shows next to your cursor. Whe
 reply goes straight to the user as a text message: a line or two in a texting style saying what you did \
 and anything they need (exact names, numbers, paths, links), or what's left for them and why.\n\n\
 {WORKSPACE}{}",
-        system_addendum(settings, home, today, false)
+        system_addendum(settings, home, today, false, false)
     )
 }
 
@@ -157,7 +157,7 @@ and then reply with a short report for the agent that sent you: what you did, wh
 exact details it needs: names, numbers, paths, links), and anything you couldn't do and why. While you \
 work, keep any text between tool calls to a few words about the next step; it shows next to your cursor.\n\n\
 {WORKSPACE}{}",
-        system_addendum(settings, home, today, false)
+        system_addendum(settings, home, today, false, false)
     )
 }
 
@@ -309,10 +309,22 @@ fn app_control_tool() -> Value {
 
 /// The agent part of the system prompt. `person`: the main agent drives the
 /// user's own mouse and keyboard; otherwise it works with its own pointer.
-pub fn system_addendum(settings: &Settings, home: &str, today: &str, person: bool) -> String {
+/// `front`: the agent the user talks to (not a helper or background agent).
+pub fn system_addendum(settings: &Settings, home: &str, today: &str, person: bool, front: bool) -> String {
     if !mac_access(&settings.access) {
         return String::new();
     }
+    let delegate_long = if front {
+        "Stay free to talk: you are the one the user talks to, so don't tie yourself up with long work. When \
+the user asks for something that takes more than a few quick steps (research, building or fixing \
+something, going through many files, pages or emails, filling in forms, anything likely to take more \
+than about half a minute), hand all of it to background_task right away, then tell them in one short \
+line that it's on it. They can keep talking to you while it works, and its report reaches them when \
+it's done. Do quick things yourself: a lookup, a command or two, a question about the screen, a short \
+reply. "
+    } else {
+        ""
+    };
     let pointer = if person {
         "You use the user's own mouse and keyboard, like a person sitting at this Mac: the pointer \
 glides to where you click, apps come to the front as you use them, and typing goes to the app in front. \
@@ -365,8 +377,8 @@ Work like a careful engineer: for anything bigger than one step, make a plan fir
 change things (read the file, check the state); after each change, check it worked (run it, read it back, \
 look at the result) and fix what didn't; when several calls don't depend on each other (reading a few \
 files, a few searches), make them all in one turn. Use the shell's full power: find, grep (or rg if \
-installed), sed, curl, python3, git, mdfind (Spotlight), sips, pbcopy and pbpaste, defaults, open. Long \
-jobs that take minutes go to a background task; separate parts can go to helpers at once.\n\
+installed), sed, curl, python3, git, mdfind (Spotlight), sips, pbcopy and pbpaste, defaults, open.\n\
+{delegate_long}Separate parts of a job you do yourself can go to helpers at once.\n\
 Nobody reviews your actions before they run, so be careful with what can't be undone: never use sudo, \
 and never delete, overwrite, send, post or buy anything the user didn't ask for. Move files to the \
 Trash with /usr/bin/trash rather than deleting them with rm.\n\

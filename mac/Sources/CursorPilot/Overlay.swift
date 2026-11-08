@@ -87,6 +87,9 @@ final class OverlayController: NSObject {
     /// The agent is moving the real pointer and the system cursor is
     /// hidden: the buddy's tip sits exactly on the pointer, standing in for it.
     private(set) var onCursor = false
+    /// Where the buddy waits in the notch while the work goes on in the
+    /// background (Cocoa coordinates), or nil when it's by the cursor.
+    private var parkedAt: CGPoint?
     private var lastAnchor = CGPoint.zero
     private var velocity = CGVector.zero
 
@@ -295,13 +298,15 @@ final class OverlayController: NSObject {
             if !agentDriving { fly(to: followPoint(), duration: 0.35) }
         } else if agentDriving {
             // Stay where the agent left its pointer.
+        } else if let spot = parkedAt, !isPointing {
+            anchor = spot
         } else if !isPointing {
             let p = followPoint()
             followX.step(to: p.x, dt: dt, omega: 38)
             followY.step(to: p.y, dt: dt, omega: 38)
             anchor = CGPoint(x: followX.x, y: followY.x)
         }
-        if flight != nil || pen != nil || isPointing || agentDriving || onCursor {
+        if flight != nil || pen != nil || isPointing || agentDriving || onCursor || parkedAt != nil {
             followX = Spring(anchor.x)
             followY = Spring(anchor.y)
         }
@@ -310,9 +315,11 @@ final class OverlayController: NSObject {
         let busy = state.mode != .idle || state.backgroundWork || state.notice != nil || isPointing || flight != nil || pen != nil
             || !targets.isEmpty || agentDriving || onCursor
         if busy { lastActive = now }
-        let visible = !autoHide || now - lastActive < Self.idleHide
-        // Quick to appear, slow to leave.
-        let rate: CGFloat = visible ? 14 : 3.5
+        // Landed in the notch: it melts into the dots there.
+        let inNotch = parkedAt != nil && flight == nil && !isPointing && pen == nil && !onCursor
+        let visible = !inNotch && (!autoHide || now - lastActive < Self.idleHide)
+        // Quick to appear, slow to leave (but quick to sink into the notch).
+        let rate: CGFloat = visible ? 14 : inNotch ? 9 : 3.5
         alpha += ((visible ? 1 : 0) - alpha) * min(1, rate * dt)
         panel.alphaValue = alpha
         if !visible, alpha < 0.01 {
@@ -337,6 +344,25 @@ final class OverlayController: NSObject {
             if shown != .zero { state.motion = .zero }
         } else if hypot(view.dx - shown.dx, view.dy - shown.dy) > 45 {
             state.motion = view
+        }
+    }
+
+    /// Sends the buddy up into the notch (a point there) or, with nil, back
+    /// down to the cursor, along a curved flight either way.
+    func park(at spot: CGPoint?) {
+        guard spot != parkedAt else { return }
+        let from = parkedAt
+        parkedAt = spot
+        wake()
+        guard !onCursor, !agentDriving, pen == nil else { return }
+        if let spot {
+            fly(to: spot, duration: 0.55)
+        } else if let from {
+            // Out of the notch, where it was resting (asleep, it may have
+            // been put back by the cursor meanwhile).
+            anchor = from
+            lastAnchor = from
+            fly(to: followPoint(), duration: 0.45)
         }
     }
 

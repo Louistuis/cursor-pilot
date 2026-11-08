@@ -190,17 +190,23 @@ the first movement of your own hand brings your arrow straight back, as does
 themselves as it moves (video players) are countered by hiding it again on
 each move; every hide is counted and undone.
 
-While a task is under way the buddy stays the thinking dots for all of it,
-the work going on in the background, and turns back into the arrow only to
-talk or to click and type on screen (computer steps, app_control presses and
-fields). A small capsule beside the dots shows the latest step, a shell
-command as typed in monospace with a pulsing terminal icon (a document,
-globe or checklist for file, web and plan steps); it stays until the next
-step replaces it. A change has to last a moment (0.25 s to the dots, 0.45 s
-back to the arrow) before the buddy follows it, so quick steps and pauses
-between sentences never make it flicker. The notch shows the same: the
-step's icon pulsing on the left, the dots on the right, and the command in
-its header when open.
+While a task works in the background (shell, files, web, app_control
+reading), the buddy flies up into the notch and melts into the notch's
+thinking dots, and the notch lights up: the buddy's colours turn slowly
+around its edge with a glow spilling out, the step's icon pulses in the left
+wing and the command shows in its header when open. The screen frame is off
+meanwhile. The buddy flies back down to the cursor to talk, or to click and
+type on screen (computer steps, app_control presses and fields). Each change
+has to last a moment (0.35 s up, 0.2 s down, and 0.25/0.45 s for the dots)
+so quick steps and pauses between sentences never make it bounce. With the
+notch turned off, the buddy stays by the cursor as the thinking dots, with a
+capsule beside it showing the latest step. A background agent at work also
+lights the notch.
+
+The agent you talk to stays free: anything that takes more than a few quick
+steps (research, building or fixing something, going through many files or
+pages) goes to a background agent right away, and it answers in a line, so
+you can keep talking to it while the work goes on.
 
 In background mode the agent has its own pointer: the buddy flies to where it clicks (with
 motion blur when it moves fast and a ring when it clicks), and the click
@@ -436,7 +442,10 @@ Done:
   every display while Cursor Pilot listens, thinks and answers, and softly
   while you draw (Settings › On screen to turn it off). It is bright for the
   first 3 seconds of an exchange, then eases down to about 40% and stays
-  calm; talking again brings it back up.
+  calm; talking again brings it back up. The frame is for when it looks at or uses the screen
+  (hearing you, thinking about a screen question, clicking and typing): it
+  goes off while the work is in the background, and a task that never
+  touched the screen answers without it.
 - **Feel pass**: hold ⌃⌥ alone to talk (no extra permission); the buddy
   follows the cursor on the display's refresh and fades away when idle;
   Home is a native sidebar app (chats by date with search, rename, delete

@@ -97,9 +97,19 @@ final class NotchController {
     /// screen glow can bend around it; nil while the panel is hidden.
     var island: (screen: NSScreen, rect: CGRect, radius: CGFloat)? {
         guard timer != nil, let screen else { return nil }
-        let size = state.shapeSize(active: model.phase != .idle)
+        let size = state.shapeSize(active: model.phase != .idle || model.hasRunningJobs)
         return (screen, CGRect(x: (screen.frame.width - size.width) / 2, y: 0, width: size.width, height: size.height),
                 state.bottomRadius)
+    }
+
+    /// Where the buddy's tip goes so its thinking dots land on the notch's
+    /// own dots, in the right wing (Cocoa coordinates).
+    var parkingSpot: CGPoint? {
+        guard timer != nil, let screen else { return nil }
+        let dots = CGPoint(x: screen.frame.midX + state.notchSize.width / 2 + NotchState.wing - 18 - 28,
+                           y: screen.frame.maxY - state.notchSize.height / 2)
+        // The buddy's dots sit 10 pt right of and 11.5 pt below its tip.
+        return CGPoint(x: dots.x - 10, y: dots.y + 11.5)
     }
 
     /// The built-in display if it has a notch, otherwise the main display.
@@ -215,14 +225,24 @@ struct NotchRootView: View {
     @ObservedObject var state: NotchState
     @ObservedObject var buddy: OverlayState
 
-    private var isActive: Bool { model.phase != .idle }
+    private var isActive: Bool { model.phase != .idle || model.hasRunningJobs }
+    /// Work going on in the background: this task's or a background agent's.
+    private var working: Bool { buddy.backgroundWork || model.hasRunningJobs }
 
     var body: some View {
         let size = state.shapeSize(active: isActive)
         ZStack(alignment: .top) {
+            if working {
+                NotchGlow(bottomRadius: state.bottomRadius)
+                    .transition(.opacity)
+            }
             NotchShape(bottomRadius: state.bottomRadius)
                 .fill(.black)
                 .shadow(color: .black.opacity(state.expanded ? 0.35 : 0), radius: 16, y: 6)
+            if working {
+                NotchGlow(bottomRadius: state.bottomRadius, rim: true)
+                    .transition(.opacity)
+            }
             if state.expanded {
                 NotchExpandedView(model: model, state: state, buddy: buddy)
                     .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
@@ -236,13 +256,14 @@ struct NotchRootView: View {
         .frame(width: state.expandedSize.width, height: state.expandedSize.height, alignment: .top)
         .animation(.spring(response: 0.38, dampingFraction: 0.82), value: state.expanded)
         .animation(.spring(response: 0.38, dampingFraction: 0.82), value: isActive)
+        .animation(.easeInOut(duration: 0.5), value: working)
         .environment(\.colorScheme, .dark)
     }
 
     private var wings: some View {
         HStack {
-            if buddy.backgroundWork {
-                Image(systemName: buddy.activityIcon ?? "terminal")
+            if working {
+                Image(systemName: buddy.backgroundWork ? buddy.activityIcon ?? "terminal" : "square.stack.3d.up.fill")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.85))
                     .symbolEffect(.pulse, isActive: true)
@@ -252,11 +273,11 @@ struct NotchRootView: View {
                     .transition(.scale.combined(with: .opacity))
             }
             Spacer()
-            PhaseIndicator(phase: model.phase, level: buddy.level, working: buddy.backgroundWork)
+            PhaseIndicator(phase: model.phase, level: buddy.level, working: working)
         }
         .padding(.horizontal, 18)
         .frame(height: state.notchSize.height)
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: buddy.backgroundWork)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: working)
     }
 }
 
@@ -468,4 +489,47 @@ private struct NotchTypingDots: View {
             .background(.white.opacity(0.12), in: Capsule())
         }
     }
+}
+
+/// The notch lit up while work goes on in the background: the buddy's
+/// colours turning slowly around its edge, with a glow spilling out. `rim`
+/// is the crisp line drawn over the black body; otherwise the halo under it.
+struct NotchGlow: View {
+    var bottomRadius: CGFloat
+    var rim = false
+    @AppStorage("buddyTint") private var tint = BuddyTint.rainbow
+
+    var body: some View {
+        let colors = tint.colors + [tint.colors[0]]
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            let ring = AngularGradient(colors: colors, center: .center, angle: .degrees(t * 70))
+            let breath = 0.8 + 0.2 * sin(t * 2.2)
+            Group {
+                if rim {
+                    NotchShape(bottomRadius: bottomRadius).inset(by: 0.75).stroke(ring, lineWidth: 1.5)
+                } else {
+                    ZStack {
+                        NotchShape(bottomRadius: bottomRadius).stroke(ring, lineWidth: 16).blur(radius: 14)
+                            .opacity(breath)
+                        NotchShape(bottomRadius: bottomRadius).stroke(ring, lineWidth: 5).blur(radius: 3)
+                    }
+                }
+            }
+            // Not along the top edge, which runs under the menu bar.
+            .mask(Rectangle().padding(.top, 5).padding(.horizontal, -40).padding(.bottom, -40))
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+extension NotchShape: InsettableShape {
+    func inset(by amount: CGFloat) -> some InsettableShape { InsetNotch(base: self, amount: amount) }
+}
+
+struct InsetNotch: InsettableShape {
+    var base: NotchShape
+    var amount: CGFloat
+    func path(in rect: CGRect) -> Path { base.path(in: rect.insetBy(dx: amount, dy: amount)) }
+    func inset(by more: CGFloat) -> InsetNotch { InsetNotch(base: base, amount: amount + more) }
 }

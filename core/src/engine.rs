@@ -332,6 +332,7 @@ impl Engine {
                 &self.home.display().to_string(),
                 &agent::date_string(now()),
                 settings.input != "background",
+                true,
             )
         );
         let (conversation_id, history) = {

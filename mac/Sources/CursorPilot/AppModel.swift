@@ -29,6 +29,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveSteps: [AgentStep] = []
     /// Tasks running in the background, and ones that just finished.
     @Published private(set) var jobs: [BackgroundJob] = []
+    var hasRunningJobs: Bool { jobs.contains { $0.state == "running" } }
     /// Whiteboards Claude drew, to open again from the chat.
     @Published private(set) var boards: [BoardRecord] = BoardStore.load()
     /// The board being drawn in this reply.
@@ -88,13 +89,21 @@ final class AppModel: ObservableObject {
     @Published var speechRate: Double { didSet { defaults.set(speechRate, forKey: "speechRate"); applyVoice() } }
     /// The agent is running commands or editing files rather than using the
     /// screen: the buddy hides and the menu bar and notch show a terminal.
-    @Published var backgroundWork = false { didSet { overlay.state.backgroundWork = backgroundWork } }
+    @Published var backgroundWork = false {
+        didSet {
+            overlay.state.backgroundWork = backgroundWork
+            if backgroundWork != oldValue { parkBuddy() }
+        }
+    }
     /// A request is under way (from sending it until it finishes).
     private var requestActive = false
     /// A sentence is being read aloud right now.
     private var speakingNow = false
     /// The answer is being read: the task's work is over.
     private var presentingAnswer = false
+    /// This task looked at or used the screen (screenshots, clicks, typing).
+    private var usedScreen = false
+    private var parkTask: Task<Void, Never>?
     /// Whether Cursor Pilot may work on the Mac by itself (consented in onboarding or Settings).
     @Published var macAccess: Bool { didSet { defaults.set(macAccess ? "on" : "off", forKey: "accessLevel"); configureCore() } }
     /// "person": it uses your own mouse and keyboard. "background": its own pointer.
@@ -420,6 +429,7 @@ final class AppModel: ObservableObject {
         liveSteps = []
         requestActive = true
         presentingAnswer = false
+        usedScreen = false
         backgroundWork = false
         requestFinished = false
         ComputerControl.shared.beginTask()
@@ -535,8 +545,7 @@ final class AppModel: ObservableObject {
                 overlay.state.activityIcon = AgentStep.icon(for: step.kind)
                 overlay.state.activityIsCommand = step.kind == "shell" && step.summary.hasPrefix("Ran ")
                 overlay.state.activity = overlay.state.activityIsCommand ? String(step.summary.dropFirst(4)) : step.summary
-                // A task at work glows calmly instead of pulsing for minutes.
-                if glow.mode == .thinking { glow.mode = .answering }
+                if step.kind == "computer" || (step.kind == "app" && Self.isOnScreen(step)) { usedScreen = true }
             default:
                 if let i = liveSteps.lastIndex(where: { $0.phase == "start" && ($0.callID.isEmpty ? $0.summary == step.summary : $0.callID == step.callID) }) {
                     liveSteps[i] = step
@@ -797,13 +806,30 @@ final class AppModel: ObservableObject {
     /// work going on in the background; it turns back into the arrow only to
     /// talk or to use the pointer.
     private func refreshWorking() {
-        // Steps that click or type on screen (app_control mostly works unseen).
-        let pointer = liveSteps.contains {
-            $0.phase == "start" && ($0.kind == "computer"
-                || ($0.kind == "app" && ($0.summary.hasPrefix("Pressed") || $0.summary.hasPrefix("Filled"))))
-        }
+        let pointer = liveSteps.contains { $0.phase == "start" && ($0.kind == "computer" || ($0.kind == "app" && Self.isOnScreen($0))) }
         let working = requestActive && !presentingAnswer && !speakingNow && !pointer
-        if backgroundWork != working { backgroundWork = working }
+        if backgroundWork != working {
+            backgroundWork = working
+            refreshGlow()
+        }
+    }
+
+    /// app_control mostly works unseen; pressing and filling in click and type on screen.
+    private static func isOnScreen(_ step: AgentStep) -> Bool {
+        step.summary.hasPrefix("Pressed") || step.summary.hasPrefix("Filled")
+    }
+
+    /// While the work goes on in the background the buddy flies up into the
+    /// notch, which lights up; it comes back down to talk or click. A change
+    /// has to last a moment first, so it never bounces.
+    private func parkBuddy() {
+        parkTask?.cancel()
+        let up = backgroundWork && showNotch
+        parkTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(up ? 0.35 : 0.2))
+            guard !Task.isCancelled, let self else { return }
+            overlay.park(at: up ? notch?.parkingSpot : nil)
+        }
     }
 
     private func setPhase(_ p: Phase) {
@@ -828,11 +854,15 @@ final class AppModel: ObservableObject {
 
     /// The screen frame follows the phase; between questions it glows softly
     /// while you draw.
+    /// The frame is for when Cursor Pilot looks at or uses the screen:
+    /// hearing you, thinking about what's on it, clicking and typing. Work in
+    /// the background lights the notch instead.
     private func refreshGlow(sketching: Bool? = nil) {
+        let offScreen = backgroundWork || (!liveSteps.isEmpty && !usedScreen)
         switch phase {
         case .listening: glow.mode = .listening
-        case .thinking: glow.mode = .thinking
-        case .answering: glow.mode = lastError == nil ? .answering : .off
+        case .thinking: glow.mode = offScreen ? .off : liveSteps.isEmpty ? .thinking : .answering
+        case .answering: glow.mode = lastError == nil && !offScreen ? .answering : .off
         case .idle: glow.mode = (sketching ?? ink.state.sketching) ? .sketching : .off
         }
     }
