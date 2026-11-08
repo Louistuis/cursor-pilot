@@ -43,6 +43,9 @@ final class LiveVoice {
     private let player = AVAudioPlayerNode()
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000, channels: 1, interleaved: false)!
     private var audioRunning = false
+    private var lastAudioError: String?
+    private var steps: [String] = []
+    private var configObserver: NSObjectProtocol?
 
     /// A reply is being generated; further replies wait for it.
     private var responseActive = false
@@ -59,6 +62,32 @@ final class LiveVoice {
     /// The server already said what went wrong; the closed socket after it
     /// needs no second message.
     private var reportedError = false
+    /// For diagnostics: the mic's format and how much audio came and went.
+    func diagnostics() -> [String: Any] {
+        let f = engine.inputNode.outputFormat(forBus: 0)
+        var d = gate.stats
+        d["inputRate"] = f.sampleRate
+        d["inputChannels"] = f.channelCount
+        d["inputCommon"] = f.commonFormat.rawValue
+        d["voiceProcessing"] = engine.inputNode.isVoiceProcessingEnabled
+        d["audioRunning"] = audioRunning
+        d["engineRunning"] = engine.isRunning
+        d["error"] = lastAudioError ?? ""
+        d["steps"] = steps
+        return d
+    }
+
+    /// For diagnostics: holds the talk key for `seconds` without a connection.
+    func micCheck(seconds: Double) async -> [String: Any] {
+        // After the app's own start-up (which closes the live voice until the key is read).
+        try? await Task.sleep(for: .seconds(2))
+        startAudio()
+        gate.open = true
+        try? await Task.sleep(for: .seconds(seconds))
+        gate.open = false
+        return diagnostics()
+    }
+
     /// For tests: every event type that came in, in order.
     private(set) var log: [String] = []
 
@@ -79,6 +108,7 @@ final class LiveVoice {
 
     /// Closes the connection (a new voice or setting takes effect on the next one).
     func disconnect() {
+        steps.append("disconnect")
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         gate.task = nil
@@ -367,6 +397,7 @@ final class LiveVoice {
 
     private func startAudio() {
         guard !audioRunning else { return }
+        steps.append("start")
         do {
             try engine.inputNode.setVoiceProcessingEnabled(true)
             engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration =
@@ -374,18 +405,30 @@ final class LiveVoice {
         } catch {
             NSLog("Cursor Pilot: live voice without echo cancellation: \(error.localizedDescription)")
         }
+        steps.append("vp")
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: outFormat)
+        steps.append("player")
+        // With voice processing on, the mic can come as several channels
+        // (seven on a MacBook), the processed voice in the first: that one
+        // is taken as mono, then converted to what OpenAI takes.
         let input = engine.inputNode.outputFormat(forBus: 0)
         guard input.sampleRate > 0, input.channelCount > 0,
+              let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: input.sampleRate, channels: 1, interleaved: false),
               let wire = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000, channels: 1, interleaved: true),
-              let converter = AVAudioConverter(from: input, to: wire) else {
+              let converter = AVAudioConverter(from: mono, to: wire) else {
+            lastAudioError = "no converter for \(input)"
             onEvent?(.error("No microphone for the live voice."))
             return
         }
+        steps.append("converter")
         let gate = gate
         engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: input) { buffer, _ in
-            guard gate.open else { return }
+            gate.noteBuffer(buffer)
+            guard gate.open, let src = buffer.floatChannelData?[0],
+                  let first = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength) else { return }
+            first.frameLength = buffer.frameLength
+            first.floatChannelData![0].update(from: src, count: Int(buffer.frameLength))
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * 24_000 / input.sampleRate) + 32
             guard let out = AVAudioPCMBuffer(pcmFormat: wire, frameCapacity: capacity) else { return }
             var fed = false
@@ -393,20 +436,45 @@ final class LiveVoice {
                 if fed { status.pointee = .noDataNow; return nil }
                 fed = true
                 status.pointee = .haveData
-                return buffer
+                return first
             }
             guard out.frameLength > 0, let samples = out.int16ChannelData?[0] else { return }
             let data = Data(bytes: samples, count: Int(out.frameLength) * 2)
             gate.sendAudio(data.base64EncodedString())
         }
+        steps.append("tap")
         do {
             engine.prepare()
             try engine.start()
+            steps.append("started")
             player.play()
             audioRunning = true
+            watchConfiguration()
         } catch {
             engine.inputNode.removeTap(onBus: 0)
+            lastAudioError = "start: \(error)"
             onEvent?(.error("Couldn't start the live voice's audio: \(error.localizedDescription)"))
+        }
+    }
+
+    /// macOS reconfigures the audio device now and then (turning on echo
+    /// cancellation does it, so do headphones): the engine stops, and is
+    /// started again here so the mic keeps going.
+    private func watchConfiguration() {
+        guard configObserver == nil else { return }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.audioRunning, !self.engine.isRunning else { return }
+                self.steps.append("reconfigured")
+                do {
+                    try self.engine.start()
+                    self.player.play()
+                } catch {
+                    self.lastAudioError = "restart: \(error)"
+                }
+            }
         }
     }
 
@@ -475,6 +543,8 @@ final class LiveVoice {
 private final class AudioGate: @unchecked Sendable {
     private let lock = NSLock()
     private var _open = false
+    /// For diagnostics: mic buffers seen, chunks sent, loudest sample.
+    var buffersIn = 0, chunksSent = 0, peak: Float = 0
     private var _task: URLSessionWebSocketTask?
 
     var open: Bool {
@@ -482,12 +552,26 @@ private final class AudioGate: @unchecked Sendable {
         set { lock.withLock { _open = newValue } }
     }
 
+    func noteBuffer(_ buffer: AVAudioPCMBuffer) {
+        var loud: Float = 0
+        if let d = buffer.floatChannelData?[0] {
+            for i in 0..<Int(buffer.frameLength) { loud = max(loud, abs(d[i])) }
+        }
+        lock.withLock {
+            buffersIn += 1
+            peak = max(peak, loud)
+        }
+    }
+
+    var stats: [String: Any] { lock.withLock { ["buffersIn": buffersIn, "chunksSent": chunksSent, "peak": peak] } }
+
     var task: URLSessionWebSocketTask? {
         get { lock.withLock { _task } }
         set { lock.withLock { _task = newValue } }
     }
 
     func sendAudio(_ base64: String) {
+        lock.withLock { chunksSent += 1 }
         guard let task else { return }
         task.send(.string("{\"type\":\"input_audio_buffer.append\",\"audio\":\"\(base64)\"}")) { _ in }
     }

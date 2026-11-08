@@ -58,6 +58,11 @@ enum TestHooks {
         // `-CPLiveTest out.json`: connects the live voice with the saved OpenAI
         // key, sends typed lines instead of speech, and writes what came back
         // (events, transcripts, tool calls, errors). Plays its voice.
+        if let out = defaults.string(forKey: "CPLiveMicCheck") {
+            let d = await LiveVoice.shared.micCheck(seconds: 3)
+            write(d, to: out)
+            return true
+        }
         if let out = defaults.string(forKey: "CPLiveTest") {
             await liveTest(to: out)
             return true
