@@ -152,7 +152,7 @@ final class LiveVoice {
         // and the cache stays useful), and think briefly (it only talks).
         send(["type": "session.update", "event_id": "optional_truncation", "session": [
             "type": "realtime",
-            "truncation": ["type": "retention_ratio", "retention_ratio": 0.8,
+            "truncation": ["type": "retention_ratio", "retention_ratio": NSDecimalNumber(string: "0.8"),
                            "token_limits": ["post_instructions": 8000]] as [String: Any],
         ] as [String: Any]])
         send(["type": "session.update", "event_id": "optional_reasoning",
@@ -339,6 +339,7 @@ final class LiveVoice {
             let code = error?["code"] as? String ?? ""
             let message = error?["message"] as? String ?? "Live voice error"
             NSLog("Cursor Pilot: live voice error \(code): \(message)")
+            log.append("error \(error?["event_id"] as? String ?? "-") \(code): \(message)")
             // One of the optional settings isn't taken by this model: fine.
             if (error?["event_id"] as? String)?.hasPrefix("optional_") == true { return }
             // Expected now and then: an empty commit (a tap of the key), a cancel with nothing to cancel.
