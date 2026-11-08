@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var cloudVoiceNorwegian = true
     @AppStorage("kokoroVoice") private var kokoroVoice = LocalSpeech.defaultVoice
     @AppStorage("liveVoice") private var liveVoice = "marin"
+    @AppStorage("liveModel") private var liveModel = LiveVoice.models[0].0
     @State private var engine = SpeechEngine.current
     @State private var cloudKeyFound = CloudSpeech.hasKey
     @State private var cloudKeyDraft = ""
@@ -233,6 +234,13 @@ struct SettingsView: View {
                         LabeledContent("OpenAI") {
                             Text("Add your OpenAI key under Model above").foregroundStyle(.orange)
                         }
+                    }
+                    Picker("Model", selection: $liveModel) {
+                        ForEach(LiveVoice.models, id: \.0) { Text($0.1).tag($0.0) }
+                    }
+                    .onChange(of: liveModel) { _, _ in
+                        LiveVoice.shared.disconnect()
+                        model.applyLiveVoice()
                     }
                     Picker("Voice", selection: $liveVoice) {
                         ForEach(LiveVoice.voices, id: \.self) { Text(Self.voiceTitle($0)).tag($0) }

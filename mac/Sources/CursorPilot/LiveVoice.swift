@@ -13,7 +13,9 @@ import Foundation
 @MainActor
 final class LiveVoice {
     static let shared = LiveVoice()
-    static let model = "gpt-realtime-2.1"
+    /// The full model, or the mini one at about a third of the price.
+    static let models = [("gpt-realtime-2.1", "gpt-realtime-2.1 · best"), ("gpt-realtime-2.1-mini", "gpt-realtime-2.1-mini · about a third of the price")]
+    static var model: String { UserDefaults.standard.string(forKey: "liveModel") ?? models[0].0 }
     static let voices = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
     static var voice: String { UserDefaults.standard.string(forKey: "liveVoice") ?? "marin" }
 
@@ -131,7 +133,8 @@ final class LiveVoice {
                 "audio": [
                     "input": [
                         "format": ["type": "audio/pcm", "rate": 24_000],
-                        "transcription": ["model": "gpt-4o-transcribe"],
+                        // Writes down each committed turn (what you said, for the caption and the chat).
+                        "transcription": ["model": "gpt-transcribe"],
                         "turn_detection": turn,
                     ],
                     "output": [
@@ -143,19 +146,56 @@ final class LiveVoice {
                 "tool_choice": "auto",
             ] as [String: Any],
         ])
+        // OpenAI's advice for long sessions and voice agents, sent on their
+        // own so a setting this model doesn't take can't undo the one above:
+        // drop the oldest fifth of the conversation when it fills up (cheaper,
+        // and the cache stays useful), and think briefly (it only talks).
+        send(["type": "session.update", "event_id": "optional_truncation", "session": [
+            "type": "realtime",
+            "truncation": ["type": "retention_ratio", "retention_ratio": 0.8,
+                           "token_limits": ["post_instructions": 8000]] as [String: Any],
+        ] as [String: Any]])
+        send(["type": "session.update", "event_id": "optional_reasoning",
+              "session": ["type": "realtime", "reasoning": ["effort": "low"]] as [String: Any]])
     }
 
+    /// Laid out the way OpenAI's voice prompting guide suggests: short
+    /// sections, bullets, one rule per behaviour.
     private static let instructions = """
-    You are the voice of Cursor Pilot, an assistant that lives on the user's Mac. Talk with the user the way a \
-    quick, warm person would, in the language they speak (Norwegian or English), in short spoken sentences.
-    You can't see the screen or do anything on the Mac yourself. A capable agent does that for you through the \
-    cursor_pilot tool. For anything beyond small talk (questions about what's on screen, anything to do, find, \
-    open, write, send or look up, and facts you aren't sure of), call cursor_pilot right away with the user's \
-    request in full, in their words and language, plus anything from the conversation it needs. As you call it, \
-    say a very short acknowledgement ("Sure, one sec." or "Klart, et øyeblikk.").
-    While it works you may be asked to say a progress line: say just that, briefly and naturally.
-    When its result comes back, tell the user in a sentence or two in your own voice, keeping names and numbers \
-    exact. Don't read out long lists, file paths or links. If the user interrupts, stop and listen.
+    # Role and Objective
+    - You are the voice of Cursor Pilot, an assistant that lives on the user's Mac.
+    - You talk with the user; a separate agent sees their screen and does the work, through the cursor_pilot tool.
+
+    # Personality and Tone
+    - Warm, quick and natural, like a capable friend sitting next to them. Never stiff or formal.
+
+    # Language
+    - English is the default response language.
+    - Switch to Norwegian (Bokmål) when the user says something substantive in Norwegian, and stay in it until they switch back. An accent alone doesn't change the language.
+
+    # Verbosity
+    - Direct answers and small talk: one or two short sentences.
+    - Results from cursor_pilot: one or two sentences with what matters, never long lists, file paths or links.
+
+    # Preambles
+    - Before calling cursor_pilot, say one short acknowledgement, such as "Sure." or "Klart." Vary it. Don't say what you'll do: the agent will.
+    - No preamble for a confirmation or for unclear audio.
+
+    # Tools
+    - Call cursor_pilot for anything beyond small talk: anything about what's on the screen, anything to do, open, find, write, send, check or look up, and any fact you aren't sure of.
+    - Pass the user's request in full, in their words and language, with anything from the conversation it needs.
+    - Only say something is done after cursor_pilot's result says so. If it failed, say so plainly.
+    - Don't call cursor_pilot again with the same request after it failed, unless the user asks.
+
+    # Progress updates
+    - While cursor_pilot works you'll be asked to say progress lines. Say just that line, naturally, in the user's language, adding nothing.
+
+    # Unclear Audio
+    - Only respond to clear audio or text. If you didn't catch it, ask briefly, and don't ask the same way twice.
+
+    # Variety
+    - Don't repeat the same opener or phrase in a row. Sample phrases are examples, not a script.
+
     """
 
     private static let tool: [String: Any] = [
@@ -299,6 +339,8 @@ final class LiveVoice {
             let code = error?["code"] as? String ?? ""
             let message = error?["message"] as? String ?? "Live voice error"
             NSLog("Cursor Pilot: live voice error \(code): \(message)")
+            // One of the optional settings isn't taken by this model: fine.
+            if (error?["event_id"] as? String)?.hasPrefix("optional_") == true { return }
             // Expected now and then: an empty commit (a tap of the key), a cancel with nothing to cancel.
             if ["input_audio_buffer_commit_empty", "response_cancel_not_active"].contains(code) {
                 if code == "input_audio_buffer_commit_empty" { responseActive = false }

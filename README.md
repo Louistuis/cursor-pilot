@@ -463,6 +463,16 @@ Settings › Speech picks the engine that hears you and reads replies:
   talking over it truncates its reply where you cut in. OpenRouter has no
   realtime model or WebSocket, so this needs the OpenAI key and credits.
   `-CPLiveTest out.json` checks the connection with typed lines.
+  Following OpenAI's voice guidance: the prompt uses its sections (Role and
+  Objective, Personality and Tone, Language with English default and Norwegian
+  on a substantive Norwegian utterance, Verbosity, Preambles, Tools, Unclear
+  Audio, Variety); instructions and tools never change mid-session so the
+  cache holds; turns are written down by `gpt-transcribe`; long sessions keep
+  80% when full (`truncation: retention_ratio 0.8`) and reasoning is `low`,
+  both sent as separate optional updates whose errors are ignored. Settings
+  also offers `gpt-realtime-2.1-mini`. Cost: user audio is 600 tokens a minute,
+  its speech 1,200 a minute, and every reply re-reads the conversation
+  (mostly cached), so a conversation runs about $0.05–0.10 a minute on 2.1.
 - Each key row in Settings has a Paste button that saves the key on the
   clipboard without showing it.
 
