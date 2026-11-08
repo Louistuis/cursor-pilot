@@ -188,7 +188,8 @@ final class LiveVoice {
     - Don't call cursor_pilot again with the same request after it failed, unless the user asks.
 
     # Progress updates
-    - While cursor_pilot works you'll be asked to say progress lines. Say just that line, naturally, in the user's language, adding nothing.
+    - While cursor_pilot works, its progress arrives as system messages and you'll be asked to say each one. Say just that line, naturally, in the user's language, adding nothing.
+    - The user can talk to you any time while it works. Answer questions about how it's going from the progress so far. Anything that adds to or changes the task, or asks it to stop, goes to cursor_pilot too: it's passed to the agent at work.
 
     # Unclear Audio
     - Only respond to clear audio or text. If you didn't catch it, ask briefly, and don't ask the same way twice.
@@ -278,11 +279,15 @@ final class LiveVoice {
         case .line(""):
             send(["type": "response.create"])
         case .line(let line):
-            // Said without becoming part of the conversation.
+            // Part of the conversation, so the voice knows how the work is
+            // going when you ask, and says it.
+            send(["type": "conversation.item.create",
+                  "item": ["type": "message", "role": "system",
+                           "content": [["type": "input_text", "text": "Progress from the agent: \(line)"]]] as [String: Any]])
             send(["type": "response.create",
-                  "response": ["conversation": "none", "output_modalities": ["audio"],
-                               "instructions": "Say this progress update to the user, briefly and naturally, in the "
-                                   + "language you're speaking with them, adding nothing: \(line)"] as [String: Any]])
+                  "response": ["output_modalities": ["audio"],
+                               "instructions": "Say the agent's latest progress line to the user, briefly and naturally, in "
+                                   + "the language you're speaking with them, adding nothing."] as [String: Any]])
         case .answer(let callID, let output):
             send(["type": "conversation.item.create",
                   "item": ["type": "function_call_output", "call_id": callID, "output": output]])

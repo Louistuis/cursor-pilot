@@ -116,8 +116,12 @@ enum TestHooks {
         model.core.attachJobs()
         var log: [[String: Any]] = []
         let started = Date()
+        // `-CPTell "text"`: said while it works, after its first step starts.
+        let tell = UserDefaults.standard.string(forKey: "CPTell")
+        var told = false
+        var requestID: UInt64 = 0
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            model.core.send(CoreRequest(text: question, screens: [])) { event in
+            requestID = model.core.send(CoreRequest(text: question, screens: [])) { event in
                 var entry: [String: Any] = ["t": (Date().timeIntervalSince(started) * 10).rounded() / 10]
                 switch event {
                 case .text(let s):
@@ -127,7 +131,13 @@ enum TestHooks {
                     }
                     entry["text"] = s
                 case .speak(let s): entry["speak"] = s
-                case .tool(let step): entry["tool"] = [step.phase, step.kind, step.summary, step.ok] as [Any]
+                case .tool(let step):
+                    entry["tool"] = [step.phase, step.kind, step.summary, step.ok] as [Any]
+                    if let tell, !told, step.phase == "start" {
+                        told = true
+                        log.append(["t": entry["t"]!, "told": tell, "accepted": model.core.tell(requestID, tell)])
+                    }
+                case .heardWhileWorking(let s): entry["heard_while_working"] = s
                 case .helper(let e):
                     model.handle(helper: e)
                     entry["helper"] = [e.phase, e.agent, e.name, e.text, e.ok] as [Any]

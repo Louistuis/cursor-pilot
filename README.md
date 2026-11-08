@@ -218,6 +218,18 @@ group of actions it says in one short sentence what it's about to do
 Visible actions (clicks, typing, app_control) wait until that line has
 started playing (at most 2.5 s), so it's said before it's done.
 
+**Talk any time while it works**, with every speech engine: holding the
+talk key (or cutting in, hands-free) during a task stops what it's saying
+but not the work. What you say goes to the running agent with the result of
+its current step (`cp_core_tell`, an inbox per request), the way a note is
+passed to someone mid-task: it can add to the task, change it, ask how it's
+going, or stop it, and the agent answers in a few words and carries on.
+Background agents keep running throughout. Said too late to be read (the
+agent was already answering), it becomes the next question. With the live
+voice, the realtime model hears you while Claude works, answers "how's it
+going?" from the progress it has been told, and passes anything for the
+task to the agent the same way. `-CPAsk … -CPTell "text"` tests it.
+
 **Hands-free conversation** (Settings › Talking, off by default; hold the talk key otherwise): after an
 answer the mic stays open for up to 7 seconds so you can just reply; it ends
 itself 0.9 s after you stop talking, and the screen frame stays off until

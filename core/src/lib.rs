@@ -189,6 +189,16 @@ pub unsafe extern "C" fn cp_core_cancel(core: *mut CPCore, id: u64) {
     }
 }
 
+/// Passes what the user said to request `id` while it works; it reads it
+/// with its next step. Returns false if that request has finished.
+#[no_mangle]
+pub unsafe extern "C" fn cp_core_tell(core: *mut CPCore, id: u64, text: *const c_char) -> bool {
+    let (Some(core), Some(text)) = (core.as_ref(), str_arg(text)) else {
+        return false;
+    };
+    core.engine.tell(id, text)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn cp_core_new_conversation(core: *mut CPCore) {
     if let Some(core) = core.as_ref() {

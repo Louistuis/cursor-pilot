@@ -174,6 +174,9 @@ pub struct Engine {
     store: Store,
     drawings: Drawings,
     in_flight: Mutex<Vec<(u64, Arc<AtomicBool>)>>,
+    /// What the user said while a request was working, by request: read
+    /// into its next round, like a note passed to someone mid-task.
+    inbox: Mutex<Vec<(u64, String)>>,
     next_id: Mutex<u64>,
     /// The app side of the agent: screen, mouse and keyboard.
     pub host: Mutex<Option<Arc<Host>>>,
@@ -210,6 +213,7 @@ impl Engine {
             store: Store::new(&data_dir),
             drawings: Drawings::new(&data_dir),
             in_flight: Mutex::new(Vec::new()),
+            inbox: Mutex::new(Vec::new()),
             next_id: Mutex::new(1),
             host: Mutex::new(None),
             shell: Mutex::new(None),
@@ -257,6 +261,23 @@ impl Engine {
                 flag.store(true, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Something the user said while request `id` works. Returns false when
+    /// that request is no longer running (then it's a new question).
+    pub fn tell(&self, id: u64, text: &str) -> bool {
+        let running = self.in_flight.lock().unwrap().iter().any(|(i, _)| *i == id);
+        if running {
+            self.inbox.lock().unwrap().push((id, text.to_string()));
+        }
+        running
+    }
+
+    fn take_inbox(&self, id: u64) -> Vec<String> {
+        let mut inbox = self.inbox.lock().unwrap();
+        let (mine, rest): (Vec<_>, Vec<_>) = inbox.drain(..).partition(|(i, _)| *i == id);
+        *inbox = rest;
+        mine.into_iter().map(|(_, t)| t).collect()
     }
 
     fn finish_request(&self, id: u64) {
@@ -412,6 +433,22 @@ impl Engine {
                             &mut steps,
                             &mut *emit,
                         )?;
+                        let mut results = results;
+                        // What the user said meanwhile reaches the agent now,
+                        // with the results of its last step.
+                        let heard = self.take_inbox(id);
+                        if !heard.is_empty() {
+                            for t in &heard {
+                                emit(json!({"type": "heard_while_working", "id": id, "text": t}));
+                            }
+                            results.push(json!({"type": "text", "text": format!(
+                                "The user said this while you were working (by voice, so read it charitably): \u{201C}{}\u{201D}\n\
+                                 Take it into account now: it may add to the task, change it, ask how it's going, or \
+                                 tell you to stop (then stop and say so briefly). Reply to it in a few words if it \
+                                 needs a reply, and carry on.",
+                                heard.join("\u{201D} \u{201C}")
+                            )}));
+                        }
                         messages.push(json!({"role": "user", "content": results}));
                         // Narration while working is read aloud too: it says
                         // what it's about to do before each step.

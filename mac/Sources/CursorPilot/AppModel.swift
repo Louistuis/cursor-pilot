@@ -403,6 +403,11 @@ final class AppModel: ObservableObject {
             beginLiveTalk()
             return
         }
+        // It's working: talk to it without stopping the work.
+        if requestActive, activeRequest != nil {
+            beginTalkingOverTask(open: open)
+            return
+        }
         interrupt()
         openMic = open
         openMicSince = Date()
@@ -452,6 +457,10 @@ final class AppModel: ObservableObject {
         }
         guard phase == .listening else { return }
         openMic = false
+        if talkingOverTask {
+            await endTalkingOverTask()
+            return
+        }
         let text = await voice.stop()
         if let language = voice.lastLanguage { speaker.fallbackLanguage = language }
         guard !text.isEmpty else {
@@ -615,6 +624,8 @@ final class AppModel: ObservableObject {
             refreshWorking()
         case .helper(let e):
             handle(helper: e)
+        case .heardWhileWorking(let text):
+            if let i = notesForAgent.firstIndex(of: text) { notesForAgent.remove(at: i) }
         case .done(let text):
             replyText = text
             overlay.state.caption = captionText(text)
@@ -648,6 +659,12 @@ final class AppModel: ObservableObject {
             refreshMemory()
             settleIfDone()
             if ink.hasStrokes { ink.fadeStrokes(after: 20) }
+            // Said too late for the task to read: it's the next question.
+            if !notesForAgent.isEmpty {
+                let leftover = notesForAgent.joined(separator: " ")
+                notesForAgent = []
+                Task { await self.ask(leftover, includeScreen: true) }
+            }
         }
     }
 
@@ -948,6 +965,65 @@ final class AppModel: ObservableObject {
         refreshGlow()
     }
 
+    // MARK: Talking while it works
+
+    /// You're talking while a task runs: what you say goes to the agent
+    /// mid-task (it reads it with its next step) instead of starting over.
+    private var talkingOverTask = false
+    private var phaseBeforeTalk: Phase = .thinking
+    /// Told to the agent but not read yet; asked as a new question if the
+    /// task ends first.
+    private var notesForAgent: [String] = []
+
+    private func beginTalkingOverTask(open: Bool) {
+        guard Setup.hasVoice else { return }
+        silenceSpeech()
+        stopBargeWatch()
+        openMic = open
+        openMicSince = Date()
+        heardSpeechAt = nil
+        lastVoiceAt = nil
+        do {
+            heardText = ""
+            try voice.start(locales: resolvedListenLocales, echoCancel: handsFree)
+            talkingOverTask = true
+            phaseBeforeTalk = phase == .listening ? .thinking : phase
+            setPhase(.listening)
+            if !open { Sounds.play(.listen) }
+        } catch {
+            showError(error.localizedDescription)
+        }
+    }
+
+    private func endTalkingOverTask() async {
+        talkingOverTask = false
+        let text = await voice.stop()
+        if requestActive { setPhase(phaseBeforeTalk) }
+        refreshWorking()
+        guard !text.isEmpty else { return }
+        passToAgent(text)
+    }
+
+    /// Hands what you said to the running task, or asks it fresh if the task
+    /// just finished.
+    private func passToAgent(_ text: String) {
+        if requestActive, let id = activeRequest, core.tell(id, text) {
+            notesForAgent.append(text)
+            Sounds.play(.send)
+            flashNotice("Got it")
+        } else {
+            Task { await ask(text, includeScreen: true) }
+        }
+    }
+
+    /// Stops what's being read aloud now, without stopping the work.
+    private func silenceSpeech() {
+        speaker.stop()
+        speakingNow = false
+        // Actions waiting for a line to start playing go ahead.
+        sentenceSpoken = sentencesQueued - 1
+    }
+
     // MARK: Live voice
 
     /// gpt-realtime-2.1 hears and talks; Claude does the work behind it.
@@ -994,6 +1070,16 @@ final class AppModel: ObservableObject {
                 if !requestActive {
                     requestFinished = true
                     settleIfDone()
+                }
+            case .task(let callID, let request) where requestActive && liveCall != nil:
+                // Already working: it's passed on, and the voice says so.
+                let text = request.isEmpty ? heardText : request
+                if let id = activeRequest, core.tell(id, text) {
+                    notesForAgent.append(text)
+                    LiveVoice.shared.finishTask(callID: callID, output: "Passed on to the agent, which is still working on "
+                        + "the earlier request; it will take this into account and answer. Tell the user in a few words.")
+                } else {
+                    LiveVoice.shared.finishTask(callID: callID, output: "The agent just finished; ask the user to say it again.")
                 }
             case .task(let callID, let request):
                 liveCall = callID
@@ -1087,7 +1173,14 @@ final class AppModel: ObservableObject {
     private func bargeIn() {
         bargeWatch = false
         voice.restartRecording()
-        interrupt(keepingVoice: true)
+        if requestActive, activeRequest != nil {
+            // It's working: it stops talking and listens; the work carries on.
+            silenceSpeech()
+            talkingOverTask = true
+            phaseBeforeTalk = phase == .listening ? .thinking : phase
+        } else {
+            interrupt(keepingVoice: true)
+        }
         openMic = true
         openMicSince = Date()
         heardSpeechAt = Date()

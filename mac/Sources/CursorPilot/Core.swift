@@ -78,6 +78,8 @@ enum CoreEvent {
     case done(text: String)
     case error(kind: String, message: String)
     case finished
+    /// Something the user said mid-task reached the agent.
+    case heardWhileWorking(String)
 }
 
 struct HelperEvent {
@@ -213,6 +215,10 @@ final class Core: @unchecked Sendable {
     }
 
     func cancel(_ id: UInt64 = 0) { cp_core_cancel(handle, id) }
+
+    /// Passes what the user said to request `id` while it works; false if it
+    /// has already finished.
+    func tell(_ id: UInt64, _ text: String) -> Bool { text.withCString { cp_core_tell(handle, id, $0) } }
 
     /// Lets the agent use the screen, mouse and keyboard.
     func attachAgentHost() { cp_core_set_host(handle, coreHostCallback, nil) }
@@ -393,6 +399,7 @@ private func parseEvent(_ json: String) -> CoreEvent? {
     case "done": return .done(text: str("text"))
     case "error": return .error(kind: str("kind"), message: str("message"))
     case "finished": return .finished
+    case "heard_while_working": return .heardWhileWorking(str("text"))
     default: return nil
     }
 }

@@ -17,6 +17,10 @@ bool cp_core_configure(CPCore *core, const char *settings_json);
 
 uint64_t cp_core_send(CPCore *core, const char *request_json, CPEventCallback callback, void *ctx);
 void cp_core_cancel(CPCore *core, uint64_t request_id);
+/// Passes what the user said to a running request; false if it has finished.
+bool cp_core_tell(CPCore *core, uint64_t request_id, const char *text);
+/// Passes what the user said to a running request; false if it has finished.
+bool cp_core_tell(CPCore *core, uint64_t request_id, const char *text);
 
 /* Background tasks report as `job` events through `callback`, outside any
  * request and on any thread. NULL removes it. */
