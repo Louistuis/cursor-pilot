@@ -11,7 +11,12 @@ let coreLibDir = ProcessInfo.processInfo.environment["CP_CORE_LIB_DIR"]
 
 let package = Package(
     name: "CursorPilot",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("15.0")],
+    dependencies: [
+        // On-device speech: Whisper (hearing) and Kokoro (speaking) on the
+        // Neural Engine. Only these CoreML targets are built.
+        .package(url: "https://github.com/soniqo/speech-swift", revision: "a57702e6f523fa36ac5532d2bdc5f35f701a052c"),
+    ],
     targets: [
         .target(
             name: "CCursorPilotCore",
@@ -19,7 +24,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "CursorPilot",
-            dependencies: ["CCursorPilotCore"],
+            dependencies: [
+                "CCursorPilotCore",
+                .product(name: "WhisperASR", package: "speech-swift"),
+                .product(name: "KokoroTTS", package: "speech-swift"),
+            ],
             path: "Sources/CursorPilot",
             linkerSettings: [
                 .unsafeFlags(["-L", coreLibDir]),

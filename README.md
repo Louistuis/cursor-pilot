@@ -32,7 +32,9 @@ cursor-pilot/
 │       ├── Overlay.swift        click-through buddy panel that follows the cursor
 │       ├── VoiceInput.swift     push-to-talk speech recognition, two languages at once
 │       ├── ScreenCapture.swift  ScreenCaptureKit, every display, downscaled JPEG
-│       ├── Speaker.swift        spoken replies, best installed voice per sentence language
+│       ├── Speaker.swift        spoken replies, in order, per sentence language and engine
+│       ├── CloudSpeech.swift    OpenRouter speech: MAI / Scribe / GPT hearing, MAI-Voice / Eleven v4 voices
+│       ├── LocalSpeech.swift    Whisper and Kokoro on the Neural Engine, audio queue and recorder
 │       ├── Agent.swift          screenshots and the computer tool's clicks, typing and keys
 │       ├── Pointer.swift        background input and the app_control tool (Accessibility)
 │       ├── CoUser.swift         the real mouse and keyboard, moved and typed like a person
@@ -253,7 +255,9 @@ Debug launch flags, for design work:
 | `-CPRenderChartPreview out.png` | renders the kinds of chart a reply can send |
 | `-CPRenderJobsPreview out.png` | renders background tasks' cards, at work and done |
 | `-CPPermissions out.json` | writes which permissions are allowed, checked without asking |
-| `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, writes what each heard to `-CPOut`, then quits |
+| `-CPHear "a.aiff\|b.aiff"` | runs audio files through speech recognition in every automatic language, then the chosen engine, writes what each heard to `-CPOut`, then quits |
+| `-CPSay "Hello.\|Hei."` | renders each line with the chosen engine (`-speechEngine cloud\|local\|apple`) to `<-CPOut>-N.wav` without playing it, timings in `<-CPOut>.json` |
+| `-CPMorphPreview out` | plays the buddy turning into the thinking dots and back on white and dark, saving frames as `out-NN.png` |
 
 Test flags run best in a second copy, so the one you use keeps running:
 
@@ -317,21 +321,40 @@ and the buddy only reads the mouse position.
 
 ## Voice
 
-- Speech recognition uses Apple's on-device SpeechAnalyzer models on macOS 26
-  (SpeechTranscriber, or DictationTranscriber for languages only it covers,
-  such as Norwegian), falling back to SFSpeechRecognizer. With the language on
-  Automatic, Cursor Pilot listens for the first two languages in your Mac's
-  language list at once, say Norwegian and English: both recognizers hear the
-  same audio and the transcript its recognizer was surest of wins. Live text
-  shows the language you spoke last.
+Settings › Speech picks the engine that hears you and reads replies:
+
+| Engine | Hears you | Speaks |
+| --- | --- | --- |
+| **Cloud** (OpenRouter) | Microsoft MAI-Transcribe 2, ElevenLabs Scribe v2 or OpenAI GPT Transcribe | Microsoft MAI-Voice 2.1 (Flash or full) or ElevenLabs Eleven v4 (Turbo or full) |
+| **On this Mac** | Whisper large-v3 turbo on the Neural Engine | Kokoro-82M for English, Apple's voices otherwise |
+| **Apple** | SpeechAnalyzer / SFSpeechRecognizer | the best installed system voice |
+
+- Cloud is the default when an OpenRouter key is found: the one saved in
+  Settings, else `$OPENROUTER_API_KEY`, else the first line of
+  `~/.config/openrouter.key`. Cloud is only used for speech; recordings and
+  reply sentences go to OpenRouter.
+- Each voice model keeps its own voice. Microsoft's voices are one name in
+  several languages (Harper and Grant speak English and Norwegian); ElevenLabs
+  voices speak every language themselves. Picking a voice plays a sample, in
+  Norwegian too when you speak it.
+- Apple's recognizers always run while you talk, for the live caption. When
+  you let go, the chosen engine writes the transcript from the recording; if
+  it fails or times out, Apple's is used. Whisper's known phantom lines out of
+  silence are dropped.
+- Reply sentences are rendered in order, the next while the one before
+  plays, and played through one audio queue; the caption follows the words by
+  their length. A sentence a neural voice can't speak (or a failed request)
+  falls back to an Apple voice.
+- The local models (about 2 GB) download once, the first time that engine is
+  picked, and only with 5 GB free on the disk. MLX models such as Chatterbox
+  (which speaks Norwegian) need Xcode's Metal toolchain to build, so they are
+  not included.
+- With the language on Automatic, Cursor Pilot listens for the first two
+  languages in your Mac's language list at once, say Norwegian and English.
+  Live text shows the language you spoke last.
 - Double-tap **⌃** to type a question in the notch instead of saying it.
 - Quiet system sounds mark listening, sending, a finished task and errors
   (Settings › On screen › Sound effects).
-- Replies are read per sentence in that sentence's language, with the best
-  installed voice: Premium, then Enhanced, then the system voice, never the
-  novelty or Eloquence voices. For a natural voice, download a Premium one in
-  System Settings › Accessibility › Spoken Content › System Voice › Manage
-  Voices.
 
 ## Claude settings
 

@@ -24,7 +24,7 @@ vertex float4 cp_fullscreen(uint vid [[vertex_id]]) {
 
 /// a: drawable size, seconds, input level 0...1 (or -1 for none).
 /// b.x: zoom, so a small canvas can still show the effect large.
-struct BasicUniforms { float4 a; float4 b; };
+struct BasicUniforms { float4 a; float4 b; float4 c; };
 
 inline float4 lightOut(float3 col) {
     col = clamp(col, 0.0, 1.0);
@@ -213,7 +213,7 @@ inline float dotSD(float2 p, float2 pos, float r, float t, float fi, float shape
     return length(d) - r;
 }
 
-float3 scene(float2 p, float t) {
+float3 scene(float2 p, float t, thread float& nearest) {
     float k  = floor(t / MERGE_PERIOD);
     float u  = fract(t / MERGE_PERIOD);
     float te = u * MERGE_PERIOD;
@@ -266,6 +266,7 @@ float3 scene(float2 p, float t) {
     float3 core3  = clamp(INTENSITY / pow(sd3, float3(FALLOFF_P)), 0.0, 1.0);
     float3 edge3  = 1.0 - smoothstep(float3(FADE_START), float3(FADE_END), sd3);
     float3 bright = core3 * edge3 * gBright;
+    nearest = total3.g;
     return bright * (cAcc / wAcc);
 }
 }
@@ -278,7 +279,8 @@ fragment float4 cp_fluid_dots(float4 pos [[position]], constant BasicUniforms& U
     float2 p = (2.0 * fragCoord - res) / min(res.x, res.y) / U.b.x;
     float t = U.a.z;
     p /= 1.0 + 0.03 * sin(t * 1.0);
-    float3 col = dots::scene(p, t);
+    float nearest = 1.0;
+    float3 col = dots::scene(p, t, nearest);
     col *= 1.0 + 0.05 * sin(t * 1.0 + 1.0);
     col = pow(max(col, 0.0), float3(1.0 / 1.2));
     col = min(col, 1.0);
@@ -291,6 +293,15 @@ fragment float4 cp_fluid_dots(float4 pos [[position]], constant BasicUniforms& U
     if (tint.r > 0.0 || tint.g > 0.0 || tint.b > 0.0) {
         float lum = max(col.r, max(col.g, col.b));
         col = mix(min(tint * lum * 1.35, 1.0), float3(lum), smoothstep(0.93, 1.0, lum));
+    }
+    // c.x: a soft dark shadow hugging the dots, so they read on white.
+    if (U.c.x > 0.0) {
+        // No canvas edge: the glow and shadow fade out before it.
+        float edge = 1.0 - smoothstep(0.62, 0.97, length((2.0 * fragCoord - res) / min(res.x, res.y)));
+        col = clamp(col, 0.0, 1.0) * edge;
+        float a = max(col.r, max(col.g, col.b));
+        float s = (1.0 - smoothstep(-0.02, 0.12, nearest)) * U.c.x * edge;
+        return float4(col, a + (1.0 - a) * s);
     }
     return lightOut(col);
 }

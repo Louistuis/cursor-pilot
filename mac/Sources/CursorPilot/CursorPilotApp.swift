@@ -19,6 +19,12 @@ struct CursorPilotApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
+            // `-CPMorphPreview out` plays the arrow turning into the thinking
+            // dots and back, on white and on dark, saving frames as out-N.png.
+            if let out = UserDefaults.standard.string(forKey: "CPMorphPreview") {
+                MorphPreview.run(to: out)
+                return
+            }
             if let path = UserDefaults.standard.string(forKey: "CPRenderInkPreview") {
                 let renderer = ImageRenderer(content: InkPreview())
                 renderer.scale = 2
@@ -337,5 +343,50 @@ private struct MenuContent: View {
         Divider()
         Button("Quit Cursor Pilot") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
+    }
+}
+
+/// The buddy's thinking morph on a white and a dark card, for checking it.
+@MainActor
+enum MorphPreview {
+    final class Model: ObservableObject { @Published var thinking = false }
+
+    static func run(to out: String) {
+        let model = Model()
+        let view = MorphCard(model: model)
+        let window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 360, height: 180), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = NSHostingView(rootView: view)
+        window.level = .floating
+        window.orderFrontRegardless()
+        // Each moment: (seconds from start, thinking?).
+        let shots: [Double] = [0.6, 0.72, 0.8, 0.9, 1.05, 1.3, 2.4, 3.05, 3.2, 3.35, 3.5, 3.65, 3.85, 4.3]
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { model.thinking = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { model.thinking = false }
+        for (i, t) in shots.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                p.arguments = ["-x", "-o", "-l", String(window.windowNumber), "\(out)-\(String(format: "%02d", i)).png"]
+                try? p.run()
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) { NSApp.terminate(nil) }
+    }
+
+    struct MorphCard: View {
+        @ObservedObject var model: Model
+        var body: some View {
+            HStack(spacing: 0) {
+                ZStack { Color.white; buddy }
+                ZStack { Color(white: 0.12); buddy }
+            }
+            .frame(width: 360, height: 180)
+        }
+        private var buddy: some View {
+            BuddyMorph(thinking: model.thinking, flipped: false, active: true)
+                .frame(width: 20, height: 23, alignment: .topLeading)
+                .scaleEffect(3)
+        }
     }
 }

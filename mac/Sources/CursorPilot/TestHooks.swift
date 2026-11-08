@@ -55,6 +55,10 @@ enum TestHooks {
                    "everything": p.everything], to: out)
             return true
         }
+        if let text = defaults.string(forKey: "CPSay") {
+            await say(text.components(separatedBy: "|"), to: defaults.string(forKey: "CPOut") ?? "/tmp/cpsay")
+            return true
+        }
         if let files = defaults.string(forKey: "CPHear") {
             await hear(files.components(separatedBy: "|"), to: defaults.string(forKey: "CPOut") ?? "/dev/stdout")
             return true
@@ -175,9 +179,49 @@ enum TestHooks {
         }
     }
 
+    /// Waits for the on-device models when that engine is chosen.
+    private static func readyLocal() async {
+        guard SpeechEngine.current == .local else { return }
+        LocalSpeech.shared.prepare()
+        for _ in 0..<1800 {
+            let s = LocalSpeech.shared
+            if case .ready = s.hearing, case .ready = s.speaking { return }
+            if case .failed = s.hearing { return }
+            try? await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    /// `-CPSay "Hello.|Hei på deg."` renders each line with the chosen
+    /// speech engine (`-speechEngine cloud|local|apple`) into `<out>-N.wav`,
+    /// without playing it, and writes timings to `<out>.json`.
+    private static func say(_ lines: [String], to out: String) async {
+        await readyLocal()
+        let speaker = Speaker()
+        var results: [[String: Any]] = []
+        for (i, line) in lines.enumerated() {
+            let lang = speaker.language(of: line)
+            let started = Date()
+            let audio = await Speaker.render(line, language: lang, engine: SpeechEngine.current, rate: 1)
+            var r: [String: Any] = ["text": line, "language": lang, "engine": SpeechEngine.current.rawValue,
+                                    "ms": Int(Date().timeIntervalSince(started) * 1000)]
+            if let audio {
+                let path = "\(out)-\(i).wav"
+                try? AudioMath.wav(audio.samples, sampleRate: KokoroEngine.sampleRate).write(to: URL(fileURLWithPath: path))
+                r["file"] = path
+                r["seconds"] = Double(audio.samples.count) / Double(KokoroEngine.sampleRate)
+            } else {
+                r["fallback"] = "apple"
+            }
+            results.append(r)
+        }
+        let data = try? JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys])
+        FileManager.default.createFile(atPath: out + ".json", contents: data)
+    }
+
     /// `-CPHear "a.aiff|b.aiff"` runs each file through speech recognition
     /// for the automatic languages and writes what each language heard.
     private static func hear(_ files: [String], to out: String) async {
+        await readyLocal()
         let voice = VoiceInput()
         let locales = await VoiceInput.resolvedLocales(UserDefaults.standard.string(forKey: "listenLocale") ?? "")
         await voice.prepare(locales: locales)

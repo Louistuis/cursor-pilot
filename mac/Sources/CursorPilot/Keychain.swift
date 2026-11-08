@@ -63,6 +63,34 @@ enum Keychain {
         return String(decoding: data, as: UTF8.self)
     }
 
+    // MARK: OpenRouter
+
+    private static let openRouterService = "com.louistuis.cursorpilot.openrouter"
+
+    /// The OpenRouter key for cloud speech: the one saved in Settings, else
+    /// $OPENROUTER_API_KEY, else the first line of ~/.config/openrouter.key
+    /// (where other tools on this Mac keep it). Call it off the main thread.
+    static func loadOpenRouterKey() -> String {
+        let saved = security(["find-generic-password", "-s", openRouterService, "-a", "openrouter", "-w"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !saved.isEmpty { return saved }
+        if let env = ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !env.isEmpty { return env }
+        let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/openrouter.key")
+        let text = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+        return text.split(whereSeparator: \.isNewline).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+    }
+
+    static func saveOpenRouterKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            _ = security(["delete-generic-password", "-s", openRouterService, "-a", "openrouter"])
+            return
+        }
+        let hex = Data(trimmed.utf8).map { String(format: "%02x", $0) }.joined()
+        _ = security(["-i"], input: "add-generic-password -U -s \(openRouterService) -a openrouter -X \(hex)\n")
+    }
+
     /// Runs /usr/bin/security and returns what it printed.
     private static func security(_ arguments: [String], input: String? = nil) -> String {
         let task = Process()

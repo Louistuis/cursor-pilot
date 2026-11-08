@@ -14,6 +14,8 @@ import Speech
 @MainActor
 final class VoiceInput {
     private let engine = AVAudioEngine()
+    /// Everything you say, for the engine that writes the final transcript.
+    private let recorder = AudioRecorder()
     private var listeners: [any Listener] = []
     private var texts: [String] = []
     private var isRunning = false
@@ -103,11 +105,14 @@ final class VoiceInput {
         listeners = made
         texts = Array(repeating: "", count: made.count)
         isRunning = true
+        recorder.reset(sampleRate: format.sampleRate)
         guard input == nil else { return }
 
         let sinks = made.map(\.sink)
+        let recorder = recorder
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             for sink in sinks { sink(buffer) }
+            recorder.append(buffer)
             let level = Self.level(of: buffer)
             Task { @MainActor in self?.onLevel?(level) }
         }
@@ -134,12 +139,49 @@ final class VoiceInput {
             for await (i, h) in group { out[i] = h }
             return out
         }
-        guard let best = Self.pick(heard) else { return "" }
-        if heard.count > 1 {
+        let best = Self.pick(heard)
+        if let best, heard.count > 1 {
             lastLanguage = heard[best].language
             UserDefaults.standard.set(lastLanguage, forKey: "lastHeardLanguage")
         }
-        return heard[best].text
+        let quick = best.map { heard[$0].text } ?? ""
+        return await finalText(quick: quick, language: best.map { heard[$0].language }, listening: all.count)
+    }
+
+    /// The transcript to send: written by MAI-Transcribe or Whisper from
+    /// the recording when that engine is on, Apple's live one otherwise or
+    /// when it fails.
+    private func finalText(quick: String, language: String?, listening: Int) async -> String {
+        let audio = recorder.take()
+        let seconds = Double(audio.samples.count) / Double(max(audio.rate, 1))
+        // Too short, or too quiet to be speech.
+        guard seconds >= 0.35, audio.peak > 0.015 else { return quick }
+        let engine = SpeechEngine.current
+        let started = Date()
+        var text: String?
+        switch engine {
+        case .cloud where CloudSpeech.hasKey:
+            // With two languages, the model tells which (and follows a switch mid-sentence).
+            let hint = listening == 1 ? LocalSpeech.whisperLanguage(language).map { $0 == "no" ? "nb" : $0 } : nil
+            text = try? await withTimeout(10) {
+                try await CloudSpeech.transcribe(audio.samples, sampleRate: audio.rate, language: hint)
+            }
+        case .local:
+            if let whisper = LocalSpeech.shared.whisper {
+                let hint = LocalSpeech.whisperLanguage(quick.isEmpty ? nil : language)
+                text = try? await withTimeout(10) {
+                    try await whisper.transcribe(audio.samples, sampleRate: audio.rate, language: hint)
+                }
+            }
+        default:
+            break
+        }
+        guard let text, !text.isEmpty, !(quick.isEmpty && LocalSpeech.isPhantom(text)) else {
+            if engine != .apple { NSLog("Cursor Pilot: \(engine.rawValue) transcript unavailable, using Apple's") }
+            return quick
+        }
+        NSLog("Cursor Pilot: \(engine.rawValue) heard “\(text)” in \(String(format: "%.2f", Date().timeIntervalSince(started))) s (Apple: “\(quick)”)")
+        return text
     }
 
     func cancel() {
@@ -215,11 +257,13 @@ extension VoiceInput {
         let file = try AVAudioFile(forReading: url)
         try start(locales: locales, input: file.processingFormat)
         let sinks = listeners.map(\.sink)
+        let recorder = recorder
         while file.framePosition < file.length {
             guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4096) else { break }
             try file.read(into: buffer)
             if buffer.frameLength == 0 { break }
             for sink in sinks { sink(buffer) }
+            recorder.append(buffer)
             // Roughly four times real time, so recognizers keep up.
             try await Task.sleep(for: .seconds(Double(buffer.frameLength) / file.processingFormat.sampleRate / 4))
         }
@@ -229,7 +273,9 @@ extension VoiceInput {
         var heard: [Heard] = []
         for l in all { heard.append(await l.finish()) }
         let best = Self.pick(heard)
-        return (best.map { heard[$0].text } ?? "", heard)
+        let text = await finalText(quick: best.map { heard[$0].text } ?? "", language: best.map { heard[$0].language },
+                                   listening: all.count)
+        return (text, heard)
     }
 }
 

@@ -13,7 +13,36 @@ struct SettingsView: View {
     @AppStorage("borrowPointer") private var borrowPointer = true
     @AppStorage("soundEffects") private var soundEffects = true
     @AppStorage("buddyTint") private var buddyTint = BuddyTint.rainbow
+    @AppStorage("cloudVoiceModel") private var cloudVoiceModel = CloudSpeech.voiceModels[0].id
+    @AppStorage("cloudHearingModel") private var cloudHearingModel = CloudSpeech.hearingModels[0].id
+    @State private var cloudVoice = CloudSpeech.voiceName(for: CloudSpeech.voiceModel)
+    @State private var cloudVoiceNames: [String] = []
+    @State private var cloudVoiceNorwegian = true
+    @AppStorage("kokoroVoice") private var kokoroVoice = LocalSpeech.defaultVoice
+    @State private var engine = SpeechEngine.current
+    @State private var cloudKeyFound = CloudSpeech.hasKey
+    @State private var cloudKeyDraft = ""
+    @ObservedObject private var localSpeech = LocalSpeech.shared
     private let refresh = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    private var engineNote: String {
+        switch engine {
+        case .cloud:
+            let hearing = CloudSpeech.hearingModels.first { $0.id == cloudHearingModel }?.name ?? "The cloud model"
+            let speaking = CloudSpeech.voiceModels.first { $0.id == cloudVoiceModel }?.name ?? "the voice model"
+            let languages = CloudSpeech.isMicrosoft(cloudVoiceModel)
+                ? (cloudVoiceNorwegian ? " \(Self.voiceTitle(cloudVoice)) speaks English and Norwegian in the same voice." : " \(Self.voiceTitle(cloudVoice)) has no Norwegian version; Norwegian replies use another Microsoft voice.")
+                : " ElevenLabs voices speak every language themselves."
+            return "\(hearing) writes down what you say and \(speaking) reads replies, through your OpenRouter account, so recordings and replies go to OpenRouter." + languages
+        case .local: return "Everything stays on this Mac. Whisper understands Norwegian, English and many more; Kokoro reads English replies, and other languages use Apple's voices. The models download once (about 2 GB)."
+        case .apple: return "macOS’s own speech recognition and voices."
+        }
+    }
+
+    /// "sarah" → "Sarah".
+    static func voiceTitle(_ name: String) -> String {
+        name.prefix(1).uppercased() + name.dropFirst()
+    }
 
     /// The languages "Automatic" listens for, as in "Norsk bokmål + English".
     private var automaticLanguages: String {
@@ -121,9 +150,94 @@ struct SettingsView: View {
                 }
             }
 
+            Section {
+                Picker("Speech engine", selection: $engine) {
+                    ForEach(SpeechEngine.allCases) { Text($0.title).tag($0) }
+                }
+                .onChange(of: engine) { _, now in
+                    UserDefaults.standard.set(now.rawValue, forKey: "speechEngine")
+                    model.prepareSpeechEngine()
+                }
+                switch engine {
+                case .cloud:
+                    if cloudKeyFound {
+                        LabeledContent("OpenRouter") {
+                            Label("Key found", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        }
+                    } else {
+                        LabeledContent("OpenRouter key") {
+                            HStack {
+                                SecureField("sk-or-…", text: $cloudKeyDraft).textFieldStyle(.roundedBorder)
+                                Button("Save") {
+                                    let key = cloudKeyDraft
+                                    cloudKeyDraft = ""
+                                    Task.detached {
+                                        Keychain.saveOpenRouterKey(key)
+                                        CloudSpeech.forgetKey()
+                                        let found = CloudSpeech.hasKey
+                                        await MainActor.run { cloudKeyFound = found; model.prepareSpeechEngine() }
+                                    }
+                                }
+                                .disabled(cloudKeyDraft.isEmpty)
+                            }
+                        }
+                    }
+                    Picker("Hearing", selection: $cloudHearingModel) {
+                        ForEach(CloudSpeech.hearingModels) { m in Text("\(m.name) · \(m.detail)").tag(m.id) }
+                    }
+                    Picker("Voice model", selection: $cloudVoiceModel) {
+                        ForEach(CloudSpeech.voiceModels) { m in Text("\(m.name) · \(m.detail)").tag(m.id) }
+                    }
+                    LabeledContent("Voice") {
+                        HStack(spacing: 8) {
+                            Picker("Voice", selection: Binding(
+                                get: { cloudVoice },
+                                set: { name in
+                                    cloudVoice = name
+                                    CloudSpeech.setVoiceName(name, for: cloudVoiceModel)
+                                    model.previewVoice(named: Self.voiceTitle(name))
+                                })) {
+                                if cloudVoiceNames.isEmpty { Text(Self.voiceTitle(cloudVoice)).tag(cloudVoice) }
+                                ForEach(cloudVoiceNames, id: \.self) { Text(Self.voiceTitle($0)).tag($0) }
+                            }
+                            .labelsHidden()
+                            .frame(minWidth: 180)
+                            Button {
+                                if model.isSpeaking { model.stopSpeaking() } else { model.previewVoice(named: Self.voiceTitle(cloudVoice)) }
+                            } label: {
+                                Image(systemName: "play.circle.fill").font(.title3)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.tint)
+                            .help("Hear this voice")
+                        }
+                    }
+                    .task(id: cloudVoiceModel) {
+                        cloudVoice = CloudSpeech.voiceName(for: cloudVoiceModel)
+                        cloudVoiceNames = await CloudSpeech.voiceNames(model: cloudVoiceModel)
+                        cloudVoiceNorwegian = await CloudSpeech.speaksNorwegian(cloudVoice, model: cloudVoiceModel)
+                    }
+                    .onChange(of: cloudVoice) { _, name in
+                        Task { cloudVoiceNorwegian = await CloudSpeech.speaksNorwegian(name, model: cloudVoiceModel) }
+                    }
+                case .local:
+                    LabeledContent("Hearing · Whisper large-v3 turbo") { Text(localSpeech.hearing.label).foregroundStyle(.secondary) }
+                    LabeledContent("Speaking · Kokoro") { Text(localSpeech.speaking.label).foregroundStyle(.secondary) }
+                    Picker("Voice", selection: $kokoroVoice) {
+                        ForEach(LocalSpeech.voices, id: \.id) { Text($0.name).tag($0.id) }
+                    }
+                case .apple:
+                    EmptyView()
+                }
+            } header: {
+                Text("Speech")
+            } footer: {
+                Text(engineNote).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("Spoken replies") {
                 Toggle("Read replies aloud", isOn: $model.speakReplies)
-                Picker("Voice", selection: $model.voiceID) {
+                Picker(engine == .apple ? "Voice" : "Apple voice (fallback)", selection: $model.voiceID) {
                     Text("Best available").tag("")
                     Divider()
                     ForEach(voices, id: \.identifier) { v in

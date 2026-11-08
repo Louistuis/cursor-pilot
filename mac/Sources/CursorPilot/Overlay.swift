@@ -419,16 +419,7 @@ struct OverlayView: View {
         let thinking = state.mode == .thinking && state.penInk == nil
         return ZStack(alignment: state.flipped ? .topTrailing : .topLeading) {
             MotionTrail(motion: state.motion, flipped: state.flipped)
-            PilotArrow(flipped: state.flipped, active: state.mode != .idle)
-                .scaleEffect(thinking ? 0.2 : 1, anchor: .center)
-                .opacity(thinking ? 0 : 1)
-                .blur(radius: thinking ? 4 : 0)
-            if thinking {
-                ThinkingOrb()
-                    .frame(width: 32, height: 32)
-                    .offset(x: state.flipped ? 6 : -6, y: -5)
-                    .transition(.scale(scale: 0.25).combined(with: .opacity))
-            }
+            BuddyMorph(thinking: thinking, flipped: state.flipped, active: state.mode != .idle)
             ClickRing(at: state.clickAt)
             if let ink = state.penInk {
                 // The ink at the tip, where the line comes from.
@@ -441,7 +432,6 @@ struct OverlayView: View {
             }
         }
         .frame(width: 20, height: 23, alignment: state.flipped ? .topTrailing : .topLeading)
-        .animation(.spring(response: 0.42, dampingFraction: 0.78), value: thinking)
     }
 
     @ViewBuilder private var bubble: some View {
@@ -505,18 +495,67 @@ struct OverlayView: View {
 
 /// The buddy while it thinks: the notch's merging dots in a small dark orb,
 /// lit in the buddy's colour.
+/// The arrow turning into the thinking dots and back. It folds away into
+/// a point at its centre and the dots burst out of that point; when the
+/// thought is done the dots gather back into one point and the arrow
+/// springs out of it.
+struct BuddyMorph: View {
+    var thinking: Bool
+    var flipped: Bool
+    var active: Bool
+
+    private enum Phase { case arrow, orb, gathering }
+    @State private var phase: Phase = .arrow
+    @State private var turn = 0
+
+    /// Moments of the dots' twelve-second loop (Shaders.swift, fluid dots):
+    /// just before they burst out of one point, and just before they gather.
+    private static let burst: Float = 9.86
+    private static let gather: Float = 9.15
+
+    var body: some View {
+        let folded = phase != .arrow
+        ZStack(alignment: flipped ? .topTrailing : .topLeading) {
+            PilotArrow(flipped: flipped, active: active)
+                .scaleEffect(folded ? 0.1 : 1, anchor: .center)
+                .rotationEffect(.degrees(folded ? (flipped ? 80 : -80) : 0), anchor: .center)
+                .blur(radius: folded ? 2.5 : 0)
+                .opacity(folded ? 0 : 1)
+            if folded {
+                ThinkingOrb(clock: phase == .gathering ? Self.gather : Self.burst)
+                    .frame(width: 34, height: 34)
+                    .offset(x: flipped ? 7 : -7, y: -5.5)
+                    .transition(.asymmetric(insertion: .scale(scale: 0.4).combined(with: .opacity),
+                                            removal: .scale(scale: 0.5).combined(with: .opacity)))
+            }
+        }
+        .onAppear { if thinking { phase = .orb } }
+        .onChange(of: thinking) { _, now in
+            turn += 1
+            let mine = turn
+            if now {
+                withAnimation(.easeIn(duration: 0.17)) { phase = .orb }
+            } else if phase != .arrow {
+                // Let the dots pull together first, then unfold the arrow.
+                phase = .gathering
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+                    guard turn == mine else { return }
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.62)) { phase = .arrow }
+                }
+            }
+        }
+    }
+}
+
+/// The notch's merging dots in the buddy's colour, with a soft shadow
+/// behind them so they read on white too.
 struct ThinkingOrb: View {
     var tint: BuddyTint?
+    var clock: Float?
     @AppStorage("buddyTint") private var savedTint = BuddyTint.rainbow
 
     var body: some View {
-        let t = tint ?? savedTint
-        ZStack {
-            Circle().fill(Color.black.opacity(0.85))
-            ThinkingBlobs(zoom: 2.5, tint: t.shaderTint).clipShape(Circle())
-            Circle().strokeBorder(AngularGradient(colors: t.colors, center: .center), lineWidth: 0.8).opacity(0.55)
-        }
-        .shadow(color: (t.colors.first ?? .white).opacity(0.55), radius: 7)
+        ThinkingBlobs(zoom: 2.4, tint: (tint ?? savedTint).shaderTint, shadow: 0.62, clock: clock)
     }
 }
 

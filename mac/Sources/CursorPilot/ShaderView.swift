@@ -25,6 +25,11 @@ struct ShaderInputs: Equatable {
     /// Colours the fluid dots (sRGB); zero leaves them white, a negative
     /// red makes them a rainbow.
     var tint: SIMD3<Float> = .zero
+    /// 0...1: a soft dark shadow behind the fluid dots, for light backgrounds.
+    var shadow: Float = 0
+    /// Restarts the effect's clock at this time (seconds) whenever it
+    /// changes, to play a chosen moment of it (the dots gathering, say).
+    var clock: Float?
 }
 
 /// A SwiftUI view that renders one of the light effects with Metal.
@@ -121,12 +126,19 @@ final class ShaderPipelines {
 private struct BasicUniforms {
     var a: SIMD4<Float>
     var b: SIMD4<Float>
+    var c: SIMD4<Float>
 }
 
 private final class ShaderRenderer: NSObject, MTKViewDelegate {
     let kind: ShaderKind
-    var inputs: ShaderInputs
-    private let start = CACurrentMediaTime()
+    var inputs: ShaderInputs {
+        didSet {
+            if let clock = inputs.clock, clock != oldValue.clock {
+                start = CACurrentMediaTime() - Double(clock / max(inputs.speed, 0.01))
+            }
+        }
+    }
+    private var start = CACurrentMediaTime()
     private var last: CFTimeInterval = 0
     /// The level actually drawn, eased toward the input so the wave glides
     /// between the voice and its own motion instead of jumping.
@@ -138,6 +150,7 @@ private final class ShaderRenderer: NSObject, MTKViewDelegate {
     init(kind: ShaderKind, inputs: ShaderInputs) {
         self.kind = kind
         self.inputs = inputs
+        if let clock = inputs.clock { start -= Double(clock / max(inputs.speed, 0.01)) }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -161,7 +174,8 @@ private final class ShaderRenderer: NSObject, MTKViewDelegate {
 
         encoder.setRenderPipelineState(pipeline)
         var u = BasicUniforms(a: SIMD4(size.x, size.y, Float(now - start) * inputs.speed, eased),
-                              b: SIMD4(max(inputs.zoom, 0.01), inputs.tint.x, inputs.tint.y, inputs.tint.z))
+                              b: SIMD4(max(inputs.zoom, 0.01), inputs.tint.x, inputs.tint.y, inputs.tint.z),
+                              c: SIMD4(inputs.shadow, 0, 0, 0))
         encoder.setFragmentBytes(&u, length: MemoryLayout<BasicUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
@@ -176,8 +190,11 @@ private final class ShaderRenderer: NSObject, MTKViewDelegate {
 struct ThinkingBlobs: View {
     var zoom: Float = 1
     var tint: SIMD3<Float> = .zero
+    var shadow: Float = 0
+    var clock: Float?
     var body: some View {
-        ShaderCanvas(kind: .fluidDots, inputs: ShaderInputs(zoom: zoom, tint: tint)).aspectRatio(1, contentMode: .fit)
+        ShaderCanvas(kind: .fluidDots, inputs: ShaderInputs(zoom: zoom, tint: tint, shadow: shadow, clock: clock))
+            .aspectRatio(1, contentMode: .fit)
     }
 }
 

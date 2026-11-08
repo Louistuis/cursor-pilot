@@ -202,6 +202,7 @@ final class AppModel: ObservableObject {
         glow.enabled = showGlow
         overlay.autoHide = hideBuddyWhenIdle
         applyVoice()
+        prepareSpeechEngine()
         doubleTap.onDoubleTap = { [weak self] in self?.openTyping() }
         applyDoubleTap()
         modifierHold.onPress = { [weak self] in self?.beginListening() }
@@ -286,6 +287,16 @@ final class AppModel: ObservableObject {
 
     private func configureCore() {
         core.configure(CoreSettings(apiKey: apiKey, model: model, effort: effort, access: macAccess ? "on" : "off", input: inputMode))
+    }
+
+    /// Gets the chosen speech engine ready: the cloud's key and voice list,
+    /// or the on-device models (downloaded the first time).
+    func prepareSpeechEngine() {
+        Task.detached {
+            if CloudSpeech.hasKey { _ = await VoiceCatalog.shared.voices(model: CloudSpeech.voiceModel) }
+            let engine = SpeechEngine.current
+            if engine == .local { await MainActor.run { LocalSpeech.shared.prepare() } }
+        }
     }
 
     private func applyVoice() {
@@ -707,6 +718,16 @@ final class AppModel: ObservableObject {
         // Markdown symbols read badly aloud.
         let plain = text.replacingOccurrences(of: "[*_`#>]+", with: "", options: .regularExpression)
         speaker.speak(plain)
+    }
+
+    /// A short sample of the chosen voice, in English and, when you speak
+    /// it, Norwegian too.
+    func previewVoice(named name: String) {
+        speaker.stop()
+        speaker.speak("Hi, I'm \(name). This is how I'll sound when I answer you.")
+        if resolvedListenLocales.contains(where: { ["nb", "nn", "no"].contains($0.language.languageCode?.identifier ?? "") }) {
+            speaker.speak("Og sånn høres jeg ut på norsk.")
+        }
     }
 
     func stopSpeaking() { speaker.stop() }
