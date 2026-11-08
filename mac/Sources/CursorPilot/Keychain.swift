@@ -91,6 +91,29 @@ enum Keychain {
         _ = security(["-i"], input: "add-generic-password -U -s \(openRouterService) -a openrouter -X \(hex)\n")
     }
 
+    // MARK: abliteration.ai
+
+    private static let abliterationService = "com.louistuis.cursorpilot.abliteration"
+
+    /// The abliteration.ai key: the one saved in Settings, else $ABLIT_KEY.
+    /// Call it off the main thread.
+    static func loadAbliterationKey() -> String {
+        let saved = security(["find-generic-password", "-s", abliterationService, "-a", "abliteration", "-w"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !saved.isEmpty { return saved }
+        return ProcessInfo.processInfo.environment["ABLIT_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    static func saveAbliterationKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            _ = security(["delete-generic-password", "-s", abliterationService, "-a", "abliteration"])
+            return
+        }
+        let hex = Data(trimmed.utf8).map { String(format: "%02x", $0) }.joined()
+        _ = security(["-i"], input: "add-generic-password -U -s \(abliterationService) -a abliteration -X \(hex)\n")
+    }
+
     /// Runs /usr/bin/security and returns what it printed.
     private static func security(_ arguments: [String], input: String? = nil) -> String {
         let task = Process()

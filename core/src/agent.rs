@@ -34,10 +34,16 @@ pub fn tool_definitions(settings: &Settings) -> Vec<Value> {
     if !mac_access(&settings.access) {
         return Vec::new();
     }
-    let mut tools = vec![
-        json!({"type": "bash_20250124", "name": "bash"}),
-        json!({"type": "text_editor_20250728", "name": "str_replace_based_edit_tool", "max_characters": 20000}),
-    ];
+    let mut tools = if settings.is_anthropic() {
+        vec![
+            json!({"type": "bash_20250124", "name": "bash"}),
+            json!({"type": "text_editor_20250728", "name": "str_replace_based_edit_tool", "max_characters": 20000}),
+        ]
+    } else {
+        // Other hosts don't know Anthropic's built-in tool types: the same two
+        // tools, spelled out, so their calls arrive in the same shape.
+        vec![bash_tool(), editor_tool()]
+    };
     if COMPUTER_MODELS.contains(&settings.model.as_str()) {
         tools.push(json!({"type": "computer_toolset_20260801"}));
     }
@@ -154,6 +160,47 @@ work, keep any text between tool calls to a few words about the next step; it sh
 }
 
 /// Our tool for the user's iMessages and texts.
+/// The shell tool as a plain tool, for hosts other than Anthropic's.
+fn bash_tool() -> Value {
+    json!({
+        "name": "bash",
+        "description": "Run a command in a persistent zsh shell on the user's Mac and get its output. \
+    The shell keeps its working directory and variables between calls. Set restart to true to start a fresh shell.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The command to run."},
+                "restart": {"type": "boolean", "description": "Start a fresh shell instead of running a command."}
+            }
+        }
+    })
+}
+
+/// The file editor as a plain tool, for hosts other than Anthropic's.
+fn editor_tool() -> Value {
+    json!({
+        "name": "str_replace_based_edit_tool",
+        "description": "View, create and edit text files on the user's Mac. Commands: view (a file, with \
+    numbered lines, optionally view_range [start, end]; or a directory), create (path, file_text), str_replace \
+    (replace old_str, which must appear exactly once, with new_str), insert (insert_text after line insert_line, 0 for the top). \
+    Paths are absolute.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "enum": ["view", "create", "str_replace", "insert"]},
+                "path": {"type": "string"},
+                "file_text": {"type": "string"},
+                "old_str": {"type": "string"},
+                "new_str": {"type": "string"},
+                "insert_line": {"type": "integer"},
+                "insert_text": {"type": "string"},
+                "view_range": {"type": "array", "items": {"type": "integer"}}
+            },
+            "required": ["command", "path"]
+        }
+    })
+}
+
 fn messages_tool() -> Value {
     json!({
         "name": "messages",

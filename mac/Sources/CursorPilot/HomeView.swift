@@ -747,18 +747,33 @@ struct APIKeyCard: View {
     @ObservedObject var model: AppModel
     @State private var key = ""
 
+    private var ablit: Bool { model.usesAbliteration }
+
+    private func save() {
+        guard !key.isEmpty else { return }
+        if ablit { model.abliterationKey = key } else { model.apiKey = key }
+        key = ""
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Connect your Anthropic API key", systemImage: "key.fill").font(.headline)
-            Text("Cursor Pilot talks to Claude directly with your own key. It's kept in your keychain and only sent to api.anthropic.com.")
+            Label("Connect your \(model.providerName) API key", systemImage: "key.fill").font(.headline)
+            Text(ablit
+                 ? "\(SettingsView.modelName(model.model)) runs on abliteration.ai with your own key. It's kept in your keychain and only sent to api.abliteration.ai."
+                 : "Cursor Pilot talks to Claude directly with your own key. It's kept in your keychain and only sent to api.anthropic.com.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             HStack {
-                SecureField("sk-ant-…", text: $key)
+                SecureField(ablit ? "ak_…" : "sk-ant-…", text: $key)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { if !key.isEmpty { model.apiKey = key } }
-                Button("Save") { model.apiKey = key }.disabled(key.isEmpty)
-                Link("Get a key", destination: URL(string: "https://console.anthropic.com/settings/keys")!)
+                    .onSubmit(save)
+                Button("Save", action: save).disabled(key.isEmpty)
+                Button("Paste") {
+                    key = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    save()
+                }
+                .disabled(!key.isEmpty)
+                Link("Get a key", destination: URL(string: ablit ? "https://abliteration.ai/console" : "https://console.anthropic.com/settings/keys")!)
             }
         }
         .padding()

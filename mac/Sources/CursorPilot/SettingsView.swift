@@ -5,7 +5,6 @@ import SwiftUI
 /// Everything you can change, as a page in the Home window.
 struct SettingsView: View {
     @ObservedObject var model: AppModel
-    @State private var keyDraft = ""
     @State private var permissions = PermissionStatus.current()
     @State private var voices: [AVSpeechSynthesisVoice] = []
     @State private var languages: [(id: String, name: String)] = []
@@ -54,29 +53,23 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("API key") {
-                    HStack {
-                        SecureField("API key", text: $keyDraft,
-                                    prompt: Text(model.hasAPIKey ? "Saved in your keychain" : "sk-ant-…"))
-                            .labelsHidden()
-                            .frame(minWidth: 240)
-                            .onSubmit(saveKey)
-                        Button("Save", action: saveKey).disabled(keyDraft.isEmpty)
-                        if model.hasAPIKey && keyDraft.isEmpty {
-                            Button("Remove", role: .destructive) { model.apiKey = "" }
-                        }
-                    }
-                }
+                KeyRow(title: "Anthropic key", prompt: "sk-ant-…", key: $model.apiKey)
+                KeyRow(title: "abliteration.ai key", prompt: "ak_…", key: $model.abliterationKey)
                 Picker("Model", selection: $model.model) {
-                    ForEach(AppModel.models, id: \.self) { Text(Self.modelName($0)).tag($0) }
+                    Section("Claude") {
+                        ForEach(AppModel.claudeModels, id: \.self) { Text(Self.modelName($0)).tag($0) }
+                    }
+                    Section("abliteration.ai") {
+                        ForEach(AppModel.abliterationModels, id: \.self) { Text(Self.modelName($0)).tag($0) }
+                    }
                 }
                 Picker("Effort", selection: $model.effort) {
                     ForEach(AppModel.efforts, id: \.self) { Text($0.capitalized).tag($0) }
                 }
             } header: {
-                Text("Claude")
+                Text("Model")
             } footer: {
-                Text("Lower effort answers faster; higher effort thinks longer about hard questions.")
+                Text(modelNote)
             }
 
             Section {
@@ -387,10 +380,14 @@ struct SettingsView: View {
         return image
     }
 
-    private func saveKey() {
-        guard !keyDraft.isEmpty else { return }
-        model.apiKey = keyDraft
-        keyDraft = ""
+    private var modelNote: String {
+        var note = "Lower effort answers faster; higher effort thinks longer about hard questions."
+        if model.usesAbliteration {
+            note += " abliteration.ai models get your question and screenshots through api.abliteration.ai, with the same tools but without Claude's computer use and web search."
+            if model.model == "abliterated-model-large-v2" { note += " This one can't see images, so it doesn't get screenshots." }
+            if model.abliterationKey.isEmpty { note += " Add your abliteration.ai key above to use it." }
+        }
+        return note
     }
 
     static func modelName(_ id: String) -> String {
@@ -399,6 +396,9 @@ struct SettingsView: View {
         case "claude-sonnet-5-5": "Claude Sonnet 5.5"
         case "claude-haiku-5-5": "Claude Haiku 5.5 (fastest)"
         case "claude-fable-5-1": "Claude Fable 5.1"
+        case "abliterated-model-large-flash": "Abliterated Large Flash (1M context)"
+        case "abliterated-model": "Abliterated"
+        case "abliterated-model-large-v2": "Abliterated Large v2 (text only)"
         default: id
         }
     }
@@ -495,4 +495,54 @@ enum AccessInfo {
 
 extension Bundle {
     var shortVersion: String { infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev" }
+}
+
+/// An API key kept in the keychain: type it, or paste it straight from the
+/// clipboard without it ever showing on screen.
+private struct KeyRow: View {
+    let title: String
+    let prompt: String
+    @Binding var key: String
+    @State private var draft = ""
+    @State private var pasted = false
+
+    private var saved: Bool { !key.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    var body: some View {
+        LabeledContent(title) {
+            HStack {
+                SecureField(title, text: $draft, prompt: Text(saved ? "Saved in your keychain" : prompt))
+                    .labelsHidden()
+                    .frame(minWidth: 200)
+                    .onSubmit(save)
+                if draft.isEmpty {
+                    Button {
+                        let text = NSPasteboard.general.string(forType: .string)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        guard !text.isEmpty, !text.contains(where: \.isWhitespace) else { NSSound.beep(); return }
+                        key = text
+                        withAnimation { pasted = true }
+                        Task {
+                            try? await Task.sleep(for: .seconds(1.6))
+                            withAnimation { pasted = false }
+                        }
+                    } label: {
+                        Label(pasted ? "Saved" : "Paste", systemImage: pasted ? "checkmark" : "doc.on.clipboard")
+                    }
+                    .help("Saves the key on your clipboard")
+                } else {
+                    Button("Save", action: save)
+                }
+                if saved && draft.isEmpty && !pasted {
+                    Button("Remove", role: .destructive) { key = "" }
+                }
+            }
+        }
+    }
+
+    private func save() {
+        guard !draft.isEmpty else { return }
+        key = draft
+        draft = ""
+    }
 }

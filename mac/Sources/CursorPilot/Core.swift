@@ -4,6 +4,8 @@ import Foundation
 /// Settings handed to the Rust core. Field names match `claude::Settings`.
 struct CoreSettings: Encodable {
     var apiKey: String
+    /// Where the Messages API is: Anthropic's, or another host that speaks it.
+    var baseURL: String
     var model: String
     var effort: String
     /// Mac access: "off" or "on".
@@ -13,6 +15,7 @@ struct CoreSettings: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case apiKey = "api_key"
+        case baseURL = "base_url"
         case model, effort, access, input
     }
 }

@@ -45,6 +45,16 @@ final class AppModel: ObservableObject {
         }
     }
     private var isLoadingKey = false
+    /// The abliteration.ai key, for the abliterated models.
+    @Published var abliterationKey: String {
+        didSet {
+            if !isLoadingKey {
+                let key = abliterationKey
+                Task.detached { Keychain.saveAbliterationKey(key) }
+            }
+            configureCore()
+        }
+    }
     @Published var model: String { didSet { defaults.set(model, forKey: "model"); configureCore() } }
     @Published var effort: String { didSet { defaults.set(effort, forKey: "effort"); configureCore() } }
     @Published var speakReplies: Bool { didSet { defaults.set(speakReplies, forKey: "speakReplies") } }
@@ -102,7 +112,16 @@ final class AppModel: ObservableObject {
     /// The talk key as shown in hints, e.g. "⌃⌥".
     var talkDisplay: String { talkKey == .controlOption ? "⌃⌥" : shortcut.display }
 
-    static let models = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+    static let claudeModels = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+    /// abliteration.ai's models, which speak the same Messages API.
+    static let abliterationModels = ["abliterated-model-large-flash", "abliterated-model", "abliterated-model-large-v2"]
+    static let models = claudeModels + abliterationModels
+
+    static func isAbliteration(_ model: String) -> Bool { model.hasPrefix("abliterated-") }
+    var usesAbliteration: Bool { Self.isAbliteration(model) }
+    /// The key the chosen model needs.
+    var activeKey: String { usesAbliteration ? abliterationKey : apiKey }
+    var providerName: String { usesAbliteration ? "abliteration.ai" : "Anthropic" }
     static let efforts = ["low", "medium", "high", "xhigh", "max"]
 
     let core: Core
@@ -139,7 +158,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var requestFinished = true
     private var resetTask: Task<Void, Never>?
 
-    var hasAPIKey: Bool { !apiKey.trimmingCharacters(in: .whitespaces).isEmpty }
+    var hasAPIKey: Bool { !activeKey.trimmingCharacters(in: .whitespaces).isEmpty }
 
     private init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -149,6 +168,7 @@ final class AppModel: ObservableObject {
         self.core = core
 
         apiKey = ""
+        abliterationKey = ""
         model = defaults.string(forKey: "model") ?? Self.models[0]
         effort = defaults.string(forKey: "effort") ?? "low"
         speakReplies = defaults.object(forKey: "speakReplies") as? Bool ?? true
@@ -218,9 +238,10 @@ final class AppModel: ObservableObject {
     /// `-CPSkipKeychain YES` skips it, for UI work without prompts.
     func loadAPIKey() async {
         guard !defaults.bool(forKey: "CPSkipKeychain") else { return }
-        let key = await Task.detached { Keychain.loadAPIKey() }.value
+        let (key, ablit) = await Task.detached { (Keychain.loadAPIKey(), Keychain.loadAbliterationKey()) }.value
         isLoadingKey = true
         apiKey = key
+        abliterationKey = ablit
         isLoadingKey = false
     }
 
@@ -286,7 +307,9 @@ final class AppModel: ObservableObject {
     }
 
     private func configureCore() {
-        core.configure(CoreSettings(apiKey: apiKey, model: model, effort: effort, access: macAccess ? "on" : "off", input: inputMode))
+        core.configure(CoreSettings(apiKey: activeKey,
+                                    baseURL: usesAbliteration ? "https://api.abliteration.ai" : "https://api.anthropic.com",
+                                    model: model, effort: effort, access: macAccess ? "on" : "off", input: inputMode))
     }
 
     /// Gets the chosen speech engine ready: the cloud's key and voice list,
@@ -369,7 +392,7 @@ final class AppModel: ObservableObject {
     func ask(_ text: String, includeScreen: Bool) async {
         interrupt()
         guard hasAPIKey else {
-            showError("Add your Anthropic API key in Cursor Pilot's Settings first.")
+            showError("Add your \(providerName) API key in Cursor Pilot's Settings first.")
             return
         }
         Sounds.play(.send)

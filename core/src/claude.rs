@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 const API_VERSION: &str = "2026-10-21";
+/// The version other hosts that speak the Messages API document.
+const COMPAT_API_VERSION: &str = "2023-06-01";
+/// abliteration.ai models that can't take images.
+const TEXT_ONLY_MODELS: &[&str] = &["abliterated-model-large-v2", "abliterated-model-large"];
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// Models that accept `fallbacks: "default"` on the Claude API.
 const FALLBACK_MODELS: &[&str] = &[
@@ -80,7 +84,7 @@ impl ApiError {
 
     pub fn message(&self) -> String {
         match self {
-            ApiError::MissingKey => "Add your Anthropic API key in Settings.".into(),
+            ApiError::MissingKey => "Add your API key in Settings.".into(),
             ApiError::Cancelled => "Cancelled.".into(),
             ApiError::Refusal(Some(c)) => format!("Claude declined to answer ({c})."),
             ApiError::Refusal(None) => "Claude declined to answer.".into(),
@@ -104,7 +108,33 @@ pub struct Completion {
     pub model: Option<String>,
 }
 
+impl Settings {
+    /// Whether requests go to Anthropic's own API (rather than another host
+    /// that speaks the Messages API, such as abliteration.ai).
+    pub fn is_anthropic(&self) -> bool {
+        self.base_url.contains("anthropic.com")
+    }
+}
+
+/// Replaces image blocks (also inside tool results) with a short note, for
+/// models that reject images.
+fn without_images(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(without_images).collect()),
+        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("image") => {
+            json!({"type": "text", "text": "[A screenshot was here; this model can't see images.]"})
+        }
+        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), without_images(v))).collect()),
+        other => other.clone(),
+    }
+}
+
 pub fn build_body(settings: &Settings, system: &str, messages: &[Value], tools: &[Value]) -> Value {
+    let messages = if TEXT_ONLY_MODELS.contains(&settings.model.as_str()) {
+        messages.iter().map(without_images).collect()
+    } else {
+        messages.to_vec()
+    };
     let mut body = json!({
         "model": settings.model,
         "max_tokens": settings.max_tokens,
@@ -163,7 +193,7 @@ pub fn stream(
         .post(&url)
         .set("content-type", "application/json")
         .set("x-api-key", settings.api_key.trim())
-        .set("anthropic-version", API_VERSION);
+        .set("anthropic-version", if settings.is_anthropic() { API_VERSION } else { COMPAT_API_VERSION });
     if body.get("fallbacks").is_some() {
         req = req.set("anthropic-beta", FALLBACK_BETA);
     }

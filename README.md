@@ -390,6 +390,17 @@ Settings › Speech picks the engine that hears you and reads replies:
   20 exchanges.
 - Sign-in is by API key only. Anthropic does not allow third-party apps to
   route requests through Claude.ai subscription plans.
+- abliteration.ai models (`abliterated-model-large-flash`, `abliterated-model`,
+  `abliterated-model-large-v2`) are in the same model picker, with their own
+  key (keychain service `com.louistuis.cursorpilot.abliteration`, or
+  `$ABLIT_KEY`). abliteration.ai speaks the Messages API, so the same client
+  is used against `https://api.abliteration.ai` with
+  `anthropic-version: 2023-06-01`. Claude's built-in tool types are not sent
+  there: bash and the file editor go as plain tools with the same input shape,
+  and computer use and web search are left out. `abliterated-model-large-v2`
+  is text only, so screenshots are replaced by a short note.
+- Each key row in Settings has a Paste button that saves the key on the
+  clipboard without showing it.
 
 ## Roadmap
 
