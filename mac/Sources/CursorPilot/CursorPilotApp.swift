@@ -279,6 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     buddy.state.caption = "That's the export button. Click it, then pick PDF in the menu that opens."
                 }
             }
+            if let demo = UserDefaults.standard.string(forKey: "CPNotchDemo") { model.notchDemo(demo) }
             // `-CPOpenHome settings|drawings|chat` opens Home on that page (for UI work).
             switch UserDefaults.standard.string(forKey: "CPOpenHome") {
             case "settings": HomeWindow.shared.show(.settings)

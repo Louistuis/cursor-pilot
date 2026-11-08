@@ -954,7 +954,9 @@ struct KaraokeCaption: View {
         let lines = Self.lines(words, budget: 32)
         let current = words.last { $0.location <= spoken.word.location }?.id ?? -1
         let row = lines.firstIndex { $0.contains { $0.id == current } } ?? 0
-        let shown = Array(lines.indices.filter { $0 >= row && $0 <= row + 1 })
+        // Two lines: this one and the next, or the one before on the last line.
+        let first = row == lines.count - 1 ? max(row - 1, 0) : row
+        let shown = Array(lines.indices.filter { $0 >= first && $0 <= first + 1 })
         VStack(alignment: .leading, spacing: 4) {
             ForEach(shown, id: \.self) { i in
                 HStack(spacing: 5) {

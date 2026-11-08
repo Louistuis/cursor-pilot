@@ -245,7 +245,12 @@ final class AppModel: ObservableObject {
                 return
             }
             heardText = text
-            overlay.state.caption = text
+            if usesLiveVoice && requestActive {
+                // Talking while it works: the words show under the notch.
+                liveCaption = LiveCaption(you: true, spoken: Self.karaoke(text, heard: (text as NSString).length))
+            } else {
+                overlay.state.caption = text
+            }
         }
         speaker.onIdle = { [weak self] in
             guard let self else { return }
@@ -452,6 +457,8 @@ final class AppModel: ObservableObject {
     func endListening() async {
         if usesLiveVoice {
             LiveVoice.shared.releaseTalk()
+            LiveVoice.shared.micSink = nil
+            voice.endListen()
             if phase == .listening { setPhase(.thinking) }
             return
         }
@@ -1039,12 +1046,68 @@ final class AppModel: ObservableObject {
             return
         }
         wireLiveVoice()
-        LiveVoice.shared.handsFree = handsFree
-        LiveVoice.shared.pressTalk(key: openAIKey)
+        let live = LiveVoice.shared
+        live.handsFree = handsFree
+        live.pressTalk(key: openAIKey)
+        overlay.state.caption = ""
+        overlay.state.spoken = nil
+        if requestActive { liveCaption = nil }
+        // Apple's on-device recognizer writes down what you say as you say
+        // it, from the same mic; OpenAI's transcript replaces it when it comes.
+        if let format = live.micFormat, let feed = voice.listen(locales: resolvedListenLocales, format: format) {
+            live.micSink = feed
+        }
         if !requestActive {
             setPhase(.listening)
             Sounds.play(.listen)
         }
+    }
+
+    /// `-CPNotchDemo caption|chat`: fills the notch for design work.
+    func notchDemo(_ kind: String) {
+        if kind == "caption" {
+            let line = "I found three invoices from March. I'm putting them in one folder on your desktop now."
+            liveCaption = LiveCaption(you: false, spoken: Self.karaoke(line, heard: 30))
+            setPhase(.thinking)
+        } else {
+            heardText = "What's the biggest file in my Downloads folder?"
+            replyText = "The biggest file in **Downloads** is `OpenBot-0.53.0-arm64.dmg` at 325 MB. Want me to move it to the Trash?"
+        }
+    }
+
+    /// A caption of the live voice: what you're saying, or what it's saying.
+    struct LiveCaption: Equatable {
+        var you: Bool
+        var spoken: SpokenWord
+    }
+    /// Shown under the notch while the agent works (the buddy may be busy
+    /// or parked); otherwise the caption is in the buddy's bubble.
+    @Published var liveCaption: LiveCaption?
+    private var liveCaptionClear: Task<Void, Never>?
+
+    /// The sentence `heard` (UTF-16 characters into `text`) has reached, and
+    /// the word it's on, for the read-along caption.
+    static func karaoke(_ text: String, heard: Int) -> SpokenWord {
+        let ns = text as NSString
+        let at = min(max(heard, 0), ns.length)
+        var sentence = NSRange(location: 0, length: ns.length)
+        ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length), options: [.bySentences, .substringNotRequired]) { _, r, _, stop in
+            if r.location <= max(at - 1, 0) { sentence = r } else { stop.pointee = true }
+        }
+        let line = ns.substring(with: sentence).trimmingCharacters(in: .whitespacesAndNewlines)
+        let lead = (ns.substring(with: sentence) as NSString).range(of: line).location
+        let inLine = max(0, at - sentence.location - (lead == NSNotFound ? 0 : lead))
+        var word = NSRange(location: 0, length: 0)
+        (line as NSString).enumerateSubstrings(in: NSRange(location: 0, length: (line as NSString).length),
+                                               options: [.byWords, .substringNotRequired]) { _, r, _, stop in
+            if r.location < max(inLine, 1) { word = r } else { stop.pointee = true }
+        }
+        return SpokenWord(sentence: line, word: word)
+    }
+
+    private func showLiveCaption(_ caption: LiveCaption?) {
+        liveCaptionClear?.cancel()
+        liveCaption = caption
     }
 
     /// Connects the live voice's events to the buddy and to Claude, once.
@@ -1056,17 +1119,38 @@ final class AppModel: ObservableObject {
             switch event {
             case .heard(let text):
                 heardText = text
+                if phase == .listening { overlay.state.caption = text }
+            case .level(let level):
+                guard phase == .listening || talkingOverTask || requestActive else { return }
+                overlay.state.level = level
+                glow.level = level
             case .speakingStarted:
                 overlay.state.readAlong = false
+                overlay.state.spoken = nil
                 speakingNow = true
                 if !requestActive, phase != .answering {
                     requestFinished = false
                     setPhase(.answering)
                 }
-            case .saying(let text):
-                if !requestActive || overlay.state.dock == 0 { overlay.state.caption = captionText(text) }
+            case .saying(let text, let heard):
+                guard !text.isEmpty else { return }
+                let spoken = Self.karaoke(text, heard: heard)
+                if requestActive {
+                    showLiveCaption(LiveCaption(you: false, spoken: spoken))
+                } else {
+                    liveCaption = nil
+                    overlay.state.spoken = spoken
+                    overlay.state.caption = captionText(text)
+                }
             case .speakingEnded:
                 speakingNow = false
+                // The last line stays a moment, then the caption goes.
+                liveCaptionClear?.cancel()
+                liveCaptionClear = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(2.2))
+                    guard !Task.isCancelled else { return }
+                    self?.liveCaption = nil
+                }
                 if !requestActive {
                     requestFinished = true
                     settleIfDone()

@@ -22,8 +22,11 @@ final class LiveVoice {
     enum Event {
         /// What you said, written down.
         case heard(String)
-        /// What it's saying so far in this reply.
-        case saying(String)
+        /// What it's saying in this reply so far, and how much of it (UTF-16
+        /// characters) has been heard: the caption follows the voice.
+        case saying(String, heard: Int)
+        /// How loud you are, 0...1, while the mic is open.
+        case level(Float)
         case speakingStarted
         case speakingEnded
         /// Something for Claude to do: the request, and the call to answer.
@@ -56,8 +59,25 @@ final class LiveVoice {
     private var playingItem: String?
     private var itemStartSample: AVAudioFramePosition = 0
     private var buffersOut = 0
-    private var transcript = ""
     private var speaking = false
+    /// Each spoken reply's words and how much of its audio is queued and
+    /// played, in the order they're heard, for the caption.
+    private struct Said { var text = ""; var scheduled = 0; var played = 0 }
+    private var said: [String: Said] = [:]
+    private var saidOrder: [String] = []
+    /// When the last buffer finished (or playback started from silence).
+    private var boundary: CFTimeInterval = 0
+    private var captionTimer: Timer?
+
+    /// The mic as one channel at its own rate, once audio is running: the
+    /// format `micSink` gets.
+    private(set) var micFormat: AVAudioFormat?
+    /// Gets a copy of the mic while it's open (for the live caption of what
+    /// you say); set and cleared on the main thread, read on the audio thread.
+    var micSink: (@Sendable (AVAudioPCMBuffer) -> Void)? {
+        get { gate.sink }
+        set { gate.sink = newValue }
+    }
 
     /// The server already said what went wrong; the closed socket after it
     /// needs no second message.
@@ -347,13 +367,13 @@ final class LiveVoice {
             }
         case "response.created":
             responseActive = true
-            transcript = ""
         case "response.output_audio.delta":
             guard let b64 = event["delta"] as? String, let data = Data(base64Encoded: b64) else { return }
             play(data, item: event["item_id"] as? String)
         case "response.output_audio_transcript.delta":
-            transcript += event["delta"] as? String ?? ""
-            onEvent?(.saying(transcript))
+            guard let id = event["item_id"] as? String else { return }
+            if said[id] == nil { saidOrder.append(id) }
+            said[id, default: Said()].text += event["delta"] as? String ?? ""
         case "conversation.item.input_audio_transcription.completed":
             if let heard = event["transcript"] as? String, !heard.isEmpty { onEvent?(.heard(heard)) }
         case "input_audio_buffer.speech_started":
@@ -422,6 +442,7 @@ final class LiveVoice {
             return
         }
         steps.append("converter")
+        micFormat = mono
         let gate = gate
         engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: input) { buffer, _ in
             gate.noteBuffer(buffer)
@@ -429,6 +450,13 @@ final class LiveVoice {
                   let first = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength) else { return }
             first.frameLength = buffer.frameLength
             first.floatChannelData![0].update(from: src, count: Int(buffer.frameLength))
+            gate.sink?(first)
+            var sum: Float = 0
+            for i in 0..<Int(buffer.frameLength) { sum += src[i] * src[i] }
+            let rms = (sum / Float(max(buffer.frameLength, 1))).squareRoot()
+            // About -50 dB to -10 dB, as 0...1 (like the other engines' level).
+            let level = min(max((20 * log10(max(rms, 1e-6)) + 50) / 40, 0), 1)
+            Task { @MainActor [weak self] in self?.onEvent?(.level(level)) }
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * 24_000 / input.sampleRate) + 32
             guard let out = AVAudioPCMBuffer(pcmFormat: wire, frameCapacity: capacity) else { return }
             var fed = false
@@ -501,11 +529,21 @@ final class LiveVoice {
         if !speaking {
             speaking = true
             onEvent?(.speakingStarted)
+            startCaption()
         }
+        // Nothing was playing: the voice (re)starts now.
+        if buffersOut == 0 { boundary = CACurrentMediaTime() }
+        let id = item ?? ""
+        if said[id] == nil { saidOrder.append(id) }
+        said[id, default: Said()].scheduled += count
         buffersOut += 1
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                if self.said[id] != nil {
+                    self.said[id]!.played += count
+                    self.boundary = CACurrentMediaTime()
+                }
                 self.buffersOut = max(0, self.buffersOut - 1)
                 if self.buffersOut == 0, !self.responseActive, self.speaking { self.endSpeaking() }
             }
@@ -529,13 +567,45 @@ final class LiveVoice {
         player.stop()
         buffersOut = 0
         playingItem = nil
+        said = [:]
+        saidOrder = []
         if audioRunning { player.play() }
         if speaking { endSpeaking() }
     }
 
     private func endSpeaking() {
         speaking = false
+        captionTimer?.invalidate()
+        captionTimer = nil
+        if let last = saidOrder.last(where: { !(said[$0]?.text.isEmpty ?? true) }), let text = said[last]?.text {
+            onEvent?(.saying(text, heard: (text as NSString).length))
+        }
+        // Words of a reply whose audio is still to come stay for it.
+        for id in saidOrder where (said[id]?.scheduled ?? 0) > 0 { said[id] = nil }
+        saidOrder.removeAll { said[$0] == nil }
         onEvent?(.speakingEnded)
+    }
+
+    /// The caption keeps pace with the voice: the share of the reply's
+    /// audio played so far, applied to its words.
+    private func startCaption() {
+        captionTimer?.invalidate()
+        let t = Timer(timeInterval: 1.0 / 20, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tickCaption() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        captionTimer = t
+    }
+
+    private func tickCaption() {
+        // The reply being heard: the first with audio not yet played.
+        guard speaking, let id = saidOrder.first(where: { (said[$0]?.played ?? 0) < (said[$0]?.scheduled ?? 0) }),
+              let now = said[id], !now.text.isEmpty else { return }
+        var played = now.played
+        if buffersOut > 0 { played += Int((CACurrentMediaTime() - boundary) * 24_000) }
+        let share = min(Double(played) / Double(now.scheduled), 1)
+        let length = (now.text as NSString).length
+        onEvent?(.saying(now.text, heard: Int((Double(length) * share).rounded())))
     }
 }
 
@@ -546,6 +616,12 @@ private final class AudioGate: @unchecked Sendable {
     /// For diagnostics: mic buffers seen, chunks sent, loudest sample.
     var buffersIn = 0, chunksSent = 0, peak: Float = 0
     private var _task: URLSessionWebSocketTask?
+    private var _sink: (@Sendable (AVAudioPCMBuffer) -> Void)?
+
+    var sink: (@Sendable (AVAudioPCMBuffer) -> Void)? {
+        get { lock.withLock { _sink } }
+        set { lock.withLock { _sink = newValue } }
+    }
 
     var open: Bool {
         get { lock.withLock { _open } }

@@ -324,22 +324,29 @@ private struct ChatView: View {
             composerRow
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
         .frame(maxWidth: 740)
         .frame(maxWidth: .infinity)
         .background(.bar)
     }
 
+    /// Like Messages: a round button for the screen, then the message pill
+    /// with the mic (or send) inside it.
     private var composerRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
             Button { includeScreen.toggle() } label: {
-                Image(systemName: includeScreen ? "eye.circle.fill" : "eye.slash.circle.fill")
-                    .font(.system(size: 24))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(includeScreen ? pilotAccent : .secondary)
+                Image(systemName: includeScreen ? "eye.fill" : "eye.slash")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(includeScreen ? Color.white : Color.secondary)
+                    .contentTransition(.symbolEffect(.replace))
+                    .frame(width: 30, height: 30)
+                    .background(includeScreen ? pilotAccent : Color.secondary.opacity(0.16), in: Circle())
+                    .contentShape(Circle())
             }
-            .buttonStyle(.plain)
-            .help(includeScreen ? "Cursor Pilot sees your screen when you send" : "Screen not included")
+            .buttonStyle(PressButtonStyle())
+            .help(includeScreen ? "Cursor Pilot sees your screen when you send (click to turn off)" : "Your screen isn't sent (click to turn on)")
+            .animation(.spring(response: 0.3, dampingFraction: 0.75), value: includeScreen)
 
             HStack(alignment: .bottom, spacing: 4) {
                 TextField("Message", text: $draft, axis: .vertical)
@@ -348,46 +355,56 @@ private struct ChatView: View {
                     .lineLimit(1...8)
                     .focused($composerFocused)
                     .onSubmit(send)
-                    .padding(.vertical, 5)
+                    .padding(.vertical, 6)
                 trailingButton
             }
-            .padding(.leading, 12)
+            .padding(.leading, 13)
             .padding(.trailing, 3)
-            .padding(.vertical, 2)
-            .background(.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(.vertical, 1)
+            .frame(minHeight: 30)
+            .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(composerFocused ? 0.45 : 0.28), lineWidth: 0.8))
+                .strokeBorder(Color.secondary.opacity(composerFocused ? 0.5 : 0.3), lineWidth: 0.8))
+            .animation(.easeOut(duration: 0.18), value: composerFocused)
         }
     }
 
     @ViewBuilder private var trailingButton: some View {
-        if model.phase == .thinking || model.phase == .answering {
-            Button { model.interrupt() } label: {
-                Image(systemName: "stop.circle.fill").font(.system(size: 22))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Stop")
-            .keyboardShortcut(.escape, modifiers: [])
-        } else if canSend {
-            Button(action: send) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.white, pilotAccent)
-            }
-            .buttonStyle(.plain)
-            .transition(.scale.combined(with: .opacity))
-        } else {
-            Button(action: model.toggleListening) {
-                Image(systemName: model.phase == .listening ? "waveform.circle.fill" : "mic")
-                    .font(.system(size: model.phase == .listening ? 22 : 15, weight: .medium))
-                    .frame(width: 24, height: 24)
-                    .foregroundStyle(model.phase == .listening ? Color.red : .secondary)
+        ZStack {
+            if model.phase == .thinking || model.phase == .answering {
+                round("stop.fill", fill: Color.secondary.opacity(0.22), glyph: .primary) { model.interrupt() }
+                    .help("Stop")
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .transition(.scale(scale: 0.5).combined(with: .opacity))
+            } else if canSend {
+                round("arrow.up", fill: pilotAccent, glyph: .white, action: send)
+                    .help("Send (↩)")
+                    .transition(.scale(scale: 0.5).combined(with: .opacity))
+            } else {
+                round(model.phase == .listening ? "waveform" : "mic.fill",
+                      fill: model.phase == .listening ? Color.red : Color.clear,
+                      glyph: model.phase == .listening ? .white : .primary, action: model.toggleListening)
                     .symbolEffect(.variableColor.iterative, isActive: model.phase == .listening)
+                    .help(model.phase == .listening ? "Send what you said" : "Talk (or hold \(model.talkDisplay) anywhere)")
+                    .transition(.scale(scale: 0.5).combined(with: .opacity))
             }
-            .buttonStyle(.plain)
-            .help(model.phase == .listening ? "Send what you said" : "Talk (or hold \(model.talkDisplay) anywhere)")
         }
+        .frame(width: 24, height: 24)
+        .padding(.bottom, 2)
+        .animation(.spring(response: 0.28, dampingFraction: 0.72), value: canSend)
+        .animation(.spring(response: 0.28, dampingFraction: 0.72), value: model.phase)
+    }
+
+    private func round(_ name: String, fill: Color, glyph: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: name)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(glyph)
+                .frame(width: 24, height: 24)
+                .background(fill, in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressButtonStyle())
     }
 
     private var canSend: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.hasAPIKey }
@@ -731,13 +748,25 @@ private struct StepList: View {
 private struct ChatEmptyState: View {
     @ObservedObject var model: AppModel
     var body: some View {
-        VStack(spacing: 10) {
-            ShaderTile { SpeakingWave() }.frame(width: 84, height: 84)
-            Text("What can I do for you?").font(.title3.weight(.semibold))
-            Text("Text me here, or hold \(model.talkDisplay) anywhere and just talk.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        VStack(spacing: 14) {
+            ShaderTile { SpeakingWave() }.frame(width: 72, height: 72)
+                .shadow(color: pilotAccent.opacity(0.25), radius: 18, y: 6)
+            VStack(spacing: 6) {
+                Text("What should we do?").font(.system(size: 22, weight: .semibold))
+                Text("Cursor Pilot sees your screen and works on your Mac.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 7) {
+                Text("Hold")
+                HStack(spacing: 4) {
+                    ForEach(Array(TalkHint.caps(model.talkDisplay).enumerated()), id: \.offset) { _, cap in KeyCap(label: cap) }
+                }
+                Text("anywhere and talk, or type below.")
+            }
+            .font(.system(size: 12.5, weight: .medium))
+            .foregroundStyle(.secondary)
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity)
     }

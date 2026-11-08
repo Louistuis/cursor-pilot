@@ -533,38 +533,64 @@ private struct KeyRow: View {
     @Binding var key: String
     @State private var draft = ""
     @State private var pasted = false
+    /// Typing a replacement for a saved key.
+    @State private var editing = false
 
     private var saved: Bool { !key.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         LabeledContent(title) {
-            HStack {
-                SecureField(title, text: $draft, prompt: Text(saved ? "Saved in your keychain" : prompt))
-                    .labelsHidden()
-                    .frame(minWidth: 200)
-                    .onSubmit(save)
+            HStack(spacing: 8) {
+                if saved && draft.isEmpty && !editing {
+                    Label(pasted ? "Saved" : "In your keychain", systemImage: "checkmark.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.green)
+                        .contentTransition(.interpolate)
+                        .transition(.blurReplace)
+                } else {
+                    SecureField(title, text: $draft, prompt: Text(prompt))
+                        .labelsHidden()
+                        .frame(width: 190)
+                        .onSubmit(save)
+                        .transition(.blurReplace)
+                }
                 if draft.isEmpty {
                     Button {
                         let text = NSPasteboard.general.string(forType: .string)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                         guard !text.isEmpty, !text.contains(where: \.isWhitespace) else { NSSound.beep(); return }
                         key = text
-                        withAnimation { pasted = true }
+                        editing = false
+                        pasted = true
                         Task {
                             try? await Task.sleep(for: .seconds(1.6))
-                            withAnimation { pasted = false }
+                            pasted = false
                         }
                     } label: {
-                        Label(pasted ? "Saved" : "Paste", systemImage: pasted ? "checkmark" : "doc.on.clipboard")
+                        Label("Paste", systemImage: "doc.on.clipboard")
                     }
-                    .help("Saves the key on your clipboard")
+                    .help(saved ? "Replaces the key with the one on your clipboard" : "Saves the key on your clipboard")
                 } else {
-                    Button("Save", action: save)
+                    Button("Save", action: save).keyboardShortcut(.defaultAction)
                 }
-                if saved && draft.isEmpty && !pasted {
-                    Button("Remove", role: .destructive) { key = "" }
+                if saved && draft.isEmpty {
+                    Menu {
+                        Button("Type a New Key") { editing = true }
+                        Button("Remove Key", role: .destructive) { key = "" }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("More")
                 }
             }
+            .animation(.spring(response: 0.32, dampingFraction: 0.84), value: saved)
+            .animation(.spring(response: 0.32, dampingFraction: 0.84), value: editing)
+            .animation(.spring(response: 0.32, dampingFraction: 0.84), value: pasted)
+            .animation(.spring(response: 0.32, dampingFraction: 0.84), value: draft.isEmpty)
         }
     }
 
@@ -572,5 +598,6 @@ private struct KeyRow: View {
         guard !draft.isEmpty else { return }
         key = draft
         draft = ""
+        editing = false
     }
 }

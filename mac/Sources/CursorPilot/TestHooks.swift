@@ -88,9 +88,18 @@ enum TestHooks {
         let live = LiveVoice.shared
         var said: [String] = [], heard: [String] = [], tasks: [String] = [], errors: [String] = []
         var spoke = 0
+        // How far into its words the caption is, a few times a second: it
+        // should climb with the voice, not jump to the end.
+        var pace: [String] = []
+        let paceStart = Date()
         live.onEvent = { event in
             switch event {
-            case .saying(let t): if said.isEmpty { said.append(t) } else { said[said.count - 1] = t }
+            case .saying(let t, let at):
+                if said.isEmpty { said.append(t) } else { said[said.count - 1] = t }
+                let share = Int(100 * Double(at) / Double(max((t as NSString).length, 1)))
+                pace.append(String(format: "%.1fs %d%% %@", Date().timeIntervalSince(paceStart), share,
+                                   AppModel.karaoke(t, heard: at).sentence.prefix(24) as CVarArg))
+            case .level: break
             case .heard(let t): heard.append(t)
             case .speakingStarted: spoke += 1; said.append("")
             case .speakingEnded: break
@@ -106,7 +115,7 @@ enum TestHooks {
         live.sendText("What's the biggest file in my Downloads folder?", key: model.openAIKey)
         try? await Task.sleep(for: .seconds(14))
         write(["connected": live.connected, "said": said, "heard": heard, "tasks": tasks, "errors": errors,
-               "spoke": spoke, "events": live.log, "seconds": Date().timeIntervalSince(started)], to: out)
+               "spoke": spoke, "pace": pace.enumerated().filter { $0.offset % 6 == 0 }.map(\.element), "events": live.log, "seconds": Date().timeIntervalSince(started)], to: out)
         live.disconnect()
     }
 

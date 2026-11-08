@@ -97,6 +97,44 @@ final class VoiceInput {
         try start(locales: locales, input: nil)
     }
 
+    /// Writes down audio someone else records (the live voice's mic), for
+    /// the live caption: returns where each buffer goes. `onPartial` gets
+    /// the words as they come; `endListen()` stops it. Leaves this
+    /// recorder's own mic alone.
+    func listen(locales: [Locale], format: AVAudioFormat) -> (@Sendable (AVAudioPCMBuffer) -> Void)? {
+        endListen()
+        let made = makeListeners(locales: locales, format: format)
+        guard !made.isEmpty else { return nil }
+        listeners = made
+        texts = Array(repeating: "", count: made.count)
+        isRunning = true
+        let sinks = made.map(\.sink)
+        return { buffer in for sink in sinks { sink(buffer) } }
+    }
+
+    func endListen() {
+        guard isRunning else { return }
+        isRunning = false
+        for l in listeners { l.cancel() }
+        listeners = []
+    }
+
+    private func makeListeners(locales: [Locale], format: AVAudioFormat) -> [any Listener] {
+        var made: [any Listener] = []
+        for (i, locale) in locales.enumerated() {
+            let onText: @Sendable (String) -> Void = { [weak self] text in
+                Task { @MainActor in self?.heard(text, from: i) }
+            }
+            if #available(macOS 26, *), let plan = models[locale.identifier],
+               let listener = try? ModernListener(plan: plan, input: format, onText: onText) {
+                made.append(listener)
+            } else if let listener = try? LegacyListener(locale: locale, onText: onText) {
+                made.append(listener)
+            }
+        }
+        return made
+    }
+
     /// Forgets the audio so far (its own voice, before you cut in); what
     /// you say next is what gets written down.
     func restartRecording() {
@@ -110,18 +148,7 @@ final class VoiceInput {
         let format = input ?? engine.inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else { throw VoiceError.noMicrophone }
 
-        var made: [any Listener] = []
-        for (i, locale) in locales.enumerated() {
-            let onText: @Sendable (String) -> Void = { [weak self] text in
-                Task { @MainActor in self?.heard(text, from: i) }
-            }
-            if #available(macOS 26, *), let plan = models[locale.identifier],
-               let listener = try? ModernListener(plan: plan, input: format, onText: onText) {
-                made.append(listener)
-            } else if let listener = try? LegacyListener(locale: locale, onText: onText) {
-                made.append(listener)
-            }
-        }
+        let made = makeListeners(locales: locales, format: format)
         guard !made.isEmpty else { throw VoiceError.unavailable }
         listeners = made
         texts = Array(repeating: "", count: made.count)
