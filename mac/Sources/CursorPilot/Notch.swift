@@ -256,6 +256,19 @@ struct NotchRootView: View {
     }
     private static let island = Animation.spring(response: 0.42, dampingFraction: 0.84)
 
+    /// Words go where the buddy is: under the notch only while it's parked
+    /// there (on screen they're in its bubble). Yours while you talk over
+    /// its work, otherwise its own as it says them.
+    private var caption: AppModel.LiveCaption? {
+        guard buddy.docked, !state.expanded else { return nil }
+        if let hearing = buddy.hearing {
+            let text = hearing.isEmpty ? "Listening…" : hearing
+            return AppModel.LiveCaption(you: true, spoken: AppModel.karaoke(text, heard: (text as NSString).length))
+        }
+        if buddy.talking, let spoken = buddy.spoken { return AppModel.LiveCaption(you: false, spoken: spoken) }
+        return nil
+    }
+
     var body: some View {
         let size = state.shapeSize(active: isActive)
         ZStack(alignment: .top) {
@@ -278,7 +291,7 @@ struct NotchRootView: View {
             } else if isActive {
                 VStack(spacing: 0) {
                     wings
-                    if let caption = model.liveCaption {
+                    if let caption {
                         NotchCaptionLine(caption: caption)
                             .frame(height: NotchState.captionBody, alignment: .top)
                             .transition(.blurReplace)
@@ -297,7 +310,7 @@ struct NotchRootView: View {
         .animation(.easeInOut(duration: 0.5), value: working)
         .environment(\.colorScheme, .dark)
         .onChange(of: wantsRoom, initial: true) { _, room in state.roomy = room }
-        .onChange(of: model.liveCaption != nil, initial: true) { _, on in state.captioned = on }
+        .onChange(of: caption != nil, initial: true) { _, on in state.captioned = on }
     }
 
     private var wings: some View {

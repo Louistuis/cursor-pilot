@@ -14,6 +14,12 @@ final class OverlayState: ObservableObject {
     @Published var spoken: SpokenWord?
     /// Replies are read aloud: the bubble only ever shows the read-along line.
     @Published var readAlong = false
+    /// Its voice is playing: what it says (`spoken`) is the caption, shown
+    /// where the buddy is (its bubble, or under the notch when parked).
+    @Published var talking = false
+    /// What you're saying while it works, written down as you say it; shown
+    /// the same way.
+    @Published var hearing: String?
     @Published var pointLabel: String?
     /// A short confirmation such as "Saved to Drawings".
     @Published var notice: String?
@@ -532,6 +538,30 @@ struct OverlayView: View {
         Group {
             if let label = state.pointLabel ?? state.notice {
                 GlassCapsule { Text(label).font(.system(size: 12, weight: .semibold)) }
+            } else if let hearing = state.hearing, state.mode != .listening {
+                // You, talking while it works: your words, as you say them.
+                GlassCapsule {
+                    HStack(spacing: 8) {
+                        VoiceBars(level: state.level, live: true)
+                        Text(hearing.isEmpty ? "Listening…" : hearing)
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(2)
+                            .contentTransition(.interpolate)
+                    }
+                    .hugWidth(300)
+                }
+                .transition(.blurReplace)
+            } else if state.talking, state.mode != .answering, let spoken = state.spoken {
+                // Talking while it works: the words being said, nothing else.
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VoiceBars(level: 0.55, live: true).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                    KaraokeCaption(spoken: spoken)
+                }
+                .hugWidth(300)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 9)
+                .glassBackground(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .transition(.blurReplace)
             } else if let activity = state.activity, state.mode != .idle || state.backgroundWork {
                 GlassCapsule {
                     HStack(spacing: 7) {
@@ -566,8 +596,9 @@ struct OverlayView: View {
                     GlassCapsule {
                         HStack(spacing: 8) {
                             VoiceBars(level: state.level, live: true)
-                            if !state.caption.isEmpty {
-                                Text(state.caption).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                            let words = state.hearing ?? state.caption
+                            if !words.isEmpty {
+                                Text(words).font(.system(size: 12, weight: .medium)).lineLimit(2)
                             }
                         }
                     }
@@ -957,6 +988,9 @@ struct KaraokeCaption: View {
         // Two lines: this one and the next, or the one before on the last line.
         let first = row == lines.count - 1 ? max(row - 1, 0) : row
         let shown = Array(lines.indices.filter { $0 >= first && $0 <= first + 1 })
+        // A new sentence takes the old one's place with a quick crossfade
+        // (never both at once); within a sentence the lines roll up.
+        ZStack(alignment: .topLeading) {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(shown, id: \.self) { i in
                 HStack(spacing: 5) {
@@ -978,6 +1012,10 @@ struct KaraokeCaption: View {
                 .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity),
                                         removal: .move(edge: .top).combined(with: .opacity)))
             }
+        }
+        .id(spoken.sentence)
+        .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 6)).animation(.easeOut(duration: 0.22).delay(0.08)),
+                                removal: .opacity.animation(.easeOut(duration: 0.08))))
         }
         .font(.system(size: 14, weight: .medium))
         .lineLimit(1)

@@ -123,7 +123,8 @@ final class AppModel: ObservableObject {
     /// A request is under way (from sending it until it finishes).
     private var requestActive = false
     /// A sentence is being read aloud right now.
-    private var speakingNow = false
+    /// Its voice is playing (any engine); the caption shows wherever the buddy is.
+    private var speakingNow = false { didSet { overlay.state.talking = speakingNow } }
     /// The answer is being read: the task's work is over.
     /// This task looked at or used the screen (screenshots, clicks, typing).
     private var usedScreen = false
@@ -245,9 +246,10 @@ final class AppModel: ObservableObject {
                 return
             }
             heardText = text
-            if usesLiveVoice && requestActive {
-                // Talking while it works: the words show under the notch.
-                liveCaption = LiveCaption(you: true, spoken: Self.karaoke(text, heard: (text as NSString).length))
+            if requestActive {
+                // Talking while it works: your words show where the buddy is.
+                hearingClear?.cancel()
+                overlay.state.hearing = text
             } else {
                 overlay.state.caption = text
             }
@@ -459,6 +461,7 @@ final class AppModel: ObservableObject {
             LiveVoice.shared.releaseTalk()
             LiveVoice.shared.micSink = nil
             voice.endListen()
+            clearHearing()
             if phase == .listening { setPhase(.thinking) }
             return
         }
@@ -495,6 +498,7 @@ final class AppModel: ObservableObject {
         liveSteps = []
         requestActive = true
         usedScreen = false
+        lastScreenStepAt = nil
         backgroundWork = false
         requestFinished = false
         ComputerControl.shared.beginTask()
@@ -826,6 +830,7 @@ final class AppModel: ObservableObject {
         requestActive = false
         speakingNow = false
         backgroundWork = false
+        overlay.state.hearing = nil
         speaker.stop()
         if !keepingVoice {
             voice.cancel()
@@ -925,14 +930,31 @@ final class AppModel: ObservableObject {
     /// answer or to use the pointer.
     private func refreshWorking() {
         let pointer = liveSteps.contains { $0.phase == "start" && ($0.kind == "computer" || ($0.kind == "app" && Self.isOnScreen($0))) }
+        if pointer { lastScreenStepAt = Date() }
+        // Between clicks it stays down by the pointer: only after a while
+        // without using the screen does it go back up into the notch.
+        let recent = lastScreenStepAt.map { Date().timeIntervalSince($0) < Self.screenLinger } ?? false
+        if recent, !pointer, requestActive {
+            workingRecheck?.cancel()
+            workingRecheck = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(Self.screenLinger + 0.1))
+                guard !Task.isCancelled else { return }
+                self?.refreshWorking()
+            }
+        }
         // It talks as it works (saying each step before it does it) without
         // leaving the notch; it comes down for the answer or to use the pointer.
-        let working = requestActive && !liveSteps.isEmpty && !pointer
+        let working = requestActive && !liveSteps.isEmpty && !pointer && !recent
         if backgroundWork != working {
             backgroundWork = working
             refreshGlow()
         }
     }
+
+    private var lastScreenStepAt: Date?
+    private var workingRecheck: Task<Void, Never>?
+    /// How long it stays by the pointer after using the screen.
+    private static let screenLinger: TimeInterval = 10
 
     /// app_control mostly works unseen; pressing and filling in click and type on screen.
     private static func isOnScreen(_ step: AgentStep) -> Bool {
@@ -1004,6 +1026,7 @@ final class AppModel: ObservableObject {
 
     private func endTalkingOverTask() async {
         talkingOverTask = false
+        clearHearing()
         let text = await voice.stop()
         if requestActive { setPhase(phaseBeforeTalk) }
         refreshWorking()
@@ -1051,7 +1074,10 @@ final class AppModel: ObservableObject {
         live.pressTalk(key: openAIKey)
         overlay.state.caption = ""
         overlay.state.spoken = nil
-        if requestActive { liveCaption = nil }
+        if requestActive {
+            hearingClear?.cancel()
+            overlay.state.hearing = ""
+        }
         // Apple's on-device recognizer writes down what you say as you say
         // it, from the same mic; OpenAI's transcript replaces it when it comes.
         if let format = live.micFormat, let feed = voice.listen(locales: resolvedListenLocales, format: format) {
@@ -1067,7 +1093,12 @@ final class AppModel: ObservableObject {
     func notchDemo(_ kind: String) {
         if kind == "caption" {
             let line = "I found three invoices from March. I'm putting them in one folder on your desktop now."
-            liveCaption = LiveCaption(you: false, spoken: Self.karaoke(line, heard: 30))
+            backgroundWork = true
+            overlay.state.backgroundWork = true
+            overlay.state.docked = true
+            overlay.state.dock = 1
+            overlay.state.spoken = Self.karaoke(line, heard: 30)
+            overlay.state.talking = true
             setPhase(.thinking)
         } else {
             heardText = "What's the biggest file in my Downloads folder?"
@@ -1080,10 +1111,17 @@ final class AppModel: ObservableObject {
         var you: Bool
         var spoken: SpokenWord
     }
-    /// Shown under the notch while the agent works (the buddy may be busy
-    /// or parked); otherwise the caption is in the buddy's bubble.
-    @Published var liveCaption: LiveCaption?
-    private var liveCaptionClear: Task<Void, Never>?
+    private var hearingClear: Task<Void, Never>?
+
+    /// Your words stay a moment after you let go, then go.
+    private func clearHearing() {
+        hearingClear?.cancel()
+        hearingClear = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1.4))
+            guard !Task.isCancelled else { return }
+            self?.overlay.state.hearing = nil
+        }
+    }
 
     /// The sentence `heard` (UTF-16 characters into `text`) has reached, and
     /// the word it's on, for the read-along caption.
@@ -1103,11 +1141,6 @@ final class AppModel: ObservableObject {
             if r.location < max(inLine, 1) { word = r } else { stop.pointee = true }
         }
         return SpokenWord(sentence: line, word: word)
-    }
-
-    private func showLiveCaption(_ caption: LiveCaption?) {
-        liveCaptionClear?.cancel()
-        liveCaption = caption
     }
 
     /// Connects the live voice's events to the buddy and to Claude, once.
@@ -1134,23 +1167,10 @@ final class AppModel: ObservableObject {
                 }
             case .saying(let text, let heard):
                 guard !text.isEmpty else { return }
-                let spoken = Self.karaoke(text, heard: heard)
-                if requestActive {
-                    showLiveCaption(LiveCaption(you: false, spoken: spoken))
-                } else {
-                    liveCaption = nil
-                    overlay.state.spoken = spoken
-                    overlay.state.caption = captionText(text)
-                }
+                overlay.state.spoken = Self.karaoke(text, heard: heard)
+                if !requestActive { overlay.state.caption = captionText(text) }
             case .speakingEnded:
                 speakingNow = false
-                // The last line stays a moment, then the caption goes.
-                liveCaptionClear?.cancel()
-                liveCaptionClear = Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .seconds(2.2))
-                    guard !Task.isCancelled else { return }
-                    self?.liveCaption = nil
-                }
                 if !requestActive {
                     requestFinished = true
                     settleIfDone()
