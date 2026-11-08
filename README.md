@@ -392,10 +392,16 @@ Settings › Speech picks the engine that hears you and reads replies:
   Settings, else `$OPENROUTER_API_KEY`, else the first line of
   `~/.config/openrouter.key`. Cloud is only used for speech; recordings and
   reply sentences go to OpenRouter.
-- The lists are ordered best first as of November 2026: MAI-Transcribe 2
-  leads multilingual accuracy (FLEURS) and is the fastest; MAI-Voice 2.1
-  Flash and Eleven v4 Turbo start speaking quickest (about 0.6–1.7 s a
-  sentence through OpenRouter), Gemini's voices take 1.4–2.7 s.
+- The lists are ordered best first as of November 2026. Hearing, by
+  Artificial Analysis word error rate: MAI-Transcribe 2 (2.0%), Voxtral
+  Small Transcribe 3 (2.1%), Scribe v2 (2.2%), Gemini 3.5 Transcribe (2.6%).
+  Voices: Eleven v4 Turbo is the most natural fast voice (Speech Arena Elo
+  1335, about 190 ms to first audio at the source, 0.7–1.0 s a sentence
+  through OpenRouter here) and speaks Norwegian; MAI-Voice 2.1 Flash is
+  close (0.6–1.7 s here); Gemini's voices take 1.4–2.7 s. OpenRouter's speech
+  endpoints are batch only: streaming recognition (MAI-Transcribe 2
+  Streaming, about 0.13 s to a final transcript; ElevenLabs Scribe v2
+  Realtime, about 0.15 s) needs those providers' own WebSocket APIs and keys.
 - Each voice model keeps its own voice. Microsoft's voices are one name in
   several languages (Harper and Grant speak English and Norwegian); ElevenLabs
   voices speak every language themselves. Picking a voice plays a sample, in

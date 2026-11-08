@@ -43,17 +43,19 @@ enum CloudSpeech {
 
     /// Best first, as of November 2026 (FLEURS multilingual and Artificial
     /// Analysis word error rates; all handle Norwegian except where noted).
+    /// Ranked by Artificial Analysis word error rate (batch, Nov 2026).
     static let hearingModels: [Model] = [
-        Model(id: "microsoft/mai-transcribe-2", name: "Microsoft MAI-Transcribe 2", detail: "#1 multilingual, fastest"),
-        Model(id: "elevenlabs/scribe-v2", name: "ElevenLabs Scribe v2", detail: "Very accurate, 90+ languages"),
-        Model(id: "google/gemini-3.5-transcribe", name: "Google Gemini 3.5 Transcribe", detail: "Mixed languages"),
-        Model(id: "mistralai/voxtral-small-transcribe-3-0", name: "Mistral Voxtral Small Transcribe 3", detail: "Accurate English"),
+        Model(id: "microsoft/mai-transcribe-2", name: "Microsoft MAI-Transcribe 2", detail: "Most accurate (2.0% WER), fastest"),
+        Model(id: "mistralai/voxtral-small-transcribe-3-0", name: "Mistral Voxtral Small Transcribe 3", detail: "2.1% WER"),
+        Model(id: "elevenlabs/scribe-v2", name: "ElevenLabs Scribe v2", detail: "2.2% WER, 90+ languages"),
+        Model(id: "google/gemini-3.5-transcribe", name: "Google Gemini 3.5 Transcribe", detail: "2.6% WER, mixed languages"),
         Model(id: "openai/gpt-transcribe", name: "OpenAI GPT Transcribe", detail: "Fallback"),
     ]
-    /// Best first for spoken replies: natural, quick to start, Norwegian.
+    /// Best first for spoken replies: natural, quick to start, Norwegian
+    /// (Artificial Analysis Speech Arena and Coval time to first audio, Nov 2026).
     static let voiceModels: [Model] = [
+        Model(id: "elevenlabs/eleven-v4-turbo", name: "ElevenLabs Eleven v4 Turbo", detail: "Most natural fast voice, Norwegian"),
         Model(id: "microsoft/mai-voice-2.1-flash", name: "Microsoft MAI-Voice 2.1 Flash", detail: "Fast, real Norwegian voices"),
-        Model(id: "elevenlabs/eleven-v4-turbo", name: "ElevenLabs Eleven v4 Turbo", detail: "Most natural, fast"),
         Model(id: "microsoft/mai-voice-2.1", name: "Microsoft MAI-Voice 2.1", detail: "Finest Microsoft voice"),
         Model(id: "elevenlabs/eleven-v4", name: "ElevenLabs Eleven v4", detail: "#1 naturalness, slower"),
         Model(id: "google/gemini-3.8-flash-lite-tts", name: "Google Gemini 3.8 Flash Lite TTS", detail: "Expressive, cheapest"),
