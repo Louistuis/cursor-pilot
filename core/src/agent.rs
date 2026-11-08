@@ -314,6 +314,18 @@ pub fn system_addendum(settings: &Settings, home: &str, today: &str, person: boo
     if !mac_access(&settings.access) {
         return String::new();
     }
+    let talk = if front {
+        "Talk like a person working next to the user: everything you write is read aloud as you go. Before \
+each action or group of actions, say in one short sentence what you're about to do, then do it in the same \
+turn (\"Opening your Downloads.\", \"I'll check the calendar first.\", \"Okay, sending it now.\"). Say it \
+before visible things especially (opening, clicking, typing, sending), since the user watches them happen. \
+Don't narrate every tiny step or repeat yourself: steps that follow on quickly need no new line, and a \
+quick task needs only one. Never say the commands or file paths themselves. When you're done, reply with the \
+result in a sentence or two. "
+    } else {
+        "Start a task with a few words saying what you'll do. After that, keep any text between tool calls \
+to a few words now and then. When you're done, reply with the result in a sentence or two. "
+    };
     let delegate_long = if front {
         "Stay free to talk: you are the one the user talks to, so don't tie yourself up with long work. When \
 the user asks for something that takes more than a few quick steps (research, building or fixing \
@@ -382,10 +394,7 @@ installed), sed, curl, python3, git, mdfind (Spotlight), sips, pbcopy and pbpast
 Nobody reviews your actions before they run, so be careful with what can't be undone: never use sudo, \
 and never delete, overwrite, send, post or buy anything the user didn't ask for. Move files to the \
 Trash with /usr/bin/trash rather than deleting them with rm.\n\
-Start a task with a few words saying what you'll do (\"On it, checking your Downloads.\"); that is \
-read aloud. After that, any text between tool calls is shown silently, so keep it to a few words now \
-and then, not after every step. When you're done, reply with the result in a sentence or two; that is \
-read aloud too. Don't add pointing tags for things you click yourself, but do use them in your final \
+{talk}Don't add pointing tags for things you click yourself, but do use them in your final \
 reply to show the user where a result is when that helps.\n\
 Today is {today}."
     )

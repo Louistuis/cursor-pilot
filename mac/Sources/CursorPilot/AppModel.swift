@@ -71,6 +71,14 @@ final class AppModel: ObservableObject {
     @Published var doubleTapToType: Bool {
         didSet { defaults.set(doubleTapToType, forKey: "doubleTapToType"); applyDoubleTap() }
     }
+    /// Talk back and forth without the key: after an answer the mic stays
+    /// open for a reply, and you can cut in while it talks.
+    @Published var handsFree: Bool {
+        didSet {
+            defaults.set(handsFree, forKey: "handsFree")
+            if !handsFree { endHandsFree() }
+        }
+    }
     @Published var hideBuddyWhenIdle: Bool {
         didSet { defaults.set(hideBuddyWhenIdle, forKey: "hideBuddyWhenIdle"); overlay.autoHide = hideBuddyWhenIdle }
     }
@@ -100,7 +108,6 @@ final class AppModel: ObservableObject {
     /// A sentence is being read aloud right now.
     private var speakingNow = false
     /// The answer is being read: the task's work is over.
-    private var presentingAnswer = false
     /// This task looked at or used the screen (screenshots, clicks, typing).
     private var usedScreen = false
     private var parkTask: Task<Void, Never>?
@@ -192,6 +199,7 @@ final class AppModel: ObservableObject {
         showGlow = defaults.object(forKey: "showGlow") as? Bool ?? true
         hideFromRecordings = defaults.bool(forKey: "hideFromRecordings")
         doubleTapToType = defaults.object(forKey: "doubleTapToType") as? Bool ?? true
+        handsFree = defaults.object(forKey: "handsFree") as? Bool ?? true
         hideBuddyWhenIdle = defaults.object(forKey: "hideBuddyWhenIdle") as? Bool ?? true
         talkKey = defaults.string(forKey: "talkKey").flatMap(TalkKey.init(rawValue:)) ?? .controlOption
         listenLocale = defaults.string(forKey: "listenLocale") ?? ""
@@ -203,17 +211,28 @@ final class AppModel: ObservableObject {
             ?? .default
 
         voice.onLevel = { [weak self] level in
-            self?.overlay.state.level = level
-            self?.glow.level = level
+            guard let self else { return }
+            if bargeWatch {
+                if level > Self.voiceLevel { lastVoiceAt = Date() }
+                return
+            }
+            overlay.state.level = level
+            glow.level = level
+            if openMic { followOpenMic(level: level) }
         }
         voice.onPartial = { [weak self] text in
-            self?.heardText = text
-            self?.overlay.state.caption = text
+            guard let self else { return }
+            if bargeWatch {
+                if isUserTalking(over: text) { bargeIn() }
+                return
+            }
+            heardText = text
+            overlay.state.caption = text
         }
         speaker.onIdle = { [weak self] in
             guard let self else { return }
             speakingNow = false
-            refreshWorking()
+            stopBargeWatch()
             releaseVisuals(upTo: .max)
             // The last line stays, fully read, until the bubble goes away.
             if let spoken = overlay.state.spoken {
@@ -230,13 +249,8 @@ final class AppModel: ObservableObject {
             }
             overlay.state.spoken = SpokenWord(sentence: text, word: NSRange(location: 0, length: 0))
             speakingNow = true
-            // Speech after a step is the answer (narration while working is silent).
-            if !liveSteps.isEmpty && !presentingAnswer {
-                presentingAnswer = true
-                overlay.state.activity = nil
-                overlay.state.activityIcon = nil
-            }
-            refreshWorking()
+            recentlySaid = Array((recentlySaid + [text]).suffix(4))
+            startBargeWatch()
         }
         speaker.onWord = { [weak self] range in
             guard let self, let spoken = overlay.state.spoken else { return }
@@ -362,8 +376,12 @@ final class AppModel: ObservableObject {
     /// leaves the instant you let go instead of waiting for a capture.
     private var precapture: (task: Task<[ScreenShotPayload], Never>, at: Date)?
 
-    func beginListening() {
+    func beginListening(open: Bool = false) {
         interrupt()
+        openMic = open
+        openMicSince = Date()
+        heardSpeechAt = nil
+        lastVoiceAt = nil
         core.warm()
         if ScreenCapture.hasPermission, !ink.hasStrokes {
             precapture = (Task { (try? await ScreenCapture.captureAll(includingWindows: [])) ?? [] }, Date())
@@ -375,9 +393,9 @@ final class AppModel: ObservableObject {
             }
             do {
                 heardText = ""
-                try voice.start(locales: resolvedListenLocales)
+                try voice.start(locales: resolvedListenLocales, echoCancel: handsFree)
                 setPhase(.listening)
-                Sounds.play(.listen)
+                if !open { Sounds.play(.listen) }
             } catch {
                 showError(error.localizedDescription)
             }
@@ -402,6 +420,7 @@ final class AppModel: ObservableObject {
 
     func endListening() async {
         guard phase == .listening else { return }
+        openMic = false
         let text = await voice.stop()
         if let language = voice.lastLanguage { speaker.fallbackLanguage = language }
         guard !text.isEmpty else {
@@ -428,7 +447,6 @@ final class AppModel: ObservableObject {
         lastError = nil
         liveSteps = []
         requestActive = true
-        presentingAnswer = false
         usedScreen = false
         backgroundWork = false
         requestFinished = false
@@ -641,6 +659,16 @@ final class AppModel: ObservableObject {
     private func settleIfDone() {
         guard requestFinished, !speaker.isSpeaking, phase == .answering || phase == .thinking else { return }
         resetTask?.cancel()
+        // Hands-free: the mic opens for a reply, like a pause in a conversation.
+        if handsFree, lastError == nil, speakReplies {
+            resetTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled, let self, self.requestFinished, !self.speaker.isSpeaking,
+                      self.phase == .answering else { return }
+                self.beginListening(open: true)
+            }
+            return
+        }
         resetTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled, let self, self.requestFinished, !self.speaker.isSpeaking else { return }
@@ -698,7 +726,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func interrupt() {
+    /// A visible action waits until what was just said about it has started
+    /// playing, so it's said before it's done (at most 2.5 s).
+    func narrationStarted() async {
+        let deadline = Date().addingTimeInterval(2.5)
+        while speakReplies, sentencesQueued > 0, sentenceSpoken < sentencesQueued - 1, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(40))
+        }
+    }
+
+    func interrupt(keepingVoice: Bool = false) {
         CursorTakeover.end()
         drawQueue?.cancel()
         drawQueue = nil
@@ -716,7 +753,11 @@ final class AppModel: ObservableObject {
         speakingNow = false
         backgroundWork = false
         speaker.stop()
-        voice.cancel()
+        if !keepingVoice {
+            voice.cancel()
+            bargeWatch = false
+            openMic = false
+        }
         overlay.clearPoints()
         ink.clearMarks()
         if phase != .idle { setPhase(.idle) }
@@ -806,11 +847,13 @@ final class AppModel: ObservableObject {
     }
 
     /// While a task is under way the buddy stays the thinking dots, the
-    /// work going on in the background; it turns back into the arrow only to
-    /// talk or to use the pointer.
+    /// work going on in the background; it turns back into the arrow for the
+    /// answer or to use the pointer.
     private func refreshWorking() {
         let pointer = liveSteps.contains { $0.phase == "start" && ($0.kind == "computer" || ($0.kind == "app" && Self.isOnScreen($0))) }
-        let working = requestActive && !presentingAnswer && !speakingNow && !pointer
+        // It talks as it works (saying each step before it does it) without
+        // leaving the notch; it comes down for the answer or to use the pointer.
+        let working = requestActive && !liveSteps.isEmpty && !pointer
         if backgroundWork != working {
             backgroundWork = working
             refreshGlow()
@@ -855,6 +898,92 @@ final class AppModel: ObservableObject {
         refreshGlow()
     }
 
+    // MARK: Hands-free
+
+    /// Mic level (0...1, about -36 dB) that counts as someone talking.
+    private static let voiceLevel: Float = 0.35
+    /// Listening without the key: opened after an answer, or by cutting in.
+    private var openMic = false
+    private var openMicSince = Date()
+    private var heardSpeechAt: Date?
+    private var lastVoiceAt: Date?
+    /// The mic listens while it talks, for you cutting in.
+    private var bargeWatch = false
+    /// The last few sentences it said, to tell its own voice from yours.
+    private var recentlySaid: [String] = []
+
+    /// The open mic ends itself: after you stop talking, or if you don't
+    /// say anything.
+    private func followOpenMic(level: Float) {
+        let now = Date()
+        if level > Self.voiceLevel {
+            lastVoiceAt = now
+            if heardSpeechAt == nil {
+                heardSpeechAt = now
+                refreshGlow()
+            }
+        }
+        if let last = lastVoiceAt, heardSpeechAt != nil, now.timeIntervalSince(last) > 0.9 {
+            openMic = false
+            Task { await endListening() }
+        } else if heardSpeechAt == nil, now.timeIntervalSince(openMicSince) > 7 {
+            openMic = false
+            cancelListening()
+        }
+    }
+
+    /// While it talks, the mic listens too (with echo cancellation), so you
+    /// can cut in just by talking.
+    private func startBargeWatch() {
+        guard handsFree, !bargeWatch, phase != .listening, Setup.hasVoice else { return }
+        do {
+            try voice.start(locales: resolvedListenLocales, echoCancel: true)
+            bargeWatch = true
+        } catch {
+            bargeWatch = false
+        }
+    }
+
+    private func stopBargeWatch() {
+        guard bargeWatch else { return }
+        bargeWatch = false
+        voice.cancel()
+    }
+
+    /// Whether what the mic hears is you rather than its own voice: several
+    /// words it isn't saying, heard while the mic is loud.
+    private func isUserTalking(over heard: String) -> Bool {
+        func words(_ s: String) -> [String] {
+            s.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count > 1 }
+        }
+        let said = Set(recentlySaid.flatMap(words))
+        let new = words(heard).filter { !said.contains($0) }
+        guard let last = lastVoiceAt, Date().timeIntervalSince(last) < 0.6 else { return false }
+        return new.count >= 3 && Double(new.count) >= 0.6 * Double(max(words(heard).count, 1))
+    }
+
+    /// You started talking over it: it stops, drops what it was doing in
+    /// front (background tasks carry on) and listens.
+    private func bargeIn() {
+        bargeWatch = false
+        voice.restartRecording()
+        interrupt(keepingVoice: true)
+        openMic = true
+        openMicSince = Date()
+        heardSpeechAt = Date()
+        lastVoiceAt = Date()
+        heardText = ""
+        setPhase(.listening)
+    }
+
+    private func endHandsFree() {
+        stopBargeWatch()
+        if openMic {
+            openMic = false
+            cancelListening()
+        }
+    }
+
     /// The screen frame follows the phase; between questions it glows softly
     /// while you draw.
     /// The frame is for when Cursor Pilot looks at or uses the screen:
@@ -863,7 +992,8 @@ final class AppModel: ObservableObject {
     private func refreshGlow(sketching: Bool? = nil) {
         let offScreen = backgroundWork || (!liveSteps.isEmpty && !usedScreen)
         switch phase {
-        case .listening: glow.mode = .listening
+        // An open mic waiting for a reply stays quiet until you talk.
+        case .listening: glow.mode = openMic && heardSpeechAt == nil ? .off : .listening
         case .thinking: glow.mode = offScreen ? .off : liveSteps.isEmpty ? .thinking : .answering
         case .answering: glow.mode = lastError == nil && !offScreen ? .answering : .off
         case .idle: glow.mode = (sketching ?? ink.state.sketching) ? .sketching : .off

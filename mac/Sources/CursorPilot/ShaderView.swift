@@ -69,12 +69,31 @@ final class ShaderMTKView: MTKView {
     @available(*, unavailable)
     required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// Frames come from a display link of our own, which follows the view
+    /// to whatever screen it's on. MTKView's built-in loop could stop for
+    /// good (a display change, the panel being covered) and freeze the dots.
+    private var link: CADisplayLink?
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         updateScale()
+        isPaused = true
+        link?.invalidate()
+        link = nil
         // Only animate while on screen.
-        isPaused = window == nil
+        guard window != nil else { return }
+        let l = displayLink(target: self, selector: #selector(step(_:)))
+        l.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        l.add(to: .main, forMode: .common)
+        link = l
     }
+
+    @objc private func step(_ link: CADisplayLink) {
+        guard window != nil, !isHiddenOrHasHiddenAncestor else { return }
+        draw()
+    }
+
+    deinit { link?.invalidate() }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()

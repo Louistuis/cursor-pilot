@@ -413,8 +413,8 @@ impl Engine {
                             &mut *emit,
                         )?;
                         messages.push(json!({"role": "user", "content": results}));
-                        // Narration while working is shown, not read aloud.
-                        out.quiet = true;
+                        // Narration while working is read aloud too: it says
+                        // what it's about to do before each step.
                     }
                     // A server tool (web search) paused a long turn: send it back to continue.
                     "pause_turn" => {}
@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_while_working_are_silent_but_the_answer_is_spoken() {
+    fn quiet_notes_are_held_back_and_the_answer_is_spoken() {
         let mut rs = ReplyStream::new(&[]);
         let mut events = Vec::new();
         rs.push("On it, checking.", &mut |e| events.push(e));

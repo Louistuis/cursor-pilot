@@ -136,6 +136,10 @@ struct SettingsView: View {
                     LabeledContent("Shortcut") { ShortcutRecorder(model: model) }
                 }
                 Toggle("Double-tap Control to type a question", isOn: $model.doubleTapToType)
+                Toggle(isOn: $model.handsFree) {
+                    Text("Hands-free conversation")
+                    Text("After an answer the mic stays open a few seconds so you can just reply, and you can cut in while it talks.")
+                }
                 Picker("Language you speak", selection: $model.listenLocale) {
                     Text("Automatic (\(automaticLanguages))").tag("")
                     Divider()

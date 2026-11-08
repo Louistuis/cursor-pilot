@@ -78,8 +78,29 @@ final class VoiceInput {
         models = ready
     }
 
-    func start(locales: [Locale]) throws {
+    /// `echoCancel`: hands-free, where the Mac may be talking while you do;
+    /// voice processing takes its own voice out of the mic as well as it can.
+    func start(locales: [Locale], echoCancel: Bool = false) throws {
+        if engine.inputNode.isVoiceProcessingEnabled != echoCancel {
+            if engine.isRunning { engine.stop() }
+            do {
+                try engine.inputNode.setVoiceProcessingEnabled(echoCancel)
+                if echoCancel {
+                    // Don't turn the user's other audio down while listening.
+                    engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                        AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+                }
+            } catch {
+                NSLog("Cursor Pilot: voice processing unavailable: \(error)")
+            }
+        }
         try start(locales: locales, input: nil)
+    }
+
+    /// Forgets the audio so far (its own voice, before you cut in); what
+    /// you say next is what gets written down.
+    func restartRecording() {
+        recorder.reset(sampleRate: engine.inputNode.outputFormat(forBus: 0).sampleRate)
     }
 
     /// Starts listening; with `input` set it reads that format instead of

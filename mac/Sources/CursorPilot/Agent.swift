@@ -22,6 +22,7 @@ final class AgentHost: @unchecked Sendable {
         case "computer":
             let name = obj["name"] as? String ?? ""
             let input = obj["input"] as? [String: Any] ?? [:]
+            if agent == 0, name != "screenshot", name != "zoom" { waitOnMain { await AppModel.shared.narrationStarted() } }
             let result = waitOnMain { await ComputerControl.forAgent(agent).perform(name, input: input) }
             var reply: [String: Any] = ["content": result.content, "is_error": result.isError]
             if let summary = result.summary { reply["summary"] = summary }
@@ -34,6 +35,7 @@ final class AgentHost: @unchecked Sendable {
             return encode(reply)
         case "apps":
             let input = obj["input"] as? [String: Any] ?? [:]
+            if agent == 0 { waitOnMain { await AppModel.shared.narrationStarted() } }
             let result = waitOnMain { await ComputerControl.forAgent(agent).appControl(input) }
             var reply: [String: Any] = ["content": result.content, "is_error": result.isError]
             if let summary = result.summary { reply["summary"] = summary }

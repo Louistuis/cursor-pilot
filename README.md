@@ -210,6 +210,20 @@ new step slides up in place of the last one, by the buddy and in the notch's
 header, and step icons morph into each other; a finished task pops a green
 check into the notch's left wing; an error shakes the bubble like a "no".
 
+It talks as it works, like a person next to you: before each action or
+group of actions it says in one short sentence what it's about to do
+("Opening your Downloads."), read aloud while the buddy stays in the notch.
+Visible actions (clicks, typing, app_control) wait until that line has
+started playing (at most 2.5 s), so it's said before it's done.
+
+**Hands-free conversation** (Settings › Talking, on by default): after an
+answer the mic stays open for up to 7 seconds so you can just reply; it ends
+itself 0.9 s after you stop talking, and the screen frame stays off until
+you actually speak. While it talks the mic listens too, with voice
+processing (echo cancellation) on, and you can cut in by talking: three or
+more words it isn't saying itself, heard while the mic is loud, stop it and
+it listens to you (background tasks carry on). The talk key works as before.
+
 The agent you talk to stays free: anything that takes more than a few quick
 steps (research, building or fixing something, going through many files or
 pages) goes to a background agent right away, and it answers in a line, so
