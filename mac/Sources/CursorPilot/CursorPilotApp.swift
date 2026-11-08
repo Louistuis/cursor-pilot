@@ -267,6 +267,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     buddy.state.caption = "What does this button do?"
                 case "thinking":
                     buddy.state.mode = .thinking
+                case "working":
+                    buddy.state.mode = .answering
+                    buddy.state.backgroundWork = true
+                    buddy.state.activityIcon = "terminal"
+                    buddy.state.activityIsCommand = true
+                    buddy.state.activity = "df -h / | tail -1"
+                    model.backgroundWork = true
                 case _:
                     buddy.state.mode = .answering
                     buddy.state.caption = "That's the export button. Click it, then pick PDF in the menu that opens."

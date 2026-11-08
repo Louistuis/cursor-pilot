@@ -74,6 +74,10 @@ private final class GlowStage: NSObject {
     private var rot: CGFloat = 0
     private var gain = Spring(0)
     private var spin = Spring(0.14)
+    /// 1 at first, easing to about 0.4 once the glow has been on a while.
+    private var calm = Spring(1)
+    private var activeSince: CGFloat?
+    private var lastMode: GlowController.Mode = .off
     private(set) var isOpen = true
     var onClose: (() -> Void)?
 
@@ -170,6 +174,14 @@ private final class GlowStage: NSObject {
         clock += dt
 
         let (mode, level) = read()
+        // Bright for the first seconds of an exchange, then it settles into
+        // a calm glow. Talking again brings it back up.
+        if mode == .off || (mode == .listening && lastMode != .listening) { activeSince = nil }
+        if mode != .off, activeSince == nil { activeSince = clock }
+        lastMode = mode
+        let age = activeSince.map { clock - $0 } ?? 0
+        let settle = min(max((age - 3) / 1.6, 0), 1)
+        calm.step(to: 1 - 0.58 * settle * settle * (3 - 2 * settle), dt: dt, omega: 5)
         switch mode {
         case .off:
             gain.step(to: 0, dt: dt, omega: 7)
@@ -193,7 +205,7 @@ private final class GlowStage: NSObject {
         let r = Self.cornerRadius(notched: screen.safeAreaInsets.top > 0)
         let cut = notchCut(dt: dt)
         glow.state = GlowState(rect: glow.bounds, radii: (r, r, r, r),
-                               gain: Float(max(gain.x, 0)), fill: 0, outer: 0,
+                               gain: Float(max(gain.x * calm.x, 0)), fill: 0, outer: 0,
                                rot: Float(rot.truncatingRemainder(dividingBy: 4)),
                                notch: cut?.0, notchRadius: cut?.1 ?? 12)
         glow.render()

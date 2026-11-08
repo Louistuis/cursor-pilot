@@ -242,7 +242,7 @@ struct NotchRootView: View {
     private var wings: some View {
         HStack {
             if buddy.backgroundWork {
-                Image(systemName: "terminal")
+                Image(systemName: buddy.activityIcon ?? "terminal")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.85))
                     .symbolEffect(.pulse, isActive: true)
@@ -252,7 +252,7 @@ struct NotchRootView: View {
                     .transition(.scale.combined(with: .opacity))
             }
             Spacer()
-            PhaseIndicator(phase: model.phase, level: buddy.level)
+            PhaseIndicator(phase: model.phase, level: buddy.level, working: buddy.backgroundWork)
         }
         .padding(.horizontal, 18)
         .frame(height: state.notchSize.height)
@@ -267,15 +267,18 @@ struct NotchRootView: View {
 struct PhaseIndicator: View {
     var phase: AppModel.Phase
     var level: Float
+    /// A command or other background step is running: the thinking dots.
+    var working = false
 
     var body: some View {
+        let thinking = phase == .thinking || working
         ZStack {
-            if phase == .listening || phase == .answering {
+            if !thinking && (phase == .listening || phase == .answering) {
                 SpeakingWave(level: phase == .listening ? level : nil)
                     .frame(width: 56, height: 24)
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
-            if phase == .thinking {
+            if thinking {
                 ThinkingBlobs(zoom: 2.4)
                     .frame(width: 34, height: 34).frame(height: 24)
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
@@ -283,6 +286,7 @@ struct PhaseIndicator: View {
         }
         .frame(width: 56, height: 24)
         .animation(.easeInOut(duration: 0.4), value: phase)
+        .animation(.easeInOut(duration: 0.4), value: working)
     }
 }
 
@@ -310,8 +314,23 @@ private struct NotchExpandedView: View {
     private var header: some View {
         HStack(spacing: 8) {
             PilotArrow(flipped: false).scaleEffect(0.8)
-            Text(statusText).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.7))
-            PhaseIndicator(phase: model.phase, level: buddy.level)
+            if buddy.backgroundWork, let activity = buddy.activity {
+                // What's running, quietly: the command as typed, or the step.
+                HStack(spacing: 5) {
+                    Image(systemName: buddy.activityIcon ?? "terminal")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.6))
+                    ShimmerText(text: activity, command: buddy.activityIsCommand)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .hugWidth(220)
+                }
+                .transition(.opacity)
+            } else {
+                Text(statusText).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                    .transition(.opacity)
+            }
+            PhaseIndicator(phase: model.phase, level: buddy.level, working: buddy.backgroundWork)
             Spacer(minLength: state.notchSize.width + 12)
             iconButton("pencil.tip", help: "Draw on screen (⌃⌥D)") { model.toggleSketch() }
             iconButton("plus.bubble", help: "New conversation") { model.newConversation() }

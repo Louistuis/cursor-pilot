@@ -489,10 +489,12 @@ final class AppModel: ObservableObject {
             switch step.phase {
             case "start":
                 liveSteps.append(step)
-                overlay.state.activity = step.summary
-                // Only work in apps shows next to the cursor, as the agent's
-                // own pointer; shell, file and web work stays out of sight.
+                // Shell, file and web work shows the thinking dots by the
+                // cursor and, quietly, what's running (a command as typed).
                 backgroundWork = step.kind != "computer" && step.kind != "app"
+                overlay.state.activityIcon = AgentStep.icon(for: step.kind)
+                overlay.state.activityIsCommand = step.kind == "shell" && step.summary.hasPrefix("Ran ")
+                overlay.state.activity = overlay.state.activityIsCommand ? String(step.summary.dropFirst(4)) : step.summary
                 // A task at work glows calmly instead of pulsing for minutes.
                 if glow.mode == .thinking { glow.mode = .answering }
             default:
@@ -502,6 +504,11 @@ final class AppModel: ObservableObject {
                     liveSteps.append(step)
                 }
                 overlay.state.activity = nil
+                overlay.state.activityIcon = nil
+                // Done: the buddy comes back to talk (unless the next step starts).
+                if !liveSteps.contains(where: { $0.phase == "start" && ["shell", "file", "web", "memory", "messages", "agent"].contains($0.kind) }) {
+                    backgroundWork = false
+                }
             }
         case .helper(let e):
             handle(helper: e)
@@ -511,6 +518,9 @@ final class AppModel: ObservableObject {
         case .error(let kind, let message):
             if kind != "cancelled" { showError(message) }
         case .finished:
+            backgroundWork = false
+            overlay.state.activity = nil
+            overlay.state.activityIcon = nil
             if !speaker.isSpeaking { releaseVisuals(upTo: .max) }
             ComputerControl.endAll()
             if lastError == nil, !liveSteps.isEmpty { Sounds.play(.done) }

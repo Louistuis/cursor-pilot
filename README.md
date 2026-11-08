@@ -180,6 +180,14 @@ the first movement of your own hand brings your arrow straight back, as does
 themselves as it moves (video players) are countered by hiding it again on
 each move; every hide is counted and undone.
 
+Shell, file and web steps don't hide the buddy: while one runs, it turns
+into the thinking dots and a small capsule beside it shows what's running,
+a shell command as typed in monospace with a pulsing terminal icon (a
+document or globe for file and web work). The notch shows the same: the
+step's icon pulsing on the left, the dots on the right, and the command in
+its header when open. When the step ends the buddy is back for the answer
+and its caption.
+
 In background mode the agent has its own pointer: the buddy flies to where it clicks (with
 motion blur when it moves fast and a ring when it clicks), and the click
 goes to the app under it without moving your pointer. Cursor Pilot first
@@ -401,7 +409,9 @@ Done:
   are saved to Home.
 - **Screen glow**: the colourful frame from Zero OCR lights the edges of
   every display while Cursor Pilot listens, thinks and answers, and softly
-  while you draw (Settings › On screen to turn it off).
+  while you draw (Settings › On screen to turn it off). It is bright for the
+  first 3 seconds of an exchange, then eases down to about 40% and stays
+  calm; talking again brings it back up.
 - **Feel pass**: hold ⌃⌥ alone to talk (no extra permission); the buddy
   follows the cursor on the display's refresh and fades away when idle;
   Home is a native sidebar app (chats by date with search, rename, delete

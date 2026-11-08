@@ -19,9 +19,13 @@ final class OverlayState: ObservableObject {
     @Published var notice: String?
     /// What the agent is doing right now ("Ran git status").
     @Published var activity: String?
-    /// The agent is working in the background (shell, files, web), so the
-    /// buddy stays out of the way. It comes back for mouse and keyboard work.
+    /// A shell, file or web step is running right now: the buddy shows the
+    /// thinking dots and, quietly, what it's doing.
     @Published var backgroundWork = false
+    /// SF Symbol for the kind of step running (terminal, doc, globe…).
+    @Published var activityIcon: String?
+    /// The activity is a shell command, shown as typed.
+    @Published var activityIsCommand = false
     /// How fast the buddy is moving, in view points per second (y down);
     /// drives the motion blur.
     @Published var motion: CGVector = .zero
@@ -303,10 +307,10 @@ final class OverlayController: NSObject {
         }
         trackMotion(dt: dt)
 
-        let busy = state.mode != .idle || state.notice != nil || isPointing || flight != nil || pen != nil
+        let busy = state.mode != .idle || state.backgroundWork || state.notice != nil || isPointing || flight != nil || pen != nil
             || !targets.isEmpty || agentDriving || onCursor
         if busy { lastActive = now }
-        let visible = !state.backgroundWork && (!autoHide || now - lastActive < Self.idleHide)
+        let visible = !autoHide || now - lastActive < Self.idleHide
         // Quick to appear, slow to leave.
         let rate: CGFloat = visible ? 14 : 3.5
         alpha += ((visible ? 1 : 0) - alpha) * min(1, rate * dt)
@@ -443,7 +447,7 @@ struct OverlayView: View {
     /// The arrow with its motion trail behind it and the click ring at its tip.
     private var buddy: some View {
         // While it thinks the arrow becomes the notch's merging dots, in its colour.
-        let thinking = state.mode == .thinking && state.penInk == nil
+        let thinking = (state.mode == .thinking || state.backgroundWork) && state.penInk == nil
         return ZStack(alignment: state.flipped ? .topTrailing : .topLeading) {
             MotionTrail(motion: state.motion, flipped: state.flipped)
             BuddyMorph(thinking: thinking, flipped: state.flipped, active: state.mode != .idle)
@@ -465,8 +469,22 @@ struct OverlayView: View {
         Group {
             if let label = state.pointLabel ?? state.notice {
                 GlassCapsule { Text(label).font(.system(size: 12, weight: .semibold)) }
-            } else if let activity = state.activity, state.mode != .idle {
-                GlassCapsule { ShimmerText(text: activity).lineLimit(1).hugWidth(280) }
+            } else if let activity = state.activity, state.mode != .idle || state.backgroundWork {
+                GlassCapsule {
+                    HStack(spacing: 7) {
+                        if let icon = state.activityIcon {
+                            Image(systemName: icon)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .symbolEffect(.pulse, options: .repeating)
+                                .contentTransition(.symbolEffect(.replace))
+                        }
+                        ShimmerText(text: activity, command: state.activityIsCommand)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .hugWidth(260)
+                    }
+                }
             } else {
                 switch state.mode {
                 case .idle:
@@ -647,17 +665,20 @@ struct VoiceBars: View {
 /// Text with the glow's colours sweeping through it.
 struct ShimmerText: View {
     var text: String
+    /// A command as typed, in the monospaced face.
+    var command = false
     var body: some View {
+        let font: Font = command ? .system(size: 11.5, weight: .medium, design: .monospaced) : .system(size: 12, weight: .semibold)
         TimelineView(.animation) { tl in
             let phase = tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.2) / 2.2
             Text(text)
-                .font(.system(size: 12, weight: .semibold))
+                .font(font)
                 .foregroundStyle(.primary.opacity(0.55))
                 .overlay {
                     LinearGradient(colors: [.clear] + pilotRainbow.dropLast() + [.clear],
                                    startPoint: UnitPoint(x: phase * 2 - 1, y: 0.5),
                                    endPoint: UnitPoint(x: phase * 2, y: 0.5))
-                        .mask(Text(text).font(.system(size: 12, weight: .semibold)))
+                        .mask(Text(text).font(font))
                 }
         }
     }
