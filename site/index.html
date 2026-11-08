@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Cursor Pilot: a helper that lives next to your cursor</title>
-  <meta name="description" content="Cursor Pilot is a free, open-source Mac app. Hold Control + Option anywhere and talk: it looks at your screens, answers out loud, and points at what you need. Uses Claude by Anthropic with your own API key.">
+  <meta name="description" content="Cursor Pilot is a free, open-source Mac app. Hold Control + Option anywhere and talk: it looks at your screens, answers out loud, points at what you need or does the job, and you can keep talking to it while it works. Uses Claude with your own API key.">
   <link rel="canonical" href="https://cursorpilot.lou15.com/">
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#06070b" media="(prefers-color-scheme: dark)">
@@ -57,7 +57,7 @@
         <span class="app-icon app-icon--lg reveal"><img src="assets/icon-256.png" width="88" height="88" alt="Cursor Pilot app icon"></span>
         <p class="pill reveal"><span class="pill-dot" aria-hidden="true"></span>Free &amp; open source · MIT</p>
         <h1 id="hero-title" class="reveal">Ask your Mac.<br><span class="h1-soft">It points the way.</span></h1>
-        <p class="lede reveal">Cursor Pilot is a small helper that lives next to your mouse cursor. Hold <kbd>⌃</kbd><kbd>⌥</kbd> anywhere and talk. It looks at your screens, answers out loud, and a glass buddy cursor flies over to point at what you need.</p>
+        <p class="lede reveal">Cursor Pilot is a small helper that lives next to your mouse cursor. Hold <kbd>⌃</kbd><kbd>⌥</kbd> anywhere and talk. It looks at your screens, answers out loud, and a glass buddy cursor flies over to point at what you need. Or it does the job for you, and you can keep talking to it while it works.</p>
         <div class="cta-row reveal">
           <a class="btn btn-primary" data-github href="#build">
             <svg class="gh-mark" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
@@ -65,7 +65,7 @@
           </a>
           <a class="btn btn-ghost" href="#build">Build it yourself</a>
         </div>
-        <p class="hero-meta reveal">macOS 14 or later · best on macOS 26 · uses your own Anthropic API key</p>
+        <p class="hero-meta reveal">macOS 14 or later · best on macOS 26 · uses your own API keys</p>
       </div>
 
       <!-- Stylised Mac desktop. Decorative: everything it shows is described in the copy around it. -->
@@ -148,7 +148,7 @@
           <li class="card step reveal">
             <span class="step-n" aria-hidden="true">1</span>
             <h3>Hold <kbd>⌃</kbd><kbd>⌥</kbd> and talk</h3>
-            <p>Control + Option, from any app. No window to find, no box to type in. Speech recognition runs on your Mac with Apple's speech model on macOS 26.</p>
+            <p>Control + Option, from any app. No window to find, no box to type in. Your words show up as you say them, and you can talk over it any time.</p>
           </li>
           <li class="card step reveal">
             <span class="step-n" aria-hidden="true">2</span>
@@ -158,7 +158,7 @@
           <li class="card step reveal">
             <span class="step-n" aria-hidden="true">3</span>
             <h3>It shows you, or does it</h3>
-            <p>It answers out loud with the best voice installed on your Mac, and the buddy cursor flies over to point. Or it just gets the job done for you.</p>
+            <p>It answers out loud, saying what it's about to do before it does it, and the buddy cursor flies over to point. Or it just gets the job done for you.</p>
           </li>
         </ol>
 
@@ -182,14 +182,29 @@
               <span class="mini-bubble mini-bubble--me"></span><span class="mini-bubble mini-bubble--bot"></span><span class="mini-bubble mini-bubble--me mini-bubble--short"></span>
             </div>
             <h3>A chat like texting</h3>
-            <p>Short replies, your history, search, and your drawings, in a chat window that feels like a messaging app.</p>
+            <p>Short replies in bubbles, your history, search and your drawings, in a chat window that feels like Messages.</p>
           </article>
           <article class="card feature reveal">
             <div class="feature-art art-notch" aria-hidden="true">
-              <span class="mini-notch"><span class="mini-wave"><i></i><i></i><i></i><i></i></span></span>
+              <span class="mini-notch mini-notch--glow"><span class="mini-dots"><i></i><i></i><i></i></span></span>
             </div>
-            <h3>Lives in the notch</h3>
-            <p>A small notch panel shows when it's listening, thinking or answering, so you always know where it's at.</p>
+            <h3>Works up in the notch</h3>
+            <p>When the work doesn't need your screen, the buddy flies up into the notch and it lights up. Hover it to see the conversation or type a question.</p>
+          </article>
+          <article class="card feature reveal">
+            <div class="feature-art art-talk" aria-hidden="true">
+              <span class="talk-pill talk-pill--work"><span class="mini-dots"><i></i><i></i><i></i></span>Working</span>
+              <span class="talk-pill talk-pill--you"><span class="mini-wave"><i></i><i></i><i></i><i></i></span>also check March</span>
+            </div>
+            <h3>Talk to it while it works</h3>
+            <p>Add something, change your mind, ask how it's going. It hears you mid-task and takes it into account without starting over.</p>
+          </article>
+          <article class="card feature reveal">
+            <div class="feature-art art-caption" aria-hidden="true">
+              <span class="cap-line"><i>I</i><i>found</i><i>three</i><b>invoices</b><i class="cap-next">from</i><i class="cap-next">March.</i></span>
+            </div>
+            <h3>Live captions</h3>
+            <p>Its words light up one by one as it says them, beside the buddy or under the notch, wherever it is at the moment.</p>
           </article>
         </div>
       </div>
@@ -202,14 +217,15 @@
           <header class="section-head section-head--left reveal">
             <h2 id="coworker-title">Like a co-worker who can use your computer.</h2>
           </header>
-          <p class="body reveal">Ask for something done and it does it, quietly, in the background. You give consent once, during onboarding. After that there are no permission prompts, and it tells you what it's doing as it goes.</p>
+          <p class="body reveal">Ask for something done and it does it, quietly, in the background. You give consent once, during onboarding. After that there are no permission prompts, and it says each step out loud before it takes it. Bigger jobs go to background agents that run side by side, so you can keep asking for other things.</p>
           <ul class="checks reveal">
             <li><strong>Runs shell commands</strong> for the quick stuff.</li>
             <li><strong>Reads and edits files</strong>, backing up each edit first.</li>
             <li><strong>Scripts your apps</strong> with AppleScript.</li>
-            <li><strong>Uses the mouse and keyboard</strong> when it has to.</li>
+            <li><strong>Uses the mouse and keyboard</strong> like a person, or with its own pointer so yours stays free.</li>
+            <li><strong>Searches and reads the web</strong> when the answer isn't on your Mac.</li>
           </ul>
-          <p class="body body--muted reveal">When it's just using the shell, the buddy stays out of your way.</p>
+          <p class="body body--muted reveal">When it doesn't need your screen, the buddy waits in the notch and stays out of your way.</p>
         </div>
         <div class="card activity reveal" role="group" aria-label="Example of Cursor Pilot narrating its work">
           <div class="activity-head">
@@ -232,8 +248,8 @@
     <section class="section" id="privacy" aria-labelledby="privacy-title">
       <div class="wrap">
         <header class="section-head reveal">
-          <h2 id="privacy-title">Your requests go straight from your Mac to Anthropic.</h2>
-          <p class="sub">Cursor Pilot uses Claude by Anthropic with your own Anthropic API key. Requests travel from your Mac to Anthropic without passing through any server of ours.</p>
+          <h2 id="privacy-title">Your requests go straight from your Mac to the AI you pick.</h2>
+          <p class="sub">Cursor Pilot uses Claude by Anthropic with your own API key. Requests travel from your Mac to the provider without passing through any server of ours.</p>
         </header>
 
         <div class="flow card reveal" aria-hidden="true">
@@ -250,15 +266,15 @@
           <div class="flow-line"><span class="flow-pulse"></span></div>
           <div class="flow-node">
             <span class="flow-ico flow-ico--cloud"></span>
-            <span>Anthropic API</span>
+            <span>Your AI provider</span>
           </div>
         </div>
 
         <ul class="facts">
-          <li class="card fact reveal"><h3>No account</h3><p>You paste your Anthropic API key during setup. There is nothing to sign up for.</p></li>
-          <li class="card fact reveal"><h3>No server of ours</h3><p>Requests go directly from your Mac to Anthropic, so they never pass through anything we run.</p></li>
+          <li class="card fact reveal"><h3>No account</h3><p>You paste your own API key during setup, and it's kept in your keychain. There is nothing to sign up for.</p></li>
+          <li class="card fact reveal"><h3>No server of ours</h3><p>Requests go directly from your Mac to the provider, so they never pass through anything we run.</p></li>
           <li class="card fact reveal"><h3>No tracking</h3><p>The app has no analytics, and this page loads no trackers or third-party scripts.</p></li>
-          <li class="card fact reveal"><h3>On-device speech</h3><p>On macOS 26 your voice is transcribed on your Mac with Apple's speech model.</p></li>
+          <li class="card fact reveal"><h3>Speech your way</h3><p>On-device by default. Or pick a local model, a cloud voice, or OpenAI's live voice for the fastest back-and-forth.</p></li>
         </ul>
       </div>
     </section>
@@ -270,7 +286,7 @@
           <div class="oss-copy">
             <p class="pill oss-badge"><span class="pill-dot" aria-hidden="true"></span>Free &amp; open source · MIT</p>
             <h2 id="build-title">Read the code, build it, and change it under the MIT license.</h2>
-            <p class="body">The app is free. You pay Anthropic only for what you use. It's a native Swift and SwiftUI app with a Rust core, and every line is on GitHub.</p>
+            <p class="body">The app is free. You pay your AI provider only for what you use. It's a native Swift and SwiftUI app with a Rust core, and every line is on GitHub.</p>
             <div class="cta-row cta-row--left">
               <a class="btn btn-primary" data-github href="#build">
                 <svg class="gh-mark" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
@@ -301,15 +317,19 @@
         <div class="faq">
           <details class="card qa reveal">
             <summary>What does it cost?</summary>
-            <p>Cursor Pilot is free and open source under the MIT license. It talks to Claude by Anthropic using your own API key, so you pay Anthropic directly, and only for what you use. There's no subscription and nothing to pay us.</p>
+            <p>Cursor Pilot is free and open source under the MIT license. It talks to Claude by Anthropic using your own API key, so you pay Anthropic directly, and only for what you use. The optional live voice uses your OpenAI key the same way. There's no subscription and nothing to pay us.</p>
           </details>
           <details class="card qa reveal">
             <summary>Where does my data go?</summary>
-            <p>Requests go straight from your Mac to Anthropic. There's no account, no server of ours and no tracking. On macOS 26, speech recognition runs on-device with Apple's speech model, and replies are spoken with the best system voice you have installed.</p>
+            <p>Requests go straight from your Mac to the provider you chose. There's no account, no server of ours and no tracking. By default, speech recognition runs on your Mac and replies use your Mac's own voices. If you turn on a cloud voice or the live voice, your audio goes to that provider.</p>
           </details>
           <details class="card qa reveal">
             <summary>What can it touch on my Mac?</summary>
             <p>With your one-time consent during onboarding, it can run shell commands, read and edit files (backing up each edit), script apps with AppleScript, and use the mouse and keyboard when it has to. It works in the background without permission prompts and says what it's doing as it goes.</p>
+          </details>
+          <details class="card qa reveal">
+            <summary>Can I talk to it while it's working?</summary>
+            <p>Yes. Hold <kbd>⌃</kbd><kbd>⌥</kbd> any time. What you say goes into the task that's running, so it can change course without starting over. Turn on hands-free in Settings and you don't even need the keys.</p>
           </details>
           <details class="card qa reveal">
             <summary>Which macOS versions does it run on?</summary>
