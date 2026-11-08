@@ -55,6 +55,13 @@ enum TestHooks {
                    "everything": p.everything], to: out)
             return true
         }
+        // `-CPLiveTest out.json`: connects the live voice with the saved OpenAI
+        // key, sends typed lines instead of speech, and writes what came back
+        // (events, transcripts, tool calls, errors). Plays its voice.
+        if let out = defaults.string(forKey: "CPLiveTest") {
+            await liveTest(to: out)
+            return true
+        }
         if let out = defaults.string(forKey: "CPCursorTest") {
             await cursorTest(to: out)
             return true
@@ -68,6 +75,34 @@ enum TestHooks {
             return true
         }
         return false
+    }
+
+    private static func liveTest(to out: String) async {
+        let model = AppModel.shared
+        await model.loadAPIKey()
+        let live = LiveVoice.shared
+        var said: [String] = [], heard: [String] = [], tasks: [String] = [], errors: [String] = []
+        var spoke = 0
+        live.onEvent = { event in
+            switch event {
+            case .saying(let t): if said.isEmpty { said.append(t) } else { said[said.count - 1] = t }
+            case .heard(let t): heard.append(t)
+            case .speakingStarted: spoke += 1; said.append("")
+            case .speakingEnded: break
+            case .task(let id, let request):
+                tasks.append(request)
+                live.finishTask(callID: id, output: "The biggest file in Downloads is OpenBot-0.53.0-arm64.dmg, 325 MB.")
+            case .error(let m): errors.append(m)
+            }
+        }
+        let started = Date()
+        live.sendText("Hi! Say hello back in one short sentence.", key: model.openAIKey)
+        try? await Task.sleep(for: .seconds(8))
+        live.sendText("What's the biggest file in my Downloads folder?", key: model.openAIKey)
+        try? await Task.sleep(for: .seconds(14))
+        write(["connected": live.connected, "said": said, "heard": heard, "tasks": tasks, "errors": errors,
+               "spoke": spoke, "events": live.log, "seconds": Date().timeIntervalSince(started)], to: out)
+        live.disconnect()
     }
 
     /// `-CPAsk "question"` sends one typed question through the whole agent

@@ -53,6 +53,10 @@ final class AppModel: ObservableObject {
                 let key = openAIKey
                 Task.detached { Keychain.saveOpenAIKey(key) }
             }
+            if SpeechEngine.current == .live {
+                LiveVoice.shared.disconnect()
+                applyLiveVoice()
+            }
         }
     }
     /// The abliteration.ai key, for the abliterated models.
@@ -86,6 +90,10 @@ final class AppModel: ObservableObject {
         didSet {
             defaults.set(handsFree, forKey: "handsFree")
             if !handsFree { endHandsFree() }
+            if SpeechEngine.current == .live {
+                LiveVoice.shared.disconnect()
+                applyLiveVoice()
+            }
         }
     }
     @Published var hideBuddyWhenIdle: Bool {
@@ -371,6 +379,7 @@ final class AppModel: ObservableObject {
             if CloudSpeech.hasKey { _ = await VoiceCatalog.shared.voices(model: CloudSpeech.voiceModel) }
             let engine = SpeechEngine.current
             if engine == .local { await MainActor.run { LocalSpeech.shared.prepare() } }
+            await MainActor.run { AppModel.shared.applyLiveVoice() }
         }
     }
 
@@ -390,6 +399,10 @@ final class AppModel: ObservableObject {
     private var precapture: (task: Task<[ScreenShotPayload], Never>, at: Date)?
 
     func beginListening(open: Bool = false) {
+        if usesLiveVoice {
+            beginLiveTalk()
+            return
+        }
         interrupt()
         openMic = open
         openMicSince = Date()
@@ -432,6 +445,11 @@ final class AppModel: ObservableObject {
     }
 
     func endListening() async {
+        if usesLiveVoice {
+            LiveVoice.shared.releaseTalk()
+            if phase == .listening { setPhase(.thinking) }
+            return
+        }
         guard phase == .listening else { return }
         openMic = false
         let text = await voice.stop()
@@ -453,7 +471,7 @@ final class AppModel: ObservableObject {
             return
         }
         Sounds.play(.send)
-        overlay.state.readAlong = speakReplies
+        overlay.state.readAlong = speakReplies && liveCall == nil
         heardText = text
         replyText = ""
         scenesShown = 0
@@ -523,6 +541,12 @@ final class AppModel: ObservableObject {
                 }
             }
         case .speak(let sentence):
+            // The live voice says Claude's lines itself: progress before a
+            // step, and the answer at the end.
+            if liveCall != nil {
+                liveLines.append(sentence)
+                return
+            }
             if speakReplies {
                 speaker.speak(sentence, number: sentencesQueued)
                 sentencesQueued += 1
@@ -571,6 +595,10 @@ final class AppModel: ObservableObject {
             switch step.phase {
             case "start":
                 liveSteps.append(step)
+                if liveCall != nil, !liveLines.isEmpty {
+                    LiveVoice.shared.say(liveLines.joined(separator: " "))
+                    liveLines = []
+                }
                 // What's running shows quietly by the thinking dots (a
                 // command as typed) and stays until the next step replaces it.
                 overlay.state.activityIcon = AgentStep.icon(for: step.kind)
@@ -591,8 +619,17 @@ final class AppModel: ObservableObject {
             replyText = text
             overlay.state.caption = captionText(text)
         case .error(let kind, let message):
+            if liveCall != nil { liveFailure = message }
             if kind != "cancelled" { showError(message) }
         case .finished:
+            if let call = liveCall {
+                let answer = liveLines.joined(separator: " ")
+                let output = liveFailure.map { "It couldn't finish: \($0)" } ?? (answer.isEmpty ? replyText : answer)
+                LiveVoice.shared.finishTask(callID: call, output: output.isEmpty ? "Done." : output)
+                liveCall = nil
+                liveLines = []
+                liveFailure = nil
+            }
             requestActive = false
             backgroundWork = false
             overlay.state.activity = nil
@@ -673,7 +710,7 @@ final class AppModel: ObservableObject {
         guard requestFinished, !speaker.isSpeaking, phase == .answering || phase == .thinking else { return }
         resetTask?.cancel()
         // Hands-free: the mic opens for a reply, like a pause in a conversation.
-        if handsFree, lastError == nil, speakReplies {
+        if handsFree, lastError == nil, speakReplies, !usesLiveVoice {
             resetTask = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(350))
                 guard !Task.isCancelled, let self, self.requestFinished, !self.speaker.isSpeaking,
@@ -909,6 +946,76 @@ final class AppModel: ObservableObject {
             overlay.state.mode = .answering
         }
         refreshGlow()
+    }
+
+    // MARK: Live voice
+
+    /// gpt-realtime-2.1 hears and talks; Claude does the work behind it.
+    var usesLiveVoice: Bool { SpeechEngine.current == .live && !openAIKey.isEmpty }
+    /// The live voice's request Claude is working on, and Claude's lines so far.
+    private var liveCall: String?
+    private var liveLines: [String] = []
+    private var liveFailure: String?
+
+    private func beginLiveTalk() {
+        guard Setup.hasVoice else {
+            showError("Cursor Pilot can't hear you yet: run \(Setup.hint).")
+            return
+        }
+        wireLiveVoice()
+        LiveVoice.shared.handsFree = handsFree
+        LiveVoice.shared.pressTalk(key: openAIKey)
+        if !requestActive {
+            setPhase(.listening)
+            Sounds.play(.listen)
+        }
+    }
+
+    /// Connects the live voice's events to the buddy and to Claude, once.
+    private func wireLiveVoice() {
+        let live = LiveVoice.shared
+        guard live.onEvent == nil else { return }
+        live.onEvent = { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .heard(let text):
+                heardText = text
+            case .speakingStarted:
+                overlay.state.readAlong = false
+                speakingNow = true
+                if !requestActive, phase != .answering {
+                    requestFinished = false
+                    setPhase(.answering)
+                }
+            case .saying(let text):
+                if !requestActive || overlay.state.dock == 0 { overlay.state.caption = captionText(text) }
+            case .speakingEnded:
+                speakingNow = false
+                if !requestActive {
+                    requestFinished = true
+                    settleIfDone()
+                }
+            case .task(let callID, let request):
+                liveCall = callID
+                liveLines = []
+                liveFailure = nil
+                Task { await self.ask(request.isEmpty ? self.heardText : request, includeScreen: true) }
+            case .error(let message):
+                showError(message)
+            }
+        }
+    }
+
+    /// Gets the live voice ready (connected, listening if hands-free) or
+    /// closes it when another engine is chosen.
+    func applyLiveVoice() {
+        if usesLiveVoice {
+            wireLiveVoice()
+            LiveVoice.shared.handsFree = handsFree
+            if handsFree { LiveVoice.shared.startHandsFree(key: openAIKey) }
+        } else {
+            LiveVoice.shared.disconnect()
+        }
     }
 
     // MARK: Hands-free

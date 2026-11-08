@@ -76,7 +76,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     /// at the chosen rate itself; MAI-Voice's audio is sped up on playback.
     nonisolated static func render(_ text: String, language: String, engine: SpeechEngine, rate: Float) async -> (samples: [Float], rate: Float)? {
         switch engine {
-        case .cloud:
+        case .cloud, .live:
+            // Live voice speaks for itself; anything read aloud otherwise uses the cloud voice.
             guard CloudSpeech.hasKey, await CloudSpeech.speaks(language) else { return nil }
             do {
                 return (try await CloudSpeech.speak(text, language: language), rate)

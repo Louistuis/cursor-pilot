@@ -449,7 +449,20 @@ Settings › Speech picks the engine that hears you and reads replies:
   and computer use and web search are left out. `abliterated-model-large-v2`
   is text only, so screenshots are replaced by a short note.
 - An OpenAI key (keychain service `com.louistuis.cursorpilot.openai`, or
-  `$OPENAI_API_KEY`) is kept for the live voice layer (GPT-Live-1).
+  `$OPENAI_API_KEY`) is kept for the live voice.
+- **Live voice** (Settings › Speech › Live voice): OpenAI's
+  `gpt-realtime-2.1` over its Realtime WebSocket
+  (`wss://api.openai.com/v1/realtime`) hears you and talks back in one
+  connection, PCM16 at 24 kHz both ways through one AVAudioEngine with voice
+  processing (echo cancellation). It doesn't do the work: anything beyond
+  small talk goes to Claude (the model chosen above) through its
+  `cursor_pilot` tool. Claude's lines before each step are said as
+  out-of-band responses (`conversation: "none"`), and its answer goes back as
+  the tool's output for the voice to tell. Hold the talk key to talk (audio is
+  committed on release), or turn on hands-free for semantic VAD with cut-in;
+  talking over it truncates its reply where you cut in. OpenRouter has no
+  realtime model or WebSocket, so this needs the OpenAI key and credits.
+  `-CPLiveTest out.json` checks the connection with typed lines.
 - Each key row in Settings has a Paste button that saves the key on the
   clipboard without showing it.
 

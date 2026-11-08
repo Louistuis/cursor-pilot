@@ -18,6 +18,7 @@ struct SettingsView: View {
     @State private var cloudVoiceNames: [String] = []
     @State private var cloudVoiceNorwegian = true
     @AppStorage("kokoroVoice") private var kokoroVoice = LocalSpeech.defaultVoice
+    @AppStorage("liveVoice") private var liveVoice = "marin"
     @State private var engine = SpeechEngine.current
     @State private var cloudKeyFound = CloudSpeech.hasKey
     @State private var cloudKeyDraft = ""
@@ -35,6 +36,7 @@ struct SettingsView: View {
             return "\(hearing) writes down what you say and \(speaking) reads replies, through your OpenRouter account, so recordings and replies go to OpenRouter." + languages
         case .local: return "Everything stays on this Mac. Whisper understands Norwegian, English and many more; Kokoro reads English replies, and other languages use Apple's voices. The models download once (about 2 GB)."
         case .apple: return "macOS’s own speech recognition and voices."
+        case .live: return "OpenAI's gpt-realtime-2.1 hears you and talks back in one live connection, with very little delay, and you can cut in while it talks. It hands everything that needs your Mac to \(SettingsView.modelName(model.model)), the model above, and says its progress and answer. Audio goes to OpenAI, billed to your OpenAI account (needs credits)."
         }
     }
 
@@ -226,6 +228,19 @@ struct SettingsView: View {
                     }
                 case .apple:
                     EmptyView()
+                case .live:
+                    if model.openAIKey.isEmpty {
+                        LabeledContent("OpenAI") {
+                            Text("Add your OpenAI key under Model above").foregroundStyle(.orange)
+                        }
+                    }
+                    Picker("Voice", selection: $liveVoice) {
+                        ForEach(LiveVoice.voices, id: \.self) { Text(Self.voiceTitle($0)).tag($0) }
+                    }
+                    .onChange(of: liveVoice) { _, _ in
+                        LiveVoice.shared.disconnect()
+                        model.applyLiveVoice()
+                    }
                 }
             } header: {
                 Text("Speech")

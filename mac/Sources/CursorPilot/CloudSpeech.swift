@@ -9,6 +9,9 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
     case local
     /// macOS's own speech recognition and voices.
     case apple
+    /// OpenAI's gpt-realtime-2.1 hears and talks in one live connection;
+    /// Claude does the work behind it.
+    case live
 
     var id: String { rawValue }
 
@@ -17,6 +20,7 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
         case .cloud: "Cloud · Microsoft MAI (OpenRouter)"
         case .local: "On this Mac · Whisper + Kokoro"
         case .apple: "Apple"
+        case .live: "Live voice · OpenAI gpt-realtime-2.1"
         }
     }
 
