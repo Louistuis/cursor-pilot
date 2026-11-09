@@ -40,6 +40,14 @@
 
 That's it. Hold <kbd>⌃</kbd> <kbd>⌥</kbd> anywhere and talk.
 
+**Or from Terminal, in one line.** It downloads the latest release, checks its
+checksum and signature, puts it in Applications and opens it, with no "Open
+Anyway" step and no password ([read the script](scripts/install.sh)):
+
+```bash
+curl -fsSL https://cursorpilot.lou15.com/install.sh | bash
+```
+
 > Needs macOS 15 or later on an Apple Silicon Mac. It's at its best on macOS 26.
 > To update, download the new version and replace the old app.
 
