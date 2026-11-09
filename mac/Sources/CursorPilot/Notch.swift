@@ -9,7 +9,6 @@ final class NotchState: ObservableObject {
     @Published var inputFocused = false
     /// Bumped to put the cursor in the ask field (double-tap Control).
     @Published var focusRequest = 0
-    @Published var includeScreen = true
     /// Size of the hardware notch, or of a stand-in on screens without one.
     @Published var notchSize = CGSize(width: 200, height: 32)
     @Published var hasNotch = false
@@ -578,21 +577,6 @@ private struct NotchExpandedView: View {
 
     private var composer: some View {
         HStack(spacing: 8) {
-            Button { state.includeScreen.toggle() } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: state.includeScreen ? "eye" : "eye.slash")
-                        .contentTransition(.symbolEffect(.replace))
-                    Text("Screen")
-                }
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(state.includeScreen ? .white : .white.opacity(0.45))
-                .padding(.horizontal, 9)
-                .frame(height: 24)
-                .background(state.includeScreen ? pilotAccent.opacity(0.45) : .white.opacity(0.07), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .help(state.includeScreen ? "Cursor Pilot sees your screen when you ask" : "Your screen isn't sent")
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: state.includeScreen)
             TextField("", text: $state.draft, prompt: Text("Ask anything…").foregroundStyle(.white.opacity(0.4)))
                 .textFieldStyle(.plain)
                 .font(.system(size: 13.5))
@@ -605,7 +589,7 @@ private struct NotchExpandedView: View {
             trailing
                 .frame(width: 26, height: 26)
         }
-        .padding(.leading, 6)
+        .padding(.leading, 14)
         .padding(.trailing, 5)
         .frame(height: 36)
         .background(.white.opacity(focused ? 0.11 : 0.075), in: Capsule())
@@ -663,7 +647,7 @@ private struct NotchExpandedView: View {
         guard !text.isEmpty else { return }
         state.draft = ""
         focused = false
-        Task { await model.ask(text, includeScreen: state.includeScreen) }
+        Task { await model.ask(text, includeScreen: true) }
     }
 }
 
