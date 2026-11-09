@@ -39,6 +39,7 @@ Debug launch flags, for design work:
 | `-CPShaderGallery YES` | opens a window with every light effect |
 | `-CPSkipKeychain YES` | does not read the saved API key (no keychain prompt) |
 | `-CPOpenHome settings` | opens Home on `settings`, `drawings` or `chat` |
+| `-CPHomeDemo chat:0,find:word` | puts Home in a state: `chat:N` opens the Nth newest chat, `find:word`, `palette`, `slash`, `hover`, `side` |
 | `-CPBuddyDemo listening` | holds the buddy in `listening`, `thinking` or `answering` |
 | `-CPAsk "question"` | asks a typed question at launch, without screenshots |
 | `-CPRenderArrowPreview file.png` | renders the buddy arrow large and at real size to a PNG, then quits |

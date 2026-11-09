@@ -14,16 +14,25 @@ final class HomeNavigation: ObservableObject {
     @Published var destination: HomeDestination?
 }
 
-/// The main window: chats grouped by date in the sidebar with Drawings and
-/// Settings, the open page on the right.
+/// The main window: pinned chats and the rest by date in the sidebar with
+/// Drawings and Settings, the open page on the right, and ⌘K over all of it.
 struct HomeView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var nav: HomeNavigation = .shared
+    @ObservedObject private var ui = ChatUI.shared
+    @ObservedObject private var pins = ChatPins.shared
     @State private var search = ""
+    /// Chats whose messages hold the search words, with the words around them.
+    @State private var hits: [String: String] = [:]
     @State private var renaming: String?
     @State private var renameDraft = ""
     @State private var pendingDelete: ConversationSummary?
     @FocusState private var renameFocused: Bool
+
+    private var onChat: Bool {
+        if case .chat = nav.destination ?? .chat("") { return true }
+        return false
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -33,12 +42,27 @@ struct HomeView: View {
             detail
         }
         .frame(minWidth: 760, minHeight: 500)
+        .overlay {
+            if ui.palette {
+                CommandPalette(model: model, isPresented: $ui.palette, actions: paletteActions) { id in
+                    nav.destination = .chat(id)
+                }
+            }
+        }
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: ui.palette)
         .onChange(of: nav.destination) { _, d in
-            if case .chat(let id) = d { model.openConversation(id) }
+            guard case .chat(let id) = d else {
+                if ui.finding { ui.endFind() }
+                return
+            }
+            model.openConversation(id)
+            // Picked from a search of the messages: show where the words are.
+            let q = search.trimmingCharacters(in: .whitespaces)
+            if !q.isEmpty, hits[id] != nil { ui.startFind(q) } else if ui.finding { ui.endFind() }
         }
         .onChange(of: model.currentConversationID) { _, id in
             // A question asked from anywhere lands in the conversation it belongs to.
-            if case .chat = nav.destination ?? .chat("") { nav.destination = .chat(id) }
+            if onChat { nav.destination = .chat(id) }
         }
         .onAppear {
             if nav.destination == nil { nav.destination = .chat(model.currentConversationID) }
@@ -53,54 +77,86 @@ struct HomeView: View {
             Text("This conversation will be removed from this Mac.")
         }
         .background {
-            // ⌘N and ⌘, work anywhere in the window.
+            // These work anywhere in the window.
             Button("") { newChat() }.keyboardShortcut("n").hidden()
             Button("") { nav.destination = .settings }.keyboardShortcut(",").hidden()
+            Button("") { ui.palette.toggle() }.keyboardShortcut("k").hidden()
+            Button("") { if onChat { ui.startFind() } }.keyboardShortcut("f").hidden()
         }
     }
 
     // MARK: Sidebar
 
     private var sidebar: some View {
+        let q = search.trimmingCharacters(in: .whitespaces)
+        return ScrollViewReader { proxy in
+            sidebarList(q)
+                .onChange(of: ui.demoSidebarEnd) {
+                    if let last = model.conversations.min(by: { $0.updatedAt < $1.updatedAt }) { proxy.scrollTo(last.id) }
+                }
+        }
+    }
+
+    private func sidebarList(_ q: String) -> some View {
         List(selection: $nav.destination) {
             Section {
                 Label("Drawings", systemImage: "scribble.variable").tag(HomeDestination.drawings)
                 Label("Settings", systemImage: "gearshape").tag(HomeDestination.settings)
             }
-            if model.conversations.isEmpty {
-                Text(search.isEmpty ? "No chats yet" : "No matches")
-                    .foregroundStyle(.secondary)
-                    .listRowSeparator(.hidden)
-            }
-            ForEach(groups, id: \.title) { group in
-                Section(group.title) {
-                    ForEach(group.items) { chatRow($0) }
+            if !q.isEmpty {
+                let found = results(q)
+                Section(found.isEmpty ? "No matches" : found.count == 1 ? "1 chat" : "\(found.count) chats") {
+                    ForEach(found) { chatRow($0, snippet: hits[$0.id]) }
+                }
+            } else {
+                if model.conversations.isEmpty {
+                    Text("No chats yet")
+                        .foregroundStyle(.secondary)
+                        .listRowSeparator(.hidden)
+                }
+                let pinned = pins.ids.compactMap { id in model.conversations.first { $0.id == id } }
+                if !pinned.isEmpty {
+                    Section("Pinned") {
+                        ForEach(pinned) { chatRow($0) }
+                    }
+                }
+                ForEach(groups, id: \.title) { group in
+                    Section(group.title) {
+                        ForEach(group.items) { chatRow($0) }
+                    }
                 }
             }
         }
         .listStyle(.sidebar)
-        .searchable(text: $search, placement: .sidebar, prompt: "Search chats")
+        .searchable(text: $search, placement: .sidebar, prompt: "Search all chats")
+        .task(id: search) { await searchMessages() }
         .onDeleteCommand {
             if case .chat(let id) = nav.destination, let c = model.conversations.first(where: { $0.id == id }) {
                 pendingDelete = c
             }
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
+        // The name stays put above the chats, on a bar of its own that the
+        // list is cut off under, like the search field above it.
+        .pinnedTopBar {
             BrandMark()
                 .frame(height: 46)
                 .padding(.horizontal, 10)
                 .padding(.bottom, 4)
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) { StatusFooter(model: model).background(.bar) }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            StatusFooter(model: model) { ui.palette = true }.background(.bar)
+        }
         .toolbar {
             ToolbarItem {
                 Button(action: newChat) { Label("New Chat", systemImage: "square.and.pencil") }
                     .help("New chat (⌘N)")
             }
         }
+        .animation(.spring(response: 0.35, dampingFraction: 0.86), value: pins.ids)
     }
 
-    @ViewBuilder private func chatRow(_ c: ConversationSummary) -> some View {
+    @ViewBuilder private func chatRow(_ c: ConversationSummary, snippet: String? = nil) -> some View {
+        let pinned = pins.contains(c.id)
         Group {
             if renaming == c.id {
                 TextField("Name", text: $renameDraft)
@@ -110,25 +166,83 @@ struct HomeView: View {
                     .onExitCommand { renaming = nil }
                     .onChange(of: renameFocused) { _, focused in if !focused { commitRename(c.id) } }
             } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(c.displayTitle).lineLimit(1)
-                    Text(Date(timeIntervalSince1970: TimeInterval(c.updatedAt)), format: .relative(presentation: .named))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(c.displayTitle).lineLimit(1)
+                        Text(snippet ?? rowDetail(c))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(snippet == nil ? 1 : 2)
+                    }
+                    Spacer(minLength: 0)
+                    // The chat that's being answered right now.
+                    if c.id == model.currentConversationID && model.phase != .idle {
+                        ProgressView().controlSize(.mini)
+                    }
                 }
             }
         }
         .tag(HomeDestination.chat(c.id))
         .contextMenu {
+            Button(pinned ? "Unpin" : "Pin") { pins.toggle(c.id) }
             Button("Rename") { startRename(c) }
+            Divider()
+            Button("Save as Markdown…") { if let t = model.core.transcript(id: c.id) { ChatExport.save(t) } }
+            Button("Copy as Markdown") { if let t = model.core.transcript(id: c.id) { ChatExport.copy(t) } }
+            Divider()
             Button("Delete…", role: .destructive) { pendingDelete = c }
+        }
+        .swipeActions(edge: .leading) {
+            Button { pins.toggle(c.id) } label: { Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") }
+                .tint(.orange)
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) { pendingDelete = c } label: { Label("Delete", systemImage: "trash") }
         }
     }
 
-    private var groups: [(title: String, items: [ConversationSummary])] {
+    private func rowDetail(_ c: ConversationSummary) -> String {
+        let when = Date(timeIntervalSince1970: TimeInterval(c.updatedAt)).formatted(.relative(presentation: .named))
+        guard c.turnCount > 0 else { return when }
+        return "\(when) · \(c.turnCount) \(c.turnCount == 1 ? "message" : "messages")"
+    }
+
+    /// Chats found by name or by what was said in them, newest first.
+    private func results(_ q: String) -> [ConversationSummary] {
+        model.conversations
+            .filter { $0.title.localizedCaseInsensitiveContains(q) || hits[$0.id] != nil }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Reads every chat for the search words, off the main thread, once the
+    /// typing pauses.
+    private func searchMessages() async {
         let q = search.trimmingCharacters(in: .whitespaces)
+        guard q.count >= 2 else {
+            hits = [:]
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(220))
+        guard !Task.isCancelled else { return }
+        let core = model.core
+        let ids = model.conversations.map(\.id)
+        let found = await Task.detached(priority: .userInitiated) { () -> [String: String] in
+            var out: [String: String] = [:]
+            for id in ids {
+                guard let turn = core.transcript(id: id)?.turns.last(where: {
+                    $0.text.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+                }) else { continue }
+                out[id] = chatSnippet(turn.text, around: q)
+            }
+            return out
+        }.value
+        guard !Task.isCancelled else { return }
+        hits = found
+    }
+
+    private var groups: [(title: String, items: [ConversationSummary])] {
         let items = model.conversations
-            .filter { q.isEmpty || $0.title.localizedCaseInsensitiveContains(q) }
+            .filter { !pins.contains($0.id) }
             .sorted { $0.updatedAt > $1.updatedAt }
         let cal = Calendar.current
         var out: [(String, [ConversationSummary])] = []
@@ -166,8 +280,42 @@ struct HomeView: View {
     private func delete(_ c: ConversationSummary) {
         let wasOpen = nav.destination == .chat(c.id)
         model.deleteConversation(c.id)
+        pins.forget(c.id)
+        ChatDrafts.shared[c.id] = ""
         if wasOpen { nav.destination = .chat(model.currentConversationID) }
         pendingDelete = nil
+    }
+
+    /// What ⌘K offers besides the chats themselves.
+    private var paletteActions: [CommandPalette.Entry] {
+        var out: [CommandPalette.Entry] = []
+        if model.phase == .thinking || model.phase == .answering {
+            out.append(.init(id: "stop", icon: "stop.fill", title: "Stop what it's doing", detail: "esc") { model.interrupt() })
+        }
+        out.append(.init(id: "new", icon: "square.and.pencil", title: "New chat", detail: "⌘N", run: newChat))
+        if onChat, !(model.openTranscript?.turns.isEmpty ?? true) {
+            out.append(.init(id: "find", icon: "magnifyingglass", title: "Find in this chat", detail: "⌘F") { ui.startFind() })
+            out.append(.init(id: "export", icon: "square.and.arrow.up", title: "Save this chat as Markdown", detail: "") {
+                if let t = model.openTranscript { ChatExport.save(t) }
+            })
+            let pinned = pins.contains(model.currentConversationID)
+            out.append(.init(id: "pin", icon: pinned ? "pin.slash" : "pin", title: pinned ? "Unpin this chat" : "Pin this chat", detail: "") {
+                pins.toggle(model.currentConversationID)
+            })
+        }
+        out.append(.init(id: "draw", icon: "pencil.tip", title: "Draw on your screen", detail: "⌃⌥D") { model.toggleSketch() })
+        out.append(.init(id: "voice", icon: model.speakReplies ? "speaker.slash" : "speaker.wave.2",
+                         title: model.speakReplies ? "Stop reading replies aloud" : "Read replies aloud", detail: "") {
+            model.speakReplies.toggle()
+        })
+        out.append(.init(id: "drawings", icon: "scribble.variable", title: "Open Drawings", detail: "") { nav.destination = .drawings })
+        out.append(.init(id: "settings", icon: "gearshape", title: "Open Settings", detail: "⌘,") { nav.destination = .settings })
+        for id in AppModel.models where id != model.model {
+            out.append(.init(id: "model-" + id, icon: "cpu", title: "Answer with " + Composer.shortName(id), detail: "Model") {
+                model.model = id
+            })
+        }
+        return out
     }
 
     // MARK: Detail
@@ -181,8 +329,10 @@ struct HomeView: View {
             DrawingsView(model: model)
                 .navigationTitle("Drawings")
         case .chat, nil:
+            let count = model.openTranscript?.turns.count ?? 0
             ChatView(model: model)
                 .navigationTitle(model.openTranscript.map { $0.title.isEmpty ? "New Chat" : $0.title } ?? "New Chat")
+                .navigationSubtitle(count == 0 ? "" : count == 1 ? "1 message" : "\(count) messages")
         }
     }
 }
@@ -191,9 +341,10 @@ extension ConversationSummary {
     var displayTitle: String { title.isEmpty ? "New Chat" : title }
 }
 
-/// What Cursor Pilot is doing right now, and how to talk to it.
+/// What Cursor Pilot is doing right now, how to talk to it, and ⌘K.
 private struct StatusFooter: View {
     @ObservedObject var model: AppModel
+    var jump: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -202,7 +353,18 @@ private struct StatusFooter: View {
                 .frame(width: 7, height: 7)
                 .shadow(color: color.opacity(0.8), radius: model.phase == .idle ? 0 : 4)
             Text(text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            Spacer()
+            Spacer(minLength: 4)
+            Button(action: jump) {
+                Text("⌘K")
+                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .frame(height: 18)
+                    .background(Color.secondary.opacity(0.14), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressButtonStyle())
+            .help("Jump to a chat or run an action")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -225,550 +387,6 @@ private struct StatusFooter: View {
         case .thinking: model.backgroundWork ? "Working on your Mac…" : "Thinking…"
         case .answering: "Answering…"
         }
-    }
-}
-
-// MARK: - Chat
-
-/// The open conversation, laid out like a text thread: your messages on the
-/// right, Cursor Pilot's on the left, one bubble per thought.
-private struct ChatView: View {
-    @ObservedObject var model: AppModel
-    @State private var draft = ""
-    @AppStorage("composerIncludesScreen") private var includeScreen = true
-    @FocusState private var composerFocused: Bool
-
-    var body: some View {
-        let turns = model.openTranscript?.turns ?? []
-        // Once a request is saved it is in `turns`, even while its reply is still spoken.
-        let isLive = model.phase == .listening || (model.phase != .idle && !model.requestFinished)
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    if !model.hasAPIKey {
-                        APIKeyCard(model: model).padding(.bottom, 16)
-                    }
-                    if turns.isEmpty && !isLive {
-                        ChatEmptyState(model: model).padding(.top, 80)
-                    } else {
-                        ContactHeader().padding(.bottom, 6)
-                    }
-                    ForEach(Array(turns.enumerated()), id: \.offset) { i, turn in
-                        if i == 0 || turn.at - turns[i - 1].at > 15 * 60 {
-                            TimeHeader(date: Date(timeIntervalSince1970: TimeInterval(turn.at)))
-                        }
-                        MessageGroup(model: model, fromMe: turn.role == "user", text: turn.text,
-                                     screens: turn.screens, points: turn.points, live: false,
-                                     steps: (turn.steps ?? []).map { StepItem(icon: AgentStep.icon(forSummary: $0), text: $0) },
-                                     key: "\(model.openTranscript?.id ?? "")#\(i)",
-                                     status: !isLive && turn.role == "user" && i == turns.count - 2 ? "Read" : nil)
-                            .padding(.top, i > 0 && turns[i - 1].role == turn.role ? 2 : 10)
-                        if turn.role == "assistant", let id = model.openTranscript?.id {
-                            let before = turns[..<i].last { $0.role == "assistant" }?.at ?? 0
-                            ForEach(model.boards(in: id, after: before, until: turn.at)) { record in
-                                BoardChip(record: record) { model.board.replay(record) }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.top, 4)
-                            }
-                        }
-                    }
-                    if isLive {
-                        if !model.heardText.isEmpty || model.phase == .listening {
-                            MessageGroup(model: model, fromMe: true,
-                                         text: model.heardText.isEmpty ? "…" : model.heardText,
-                                         screens: 0, points: [], live: true,
-                                         status: model.phase == .listening ? nil
-                                             : model.replyText.isEmpty && model.liveSteps.isEmpty ? "Delivered" : "Read")
-                                .padding(.top, 10)
-                        }
-                        if model.phase != .listening {
-                            MessageGroup(model: model, fromMe: false, text: model.replyText,
-                                         screens: 0, points: [], live: true,
-                                         steps: model.liveSteps.map {
-                                             StepItem(icon: AgentStep.icon(for: $0.kind), text: $0.summary,
-                                                      running: $0.phase == "start", ok: $0.ok)
-                                         })
-                                .padding(.top, 10)
-                        }
-                    }
-                    Color.clear.frame(height: 1).id("bottom")
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 16)
-                .frame(maxWidth: 720)
-                .frame(maxWidth: .infinity)
-            }
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: model.replyText) { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: model.heardText) { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: model.liveSteps.count) { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: turns.count) {
-                withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
-            }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
-        .onAppear { composerFocused = true }
-    }
-
-    private var composer: some View {
-        VStack(spacing: 8) {
-            if !model.jobs.isEmpty {
-                VStack(spacing: 6) {
-                    ForEach(model.jobs) { job in
-                        JobCard(job: job) { model.stopJob(job.id) }
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                }
-                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.jobs)
-            }
-            composerRow
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-        .frame(maxWidth: 740)
-        .frame(maxWidth: .infinity)
-        .background(.bar)
-    }
-
-    /// Like Messages: a round button for the screen, then the message pill
-    /// with the mic (or send) inside it.
-    private var composerRow: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            Button { includeScreen.toggle() } label: {
-                Image(systemName: includeScreen ? "eye.fill" : "eye.slash")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(includeScreen ? Color.white : Color.secondary)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 30, height: 30)
-                    .background(includeScreen ? pilotAccent : Color.secondary.opacity(0.16), in: Circle())
-                    .contentShape(Circle())
-            }
-            .buttonStyle(PressButtonStyle())
-            .help(includeScreen ? "Cursor Pilot sees your screen when you send (click to turn off)" : "Your screen isn't sent (click to turn on)")
-            .animation(.spring(response: 0.3, dampingFraction: 0.75), value: includeScreen)
-
-            HStack(alignment: .bottom, spacing: 4) {
-                TextField("Message", text: $draft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13.5))
-                    .lineLimit(1...8)
-                    .focused($composerFocused)
-                    .onSubmit(send)
-                    .padding(.vertical, 6)
-                trailingButton
-            }
-            .padding(.leading, 13)
-            .padding(.trailing, 3)
-            .padding(.vertical, 1)
-            .frame(minHeight: 30)
-            .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(composerFocused ? 0.5 : 0.3), lineWidth: 0.8))
-            .animation(.easeOut(duration: 0.18), value: composerFocused)
-        }
-    }
-
-    @ViewBuilder private var trailingButton: some View {
-        ZStack {
-            if model.phase == .thinking || model.phase == .answering {
-                round("stop.fill", fill: Color.secondary.opacity(0.22), glyph: .primary) { model.interrupt() }
-                    .help("Stop")
-                    .keyboardShortcut(.escape, modifiers: [])
-                    .transition(.scale(scale: 0.5).combined(with: .opacity))
-            } else if canSend {
-                round("arrow.up", fill: pilotAccent, glyph: .white, action: send)
-                    .help("Send (↩)")
-                    .transition(.scale(scale: 0.5).combined(with: .opacity))
-            } else {
-                round(model.phase == .listening ? "waveform" : "mic.fill",
-                      fill: model.phase == .listening ? Color.red : Color.clear,
-                      glyph: model.phase == .listening ? .white : .primary, action: model.toggleListening)
-                    .symbolEffect(.variableColor.iterative, isActive: model.phase == .listening)
-                    .help(model.phase == .listening ? "Send what you said" : "Talk (or hold \(model.talkDisplay) anywhere)")
-                    .transition(.scale(scale: 0.5).combined(with: .opacity))
-            }
-        }
-        .frame(width: 24, height: 24)
-        .padding(.bottom, 2)
-        .animation(.spring(response: 0.28, dampingFraction: 0.72), value: canSend)
-        .animation(.spring(response: 0.28, dampingFraction: 0.72), value: model.phase)
-    }
-
-    private func round(_ name: String, fill: Color, glyph: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: name)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(glyph)
-                .frame(width: 24, height: 24)
-                .background(fill, in: Circle())
-                .contentShape(Circle())
-        }
-        .buttonStyle(PressButtonStyle())
-    }
-
-    private var canSend: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.hasAPIKey }
-
-    private func send() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        draft = ""
-        Task { await model.ask(text, includeScreen: includeScreen) }
-    }
-}
-
-/// "Today 10:42" between messages that are far apart.
-private struct TimeHeader: View {
-    var date: Date
-
-    var body: some View {
-        Text(label)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
-            .padding(.top, 14)
-            .padding(.bottom, 4)
-    }
-
-    private var label: String {
-        let cal = Calendar.current
-        let time = date.formatted(date: .omitted, time: .shortened)
-        if cal.isDateInToday(date) { return "Today \(time)" }
-        if cal.isDateInYesterday(date) { return "Yesterday \(time)" }
-        if let days = cal.dateComponents([.day], from: date, to: .now).day, days < 7 {
-            return "\(date.formatted(.dateTime.weekday(.wide))) \(time)"
-        }
-        return "\(date.formatted(.dateTime.day().month(.abbreviated))) \(time)"
-    }
-}
-
-/// One side's message: a bubble per paragraph, the last with a tail, and a
-/// quiet line underneath for what happened (screens, steps, points).
-private struct MessageGroup: View {
-    @ObservedObject var model: AppModel
-    var fromMe: Bool
-    var text: String
-    var screens: Int
-    var points: [String]
-    var live: Bool
-    var steps: [StepItem] = []
-    /// Identifies the message for tapbacks; live messages have none.
-    var key: String?
-    /// "Delivered" or "Read" under your latest message.
-    var status: String?
-    @ObservedObject private var tapbacks = Tapbacks.shared
-
-    var body: some View {
-        let parts = paragraphs
-        let working = live && !fromMe && (parts.isEmpty || steps.contains { $0.running })
-        VStack(alignment: fromMe ? .trailing : .leading, spacing: 2) {
-            ForEach(Array(parts.enumerated()), id: \.offset) { i, part in
-                let partKey = key.map { "\($0).\(i)" }
-                Bubble(text: part, fromMe: fromMe, tail: i == parts.count - 1 && !working,
-                       tapback: partKey.flatMap { tapbacks.reactions[$0] })
-                    .onTapGesture(count: 2) { if let partKey { tapbacks.toggle("❤️", for: partKey) } }
-                    .contextMenu {
-                        if let partKey {
-                            ControlGroup {
-                                ForEach(Tapbacks.choices, id: \.self) { r in
-                                    Button(r) { tapbacks.toggle(r, for: partKey) }
-                                }
-                            }
-                        }
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(fromMe ? text : part, forType: .string)
-                        }
-                        if !fromMe { Button("Read Aloud") { model.speak(part) } }
-                    }
-                    .transition(.asymmetric(
-                        insertion: .scale(scale: 0.85, anchor: fromMe ? .bottomTrailing : .bottomLeading).combined(with: .opacity),
-                        removal: .opacity))
-            }
-            if working {
-                TypingBubble().transition(.scale(scale: 0.8, anchor: .bottomLeading).combined(with: .opacity))
-            }
-            if !steps.isEmpty {
-                StepList(steps: steps, live: live).padding(.top, 2)
-            }
-            if fromMe && screens > 0 {
-                Caption(text: screens == 1 ? "Saw your screen" : "Saw \(screens) screens")
-            }
-            if let status {
-                Text(status)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .transition(.opacity)
-            }
-            if !points.isEmpty {
-                Caption(text: "Pointed at " + points.joined(separator: ", "))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: fromMe ? .trailing : .leading)
-        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: parts.count)
-        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: working)
-    }
-
-    /// Cursor Pilot's thoughts come as separate texts; yours stay whole.
-    private var paragraphs: [String] {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.isEmpty { return fromMe ? ["(asked about the screen)"] : [] }
-        if fromMe { return [t] }
-        return messageParts(t)
-    }
-}
-
-let bubbleGray = Color(nsColor: NSColor(name: nil) { appearance in
-    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        ? NSColor(white: 0.24, alpha: 1) : NSColor(white: 0.91, alpha: 1)
-})
-
-private struct Bubble: View {
-    var text: String
-    var fromMe: Bool
-    var tail: Bool
-    var tapback: String?
-
-    var body: some View {
-        content
-            .overlay(alignment: fromMe ? .topLeading : .topTrailing) {
-                if let tapback {
-                    Text(tapback)
-                        .font(.system(size: 13))
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(fromMe ? bubbleGray : pilotAccent))
-                        .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 2))
-                        .offset(x: fromMe ? -14 : 14, y: -14)
-                        .transition(.scale(scale: 0.3).combined(with: .opacity))
-                }
-            }
-            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: tapback)
-            .padding(.top, tapback == nil ? 0 : 10)
-            .frame(maxWidth: 460, alignment: fromMe ? .trailing : .leading)
-            .padding(fromMe ? .leading : .trailing, 60)
-    }
-
-    @ViewBuilder private var content: some View {
-        if let emoji = bigEmoji {
-            // Like Messages: a few emoji alone come big, without a bubble.
-            Text(emoji).font(.system(size: 40)).padding(.vertical, 2)
-        } else if let media = MediaPart.parse(text) {
-            // Charts, pictures and links come on their own, like in Messages.
-            switch media {
-            case .chart(let spec): ChartCard(spec: spec)
-            case .scene(let spec): SceneCard(spec: spec)
-            case .image(let url, let alt): ImageCard(url: url, alt: alt)
-            case .link(let url): LinkCard(url: url)
-            }
-        } else {
-            RichText(text: text, size: 13.5, subtle: fromMe ? .white : .primary)
-                .font(.system(size: 13.5))
-                .lineSpacing(1.5)
-                .textSelection(.enabled)
-                .foregroundStyle(fromMe ? Color.white : Color.primary)
-                .tint(fromMe ? .white : pilotAccent)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background {
-                    ZStack(alignment: fromMe ? .bottomTrailing : .bottomLeading) {
-                        RoundedRectangle(cornerRadius: 17, style: .continuous)
-                        if tail { BubbleTail(fromMe: fromMe).frame(width: 14, height: 16) }
-                    }
-                    .foregroundStyle(fromMe ? pilotAccent : bubbleGray)
-                }
-        }
-    }
-
-    private var bigEmoji: String? {
-        let t = text.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty, t.count <= 3,
-              t.unicodeScalars.allSatisfy({ $0.properties.isEmojiPresentation || $0.properties.isEmoji && $0.value > 0x238C || $0.value == 0x200D || $0.value == 0xFE0F })
-        else { return nil }
-        return t
-    }
-}
-
-/// Tapback reactions on Cursor Pilot's and your messages, kept on this Mac.
-@MainActor
-final class Tapbacks: ObservableObject {
-    static let shared = Tapbacks()
-    static let choices = ["❤️", "👍", "👎", "😂", "‼️", "❓"]
-    @Published private(set) var reactions: [String: String]
-
-    private init() {
-        reactions = UserDefaults.standard.dictionary(forKey: "tapbacks") as? [String: String] ?? [:]
-    }
-
-    func toggle(_ reaction: String, for key: String) {
-        reactions[key] = reactions[key] == reaction ? nil : reaction
-        UserDefaults.standard.set(reactions, forKey: "tapbacks")
-    }
-}
-
-/// The top of a conversation, like Messages: who you're texting.
-private struct ContactHeader: View {
-    var body: some View {
-        VStack(spacing: 5) {
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .frame(width: 46, height: 46)
-            Text("Cursor Pilot")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 4)
-    }
-}
-
-/// The little curl at the bottom corner of the last bubble in a run.
-private struct BubbleTail: Shape {
-    var fromMe: Bool
-
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        // Drawn for the right side, mirrored for the left.
-        p.move(to: CGPoint(x: r.minX, y: r.minY))
-        p.addCurve(to: CGPoint(x: r.maxX + 4, y: r.maxY),
-                   control1: CGPoint(x: r.minX + 6, y: r.maxY - 6),
-                   control2: CGPoint(x: r.maxX - 4, y: r.maxY))
-        p.addCurve(to: CGPoint(x: r.minX - 8, y: r.maxY - 3),
-                   control1: CGPoint(x: r.maxX - 6, y: r.maxY + 1),
-                   control2: CGPoint(x: r.minX, y: r.maxY))
-        p.closeSubpath()
-        guard !fromMe else { return p }
-        return p.applying(CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: r.minX + r.maxX, ty: 0))
-    }
-}
-
-/// Three dots that rise in turn, in a bubble: Cursor Pilot is on it.
-private struct TypingBubble: View {
-    var body: some View {
-        TimelineView(.animation) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 4) {
-                ForEach(0..<3) { i in
-                    let phase = (sin((t * 5.5) - Double(i) * 0.9) + 1) / 2
-                    Circle()
-                        .fill(Color.secondary)
-                        .frame(width: 7, height: 7)
-                        .opacity(0.35 + 0.5 * phase)
-                        .offset(y: -2 * phase)
-                }
-            }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 11)
-            .background(bubbleGray, in: Capsule())
-        }
-    }
-}
-
-private struct Caption: View {
-    var text: String
-    var body: some View {
-        Text(text)
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .padding(.horizontal, 6)
-    }
-}
-
-struct StepItem: Hashable {
-    var icon: String
-    var text: String
-    var running = false
-    var ok = true
-}
-
-/// What the agent did for a reply, as one quiet line under the bubbles:
-/// the current step while it works, a count you can open afterwards.
-private struct StepList: View {
-    var steps: [StepItem]
-    var live: Bool
-    @State private var open = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { open.toggle() }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: current?.icon ?? steps.last?.icon ?? "terminal")
-                        .font(.system(size: 9.5, weight: .semibold))
-                    if let current, !open {
-                        ShimmerText(text: current.text)
-                    } else {
-                        Text(steps.count == 1 ? "1 step" : "\(steps.count) steps")
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .bold))
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                }
-                .lineLimit(1)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if open {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(steps.enumerated()), id: \.offset) { _, step in
-                        HStack(spacing: 6) {
-                            Group {
-                                if step.running {
-                                    ProgressView().controlSize(.mini)
-                                } else {
-                                    Image(systemName: step.ok ? step.icon : "exclamationmark.circle")
-                                        .foregroundStyle(step.ok ? Color.secondary : Color.orange)
-                                }
-                            }
-                            .frame(width: 13)
-                            Text(step.text)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        .transition(.opacity)
-                    }
-                }
-                .font(.system(size: 11, design: .monospaced))
-                .padding(.leading, 2)
-            }
-        }
-        .font(.system(size: 11))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 6)
-        .frame(maxWidth: 460, alignment: .leading)
-        .animation(.easeOut(duration: 0.2), value: steps)
-    }
-
-    private var current: StepItem? { live ? steps.last { $0.running } : nil }
-}
-
-private struct ChatEmptyState: View {
-    @ObservedObject var model: AppModel
-    var body: some View {
-        VStack(spacing: 14) {
-            ShaderTile { SpeakingWave() }.frame(width: 72, height: 72)
-                .shadow(color: pilotAccent.opacity(0.25), radius: 18, y: 6)
-            VStack(spacing: 6) {
-                Text("What should we do?").font(.system(size: 22, weight: .semibold))
-                Text("Cursor Pilot sees your screen and works on your Mac.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-            HStack(spacing: 7) {
-                Text("Hold")
-                HStack(spacing: 4) {
-                    ForEach(Array(TalkHint.caps(model.talkDisplay).enumerated()), id: \.offset) { _, cap in KeyCap(label: cap) }
-                }
-                Text("anywhere and talk, or type below.")
-            }
-            .font(.system(size: 12.5, weight: .medium))
-            .foregroundStyle(.secondary)
-            .padding(.top, 4)
-        }
-        .frame(maxWidth: .infinity)
     }
 }
 

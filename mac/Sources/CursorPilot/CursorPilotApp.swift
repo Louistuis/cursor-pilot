@@ -287,6 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "chat": HomeWindow.shared.show()
             default: break
             }
+            if let demo = UserDefaults.standard.string(forKey: "CPHomeDemo") { ChatUI.shared.demo(demo, model: model) }
             if UserDefaults.standard.bool(forKey: "CPShaderGallery") {
                 let w = NSWindow(contentViewController: NSHostingController(rootView: ShaderGallery()))
                 w.title = "Shader Gallery"

@@ -69,7 +69,9 @@ curl -fsSL https://cursorpilot.lou15.com/install.sh | bash
   waits in the notch, which lights up while it works. Live captions follow its
   voice word by word.
 - **Feels like Messages.** Home keeps your chats, drawings and settings, with
-  replies that can carry charts, images and link previews.
+  replies that can carry charts, images and link previews. Pin chats, search
+  everything you've said, attach files, type <kbd>/</kbd> for commands and
+  press <kbd>⌘</kbd> <kbd>K</kbd> to jump anywhere.
 
 <p align="center">
   <img src="docs/images/tasks.webp" alt="Background tasks in Home: renewing library books, finding train times, and a finished one that sorted the Downloads folder" width="760">
@@ -85,6 +87,9 @@ curl -fsSL https://cursorpilot.lou15.com/install.sh | bash
 | Hold <kbd>⌃</kbd> <kbd>⌥</kbd> | Talk. Let go to send. Works mid-task too. |
 | Double-tap <kbd>⌃</kbd> | Type a question in the notch instead. |
 | <kbd>⌃</kbd> <kbd>⌥</kbd> <kbd>D</kbd> | Draw on your screen, then ask about the drawing. |
+| <kbd>⌘</kbd> <kbd>K</kbd> | In Home: jump to a chat or run an action. |
+| <kbd>⌘</kbd> <kbd>F</kbd> | In Home: find in the open chat. |
+| <kbd>/</kbd> | In Home's message box: commands (new chat, attach, draw, voice, export). |
 
 You can change the talk shortcut, or turn on hands-free conversation, in Settings.
 
