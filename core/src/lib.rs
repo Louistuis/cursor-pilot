@@ -31,6 +31,13 @@ use serde_json::{json, Value};
 
 pub type EventCallback = extern "C" fn(ctx: *mut c_void, event_json: *const c_char);
 
+/// Locks `m` even if a thread panicked while holding it. The state behind
+/// every lock here stays usable after that, and a panic over a poisoned
+/// lock inside an `extern "C"` function would abort the whole app.
+pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub struct CPCore {
     engine: Arc<Engine>,
 }
@@ -95,7 +102,7 @@ pub unsafe extern "C" fn cp_core_configure(
     let Ok(settings) = serde_json::from_str::<Settings>(s) else {
         return false;
     };
-    *core.engine.settings.lock().unwrap() = settings;
+    *lock(&core.engine.settings) = settings;
     true
 }
 
@@ -127,18 +134,25 @@ pub unsafe extern "C" fn cp_core_send(
     };
     let engine = core.engine.clone();
     let (id, cancel) = engine.next_request_id();
-    let ctx = SendPtr(ctx);
-    std::thread::Builder::new()
+    let send_ctx = SendPtr(ctx);
+    let worker = engine.clone();
+    let spawned = std::thread::Builder::new()
         .name(format!("cursor-pilot-request-{id}"))
         .spawn(move || {
-            let ctx = ctx;
+            let ctx = send_ctx;
             let mut emit = |v: Value| {
                 let c = CString::new(v.to_string()).unwrap_or_default();
-                callback(ctx.0, c.as_ptr());
+                callback(ctx.get(), c.as_ptr());
             };
-            engine.run(id, &cancel, request, &mut emit);
-        })
-        .expect("spawn request thread");
+            worker.run(id, &cancel, request, &mut emit);
+        });
+    if spawned.is_err() {
+        // No thread to run it on: say so instead of taking the app down.
+        engine.finish_request(id);
+        emit_now(json!({"type": "error", "kind": "protocol", "message": "Couldn't start the request; try again."}));
+        emit_now(json!({"type": "finished", "id": 0}));
+        return 0;
+    }
     id
 }
 
@@ -151,7 +165,7 @@ pub unsafe extern "C" fn cp_core_set_host(
     ctx: *mut c_void,
 ) {
     if let Some(core) = core.as_ref() {
-        *core.engine.host.lock().unwrap() = host.map(|f| Arc::new(agent::Host { f, ctx }));
+        *lock(&core.engine.host) = host.map(|f| Arc::new(agent::Host { f, ctx }));
     }
 }
 

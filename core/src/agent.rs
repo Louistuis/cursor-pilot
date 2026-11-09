@@ -4,11 +4,13 @@
 //! for approval: the user consents once, in onboarding or Settings.
 
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::io::{BufRead, BufReader, Write};
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -29,6 +31,19 @@ const WEB_SEARCH_MODELS: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5", "cl
 /// Output beyond this is cut from the middle.
 const MAX_OUTPUT: usize = 30_000;
 const BASH_TIMEOUT: Duration = Duration::from_secs(300);
+/// A line of shell output longer than this arrives in pieces, so one endless
+/// line can't fill memory.
+const MAX_LINE: usize = 64 * 1024;
+/// Bytes of a command's output kept from its start and again from its end
+/// while it runs: enough for `cap` (whose limit is in characters) to work on.
+const KEEP_OUTPUT: usize = MAX_OUTPUT * 4;
+/// Output nobody has read yet (a background job printing between commands)
+/// is dropped beyond this.
+const MAX_UNREAD: usize = 8 * 1024 * 1024;
+/// What every end-of-command marker line starts with.
+const MARKER: &str = "__CP_END_";
+/// The editor doesn't load files bigger than this into memory.
+const MAX_FILE: u64 = 50 * 1024 * 1024;
 
 pub fn tool_definitions(settings: &Settings) -> Vec<Value> {
     if !mac_access(&settings.access) {
@@ -584,6 +599,54 @@ pub struct Shell {
     child: Child,
     stdin: ChildStdin,
     lines: Receiver<String>,
+    /// Bytes of output read from the shell that `run` hasn't taken yet.
+    unread: Arc<AtomicUsize>,
+    /// Whether a command is running, and so its output being taken.
+    busy: Arc<AtomicBool>,
+}
+
+/// A command's output as it comes in: its first and last `KEEP_OUTPUT`
+/// bytes of lines, so a command that prints without end can't fill memory.
+#[derive(Default)]
+struct Output {
+    head: Vec<String>,
+    head_bytes: usize,
+    tail: VecDeque<String>,
+    tail_bytes: usize,
+    /// Bytes dropped between head and tail.
+    cut: usize,
+}
+
+impl Output {
+    fn push(&mut self, line: String) {
+        if self.tail.is_empty() && self.head_bytes + line.len() <= KEEP_OUTPUT {
+            self.head_bytes += line.len() + 1;
+            self.head.push(line);
+            return;
+        }
+        self.tail_bytes += line.len() + 1;
+        self.tail.push_back(line);
+        while self.tail_bytes > KEEP_OUTPUT && self.tail.len() > 1 {
+            let dropped = self.tail.pop_front().map_or(0, |l| l.len() + 1);
+            self.tail_bytes -= dropped;
+            self.cut += dropped;
+        }
+    }
+
+    /// Removes the last line if it is empty (the newline our marker adds).
+    fn pop_empty_last(&mut self) {
+        if self.tail.back().is_some_and(|l| l.is_empty()) {
+            self.tail.pop_back();
+        } else if self.tail.is_empty() && self.head.last().is_some_and(|l| l.is_empty()) {
+            self.head.pop();
+        }
+    }
+
+    fn finish(self) -> String {
+        let mut lines = self.head;
+        lines.extend(self.tail);
+        cap_cut(&lines.join("\n"), self.cut)
+    }
 }
 
 impl Shell {
@@ -605,11 +668,38 @@ impl Shell {
         let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
+        let unread = Arc::new(AtomicUsize::new(0));
+        let busy = Arc::new(AtomicBool::new(false));
+        let (pending, taken) = (unread.clone(), busy.clone());
         std::thread::Builder::new()
             .name("cursor-pilot-shell".into())
             .spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    // Bytes, not `lines()`: output that isn't UTF-8 (a binary
+                    // file, another encoding) must not end the reader, which
+                    // would look like the shell had exited.
+                    let mut bytes = Vec::new();
+                    match (&mut reader).take(MAX_LINE as u64).read_until(b'\n', &mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    if bytes.last() == Some(&b'\n') {
+                        bytes.pop();
+                        if bytes.last() == Some(&b'\r') {
+                            bytes.pop();
+                        }
+                    }
+                    let line = String::from_utf8_lossy(&bytes).into_owned();
+                    // Nobody is reading (a background job prints between
+                    // commands): don't pile it up without end.
+                    if !taken.load(Ordering::Relaxed)
+                        && pending.load(Ordering::Relaxed) > MAX_UNREAD
+                        && !line.starts_with(MARKER)
+                    {
+                        continue;
+                    }
+                    pending.fetch_add(line.len(), Ordering::Relaxed);
                     if tx.send(line).is_err() {
                         break;
                     }
@@ -620,6 +710,8 @@ impl Shell {
             child,
             stdin,
             lines,
+            unread,
+            busy,
         })
     }
 
@@ -627,15 +719,29 @@ impl Shell {
     /// Returns `Err` with a message on timeout or cancel; the shell is then
     /// dead and must be replaced.
     pub fn run(&mut self, command: &str, cancel: &AtomicBool) -> Result<(String, i32), String> {
-        let marker = format!("__CP_END_{}__", uuid::Uuid::new_v4().simple());
-        // Commands never read our script as their input.
-        let script = format!("{{\n{command}\n}} < /dev/null\nprintf '\\n{marker}%s\\n' \"$?\"\n");
+        self.busy.store(true, Ordering::Relaxed);
+        let result = self.run_command(command, cancel);
+        self.busy.store(false, Ordering::Relaxed);
+        result
+    }
+
+    fn run_command(&mut self, command: &str, cancel: &AtomicBool) -> Result<(String, i32), String> {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let marker = format!("{MARKER}{id}__");
+        // The command travels as a quoted here-document and is run with
+        // `eval`: a command zsh can't parse (an unclosed quote or brace) is
+        // then an ordinary error, instead of swallowing the marker line and
+        // leaving this waiting until the timeout. Commands never read our
+        // script as their input.
+        let script = format!(
+            "eval \"$(/bin/cat <<'__CP_CMD_{id}__'\n{command}\n__CP_CMD_{id}__\n)\" < /dev/null\nprintf '\\n{marker}%s\\n' \"$?\"\n"
+        );
         self.stdin
             .write_all(script.as_bytes())
             .and_then(|_| self.stdin.flush())
             .map_err(|e| format!("The shell stopped: {e}"))?;
         let deadline = Instant::now() + BASH_TIMEOUT;
-        let mut out: Vec<String> = Vec::new();
+        let mut out = Output::default();
         loop {
             if cancel.load(Ordering::Relaxed) {
                 self.kill();
@@ -650,11 +756,12 @@ impl Shell {
             }
             match self.lines.recv_timeout(Duration::from_millis(100)) {
                 Ok(line) => {
+                    let _ = self.unread.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some(n.saturating_sub(line.len()))
+                    });
                     if let Some(code) = line.strip_prefix(&marker) {
-                        if out.last().is_some_and(|l| l.is_empty()) {
-                            out.pop(); // the newline printf added
-                        }
-                        return Ok((cap(&out.join("\n")), code.trim().parse().unwrap_or(-1)));
+                        out.pop_empty_last(); // the newline printf added
+                        return Ok((out.finish(), code.trim().parse().unwrap_or(-1)));
                     }
                     out.push(line);
                 }
@@ -713,7 +820,17 @@ impl Editor {
 
     pub fn run(&self, input: &Value) -> Result<String, String> {
         let path = self.resolve(input["path"].as_str().unwrap_or(""))?;
-        match input["command"].as_str().unwrap_or("") {
+        let command = input["command"].as_str().unwrap_or("");
+        // Viewing and editing read the whole file into memory.
+        let size = std::fs::metadata(&path).map(|m| if m.is_file() { m.len() } else { 0 });
+        if command != "create" && size.as_ref().is_ok_and(|n| *n > MAX_FILE) {
+            return Err(format!(
+                "{} is too big to open here ({} MB). Read or change it in parts with bash (head, tail, sed -n, grep).",
+                path.display(),
+                size.unwrap_or(0) / (1024 * 1024)
+            ));
+        }
+        match command {
             "view" => self.view(&path, &input["view_range"]),
             "create" => {
                 let text = input["file_text"].as_str().unwrap_or("");
@@ -864,21 +981,24 @@ fn insert_text(input: &Value) -> &str {
 // MARK: - Text helpers
 
 pub fn cap(s: &str) -> String {
-    if s.len() <= MAX_OUTPUT {
+    cap_cut(s, 0)
+}
+
+/// `cap` for text whose middle already lost `already_cut` characters: the
+/// note says how much is missing in all.
+fn cap_cut(s: &str, already_cut: usize) -> String {
+    // Counted in characters like the limit: text with many multi-byte
+    // characters is over the limit in bytes long before it is in characters.
+    let total = if s.len() <= MAX_OUTPUT { s.len() } else { s.chars().count() };
+    if total <= MAX_OUTPUT && already_cut == 0 {
         return s.to_string();
     }
-    let head: String = s.chars().take(MAX_OUTPUT / 2).collect();
-    let tail: String = s
-        .chars()
-        .rev()
-        .take(MAX_OUTPUT / 2)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+    let half = total.min(MAX_OUTPUT) / 2;
+    let at = |n: usize| s.char_indices().nth(n).map_or(s.len(), |(i, _)| i);
+    let (head, tail) = (&s[..at(half)], &s[at(total - half)..]);
     format!(
         "{head}\n\n[… {} characters cut …]\n\n{tail}",
-        s.len() - MAX_OUTPUT
+        total - 2 * half + already_cut
     )
 }
 
@@ -993,5 +1113,97 @@ mod tests {
     fn formats_dates() {
         assert_eq!(date_string(0), "1970-01-01");
         assert_eq!(date_string(1_793_870_000), "2026-11-05");
+    }
+
+    #[test]
+    fn a_command_zsh_cannot_parse_is_an_error_not_a_hang() {
+        let mut sh = Shell::spawn(&std::env::temp_dir()).unwrap();
+        let cancel = AtomicBool::new(false);
+        sh.run("CP_KEPT=yes", &cancel).unwrap();
+        let started = Instant::now();
+        for broken in ["echo \"never closed", "if true; then echo x", "echo $(date", "cat <<EOF\nno end"] {
+            let (out, _) = sh.run(broken, &cancel).unwrap();
+            assert!(started.elapsed() < Duration::from_secs(20), "{broken} hung: {out}");
+        }
+        let (out, code) = sh.run("echo 'a\nb", &cancel).unwrap();
+        assert_ne!(code, 0, "{out}");
+        assert!(out.contains("unmatched"), "{out}");
+        // The same shell is still there, with its state.
+        let (out, code) = sh.run("echo $CP_KEPT", &cancel).unwrap();
+        assert_eq!((out.as_str(), code), ("yes", 0));
+    }
+
+    #[test]
+    fn commands_get_no_input_and_keep_their_text_as_written() {
+        let mut sh = Shell::spawn(&std::env::temp_dir()).unwrap();
+        let cancel = AtomicBool::new(false);
+        // Nothing to read: `cat` ends at once instead of eating our script.
+        let (out, code) = sh.run("cat; echo done", &cancel).unwrap();
+        assert_eq!((out.as_str(), code), ("done", 0));
+        // Quotes, dollars, backslashes and here-documents arrive untouched.
+        let (out, _) = sh
+            .run("X='a $HOME \\n `b`'; printf '%s\\n' \"$X\"; cat <<'E'\n$(not run) \\ \"q\"\nE", &cancel)
+            .unwrap();
+        assert_eq!(out, "a $HOME \\n `b`\n$(not run) \\ \"q\"");
+        let (_, code) = sh.run("false", &cancel).unwrap();
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn output_that_is_not_utf8_does_not_end_the_shell() {
+        let mut sh = Shell::spawn(&std::env::temp_dir()).unwrap();
+        let cancel = AtomicBool::new(false);
+        sh.run("CP_KEPT=yes", &cancel).unwrap();
+        let (out, code) = sh.run("printf 'caf\\xe9 \\xff\\xfe\\n'; echo after", &cancel).unwrap();
+        assert_eq!(code, 0);
+        assert!(out.starts_with("caf") && out.ends_with("after"), "{out}");
+        assert_eq!(sh.run("echo $CP_KEPT", &cancel).unwrap().0, "yes");
+    }
+
+    #[test]
+    fn endless_output_is_cut_while_it_arrives() {
+        let mut sh = Shell::spawn(&std::env::temp_dir()).unwrap();
+        let cancel = AtomicBool::new(false);
+        // 20 MB in lines, then 3 MB in a single line.
+        for command in ["echo first; yes 0123456789 | head -c 20000000; echo; echo last", "echo first; head -c 3000000 /dev/zero | tr '\\0' x; echo; echo last"] {
+            let (out, code) = sh.run(command, &cancel).unwrap();
+            assert_eq!(code, 0);
+            assert!(out.chars().count() < MAX_OUTPUT + 200, "{} characters kept", out.chars().count());
+            assert!(out.starts_with("first\n") && out.ends_with("\nlast"), "ends kept");
+            assert!(out.contains("characters cut"));
+        }
+        let mut kept = Output::default();
+        for i in 0..200_000 {
+            kept.push(format!("line {i}"));
+        }
+        assert!(kept.head_bytes + kept.tail_bytes <= 2 * KEEP_OUTPUT + MAX_LINE);
+        assert!(kept.cut > 0);
+    }
+
+    #[test]
+    fn cap_counts_characters() {
+        // Over the limit in bytes, under it in characters: nothing to cut
+        // (this used to come back twice over, with a note between).
+        let wide = "\u{00e5}".repeat(20_000);
+        assert_eq!(cap(&wide), wide);
+        let long = "\u{00e5}".repeat(40_000);
+        let capped = cap(&long);
+        assert!(capped.contains("[\u{2026} 10000 characters cut \u{2026}]"), "{}", &capped[29_990..30_100]);
+        assert_eq!(capped.chars().filter(|c| *c == '\u{00e5}').count(), MAX_OUTPUT);
+        assert_eq!(cap("short"), "short");
+    }
+
+    #[test]
+    fn editor_does_not_load_huge_files() {
+        let dir = std::env::temp_dir().join(format!("cp-big-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ed = Editor { home: dir.clone(), backups: dir.join("backups") };
+        let file = dir.join("big.bin");
+        std::fs::File::create(&file).unwrap().set_len(MAX_FILE + 1).unwrap();
+        let p = file.to_str().unwrap();
+        let err = ed.run(&json!({"command": "view", "path": p})).unwrap_err();
+        assert!(err.contains("too big"), "{err}");
+        assert!(ed.run(&json!({"command": "str_replace", "path": p, "old_str": "a", "new_str": "b"})).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

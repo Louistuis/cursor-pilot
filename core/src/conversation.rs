@@ -51,6 +51,9 @@ pub struct Summary {
 pub struct Session {
     pub api_messages: Vec<Value>,
     pub transcript: Transcript,
+    /// The system prompt this conversation is sent with, and the settings
+    /// it was written for (see `system_prompt`).
+    system: Option<(String, String)>,
 }
 
 impl Default for Session {
@@ -71,6 +74,23 @@ impl Session {
                 updated_at: now,
                 turns: Vec::new(),
             },
+            system: None,
+        }
+    }
+
+    /// The conversation's system prompt: written by `render` the first time
+    /// and returned unchanged after that, for as long as `key` (the settings
+    /// it depends on) stays the same. The history's thinking blocks are only
+    /// accepted back under the system prompt they were produced with, so
+    /// what changes between requests (memory, the date) must not change it.
+    pub fn system_prompt(&mut self, key: &str, render: impl FnOnce() -> String) -> String {
+        match &self.system {
+            Some((k, prompt)) if k == key => prompt.clone(),
+            _ => {
+                let prompt = render();
+                self.system = Some((key.to_string(), prompt.clone()));
+                prompt
+            }
         }
     }
 
@@ -80,24 +100,33 @@ impl Session {
     pub fn resume(mut transcript: Transcript) -> Self {
         let keep = RESUME_TURNS;
         let start = transcript.turns.len().saturating_sub(keep) & !1; // whole user/assistant pairs
-        let api_messages = transcript.turns[start..]
-            .iter()
-            .map(|t| {
-                let text = if !t.text.trim().is_empty() {
-                    t.text.clone()
-                } else if t.role == "user" {
-                    "(asked about the screen)".to_string()
-                } else {
-                    "(no reply)".to_string()
-                };
-                json!({"role": t.role, "content": [{"type": "text", "text": text}]})
-            })
-            .collect();
+        // Turns aren't always question and answer in turn (a background
+        // task's report is an assistant turn of its own), but the API wants
+        // a user message first and the roles alternating after that.
+        let mut api_messages: Vec<Value> = Vec::new();
+        for t in &transcript.turns[start..] {
+            let text = if !t.text.trim().is_empty() {
+                t.text.clone()
+            } else if t.role == "user" {
+                "(asked about the screen)".to_string()
+            } else {
+                "(no reply)".to_string()
+            };
+            match api_messages.last_mut() {
+                None if t.role != "user" => {}
+                Some(last) if last["role"] == t.role.as_str() => {
+                    let joined = format!("{}\n\n{text}", last["content"][0]["text"].as_str().unwrap_or(""));
+                    last["content"][0]["text"] = json!(joined);
+                }
+                _ => api_messages.push(json!({"role": t.role, "content": [{"type": "text", "text": text}]})),
+            }
+        }
         // Resuming is activity: don't let the idle reset throw it away.
         transcript.updated_at = now();
         Self {
             api_messages,
             transcript,
+            system: None,
         }
     }
 
@@ -294,5 +323,44 @@ mod tests {
         );
         assert!(!s.is_stale());
         assert_eq!(s.transcript.turns.len(), 50);
+    }
+
+    #[test]
+    fn resume_starts_with_the_user_and_alternates() {
+        let turn = |role: &str, text: &str| Turn {
+            role: role.into(),
+            text: text.into(),
+            at: 1,
+            screens: 0,
+            points: vec![],
+            steps: vec![],
+        };
+        // A background task's report is an assistant turn of its own, so
+        // turns stop pairing up; 23 of them make the replayed window start
+        // on the report.
+        let mut turns = vec![turn("user", "q0"), turn("assistant", "a0"), turn("assistant", "report")];
+        for i in 1..=10 {
+            turns.push(turn("user", &format!("q{i}")));
+            turns.push(turn("assistant", &format!("a{i}")));
+        }
+        turns.insert(9, turn("assistant", "second report"));
+        let s = Session::resume(Transcript { id: "x".into(), title: "T".into(), created_at: 1, updated_at: 1, turns });
+        assert_eq!(s.api_messages[0]["role"], "user");
+        for pair in s.api_messages.windows(2) {
+            assert_ne!(pair[0]["role"], pair[1]["role"]);
+        }
+        assert_eq!(s.api_messages.last().unwrap()["role"], "assistant");
+        // The report isn't lost: it joins the reply before it.
+        let all = serde_json::to_string(&s.api_messages).unwrap();
+        assert!(all.contains("a3\\n\\nsecond report"), "{all}");
+        assert_eq!(s.api_messages[0]["content"][0]["text"], "q2");
+    }
+
+    #[test]
+    fn the_system_prompt_is_written_once_per_setting() {
+        let mut s = Session::new();
+        assert_eq!(s.system_prompt("a", || "first".into()), "first");
+        assert_eq!(s.system_prompt("a", || "second".into()), "first");
+        assert_eq!(s.system_prompt("b", || "third".into()), "third");
     }
 }

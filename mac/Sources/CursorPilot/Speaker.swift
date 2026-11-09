@@ -99,7 +99,16 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         onSentence?(number, text)
         let seconds = Double(samples.count) / Double(KokoroEngine.sampleRate) / Double(max(playbackRate, 0.5))
         followWords(in: text, over: seconds)
+        // If the audio device changes mid-sentence (headphones), the engine
+        // stops and the sentence would never report its end, leaving the
+        // reply "speaking" for good: let go of it once it's well overdue.
+        let overdue = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds + 2))
+            guard !Task.isCancelled else { return }
+            self?.player.stop()
+        }
         await player.play(samples, rate: playbackRate)
+        overdue.cancel()
         wordClock?.invalidate()
         wordClock = nil
     }
@@ -232,12 +241,21 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
 
     nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didStart u: AVSpeechUtterance) {
         let id = ObjectIdentifier(u), text = u.speechString
-        Task { @MainActor in self.onSentence?(self.numbers[id] ?? -1, text) }
+        Task { @MainActor in
+            // Stopped before this got here: the sentence isn't being said
+            // any more, and announcing it would bring its caption back.
+            guard let number = self.numbers[id] else { return }
+            self.onSentence?(number, text)
+        }
     }
 
     nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, willSpeakRangeOfSpeechString range: NSRange,
                                        utterance u: AVSpeechUtterance) {
-        Task { @MainActor in self.onWord?(range) }
+        let id = ObjectIdentifier(u)
+        Task { @MainActor in
+            guard self.numbers[id] != nil else { return }
+            self.onWord?(range)
+        }
     }
 
     nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {

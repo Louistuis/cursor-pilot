@@ -17,6 +17,7 @@ use crate::drawings::Drawings;
 use crate::markup::{self, MarkupFilter, Piece, Shape};
 use crate::memory::{self, Memory};
 use crate::speech::SentenceChunker;
+use crate::lock;
 
 pub const SYSTEM_PROMPT: &str = "\
 You are Cursor Pilot, a friendly helper that lives next to the user's mouse cursor on their Mac. \
@@ -138,6 +139,12 @@ pub struct Request {
 const MAX_ROUNDS: usize = 300;
 /// Tool rounds a helper may take for its part.
 const HELPER_ROUNDS: usize = 150;
+/// The answer to tool calls in a reply that reached its output limit.
+const CUT_OFF: &str = "Not run: your reply reached its length limit before this call was complete. \
+Make the call again with less in it; write long content in several smaller steps.";
+/// The answer to a tool call whose input didn't arrive as valid JSON.
+const INVALID_INPUT: &str = "Not run: the input of this call wasn't valid JSON (it may have been cut off). \
+Make the call again.";
 
 /// Who is acting: the main agent (0) or one of its helpers, each with its
 /// own shell. The app gives each its own pointer by `id`.
@@ -243,20 +250,20 @@ impl Engine {
     }
 
     pub fn base_url(&self) -> String {
-        self.settings.lock().unwrap().base_url.clone()
+        lock(&self.settings).base_url.clone()
     }
 
     pub fn next_request_id(&self) -> (u64, Arc<AtomicBool>) {
-        let mut n = self.next_id.lock().unwrap();
+        let mut n = lock(&self.next_id);
         let id = *n;
         *n += 1;
         let flag = Arc::new(AtomicBool::new(false));
-        self.in_flight.lock().unwrap().push((id, flag.clone()));
+        lock(&self.in_flight).push((id, flag.clone()));
         (id, flag)
     }
 
     pub fn cancel(&self, id: u64) {
-        for (i, flag) in self.in_flight.lock().unwrap().iter() {
+        for (i, flag) in lock(&self.in_flight).iter() {
             if id == 0 || *i == id {
                 flag.store(true, Ordering::Relaxed);
             }
@@ -266,31 +273,40 @@ impl Engine {
     /// Something the user said while request `id` works. Returns false when
     /// that request is no longer running (then it's a new question).
     pub fn tell(&self, id: u64, text: &str) -> bool {
-        let running = self.in_flight.lock().unwrap().iter().any(|(i, _)| *i == id);
+        // Held until the note is in the inbox, so a request can't finish
+        // (and clear its inbox) in between. A cancelled request reads no
+        // more notes, so it counts as finished already.
+        let in_flight = lock(&self.in_flight);
+        let running = in_flight
+            .iter()
+            .any(|(i, cancelled)| *i == id && !cancelled.load(Ordering::Relaxed));
         if running {
-            self.inbox.lock().unwrap().push((id, text.to_string()));
+            lock(&self.inbox).push((id, text.to_string()));
         }
         running
     }
 
     fn take_inbox(&self, id: u64) -> Vec<String> {
-        let mut inbox = self.inbox.lock().unwrap();
+        let mut inbox = lock(&self.inbox);
         let (mine, rest): (Vec<_>, Vec<_>) = inbox.drain(..).partition(|(i, _)| *i == id);
         *inbox = rest;
         mine.into_iter().map(|(_, t)| t).collect()
     }
 
-    fn finish_request(&self, id: u64) {
-        self.in_flight.lock().unwrap().retain(|(i, _)| *i != id);
+    pub(crate) fn finish_request(&self, id: u64) {
+        lock(&self.in_flight).retain(|(i, _)| *i != id);
+        // Notes it never got to read are the app's to ask again; they
+        // don't stay here.
+        lock(&self.inbox).retain(|(i, _)| *i != id);
     }
 
     pub fn new_conversation(&self) {
-        *self.session.lock().unwrap() = Session::new();
+        *lock(&self.session) = Session::new();
     }
 
     /// Continues a saved conversation; false when it does not exist.
     pub fn resume_conversation(&self, id: &str) -> bool {
-        let mut session = self.session.lock().unwrap();
+        let mut session = lock(&self.session);
         if session.transcript.id == id {
             return true;
         }
@@ -306,7 +322,7 @@ impl Engine {
     /// Renames a conversation, the live one included (it may not be saved yet).
     pub fn rename_conversation(&self, id: &str, title: &str) {
         let title: String = title.trim().chars().take(120).collect();
-        let mut session = self.session.lock().unwrap();
+        let mut session = lock(&self.session);
         if session.transcript.id == id {
             session.transcript.title = title.clone();
         }
@@ -314,15 +330,25 @@ impl Engine {
     }
 
     pub fn current_conversation_id(&self) -> String {
-        self.session.lock().unwrap().transcript.id.clone()
+        lock(&self.session).transcript.id.clone()
     }
 
     /// Runs a request to completion on the calling thread, reporting progress
     /// through `emit`. The last event is always `{"type":"finished"}`.
     pub fn run(&self, id: u64, cancel: &AtomicBool, req: Request, emit: Emit) {
-        let result = self.run_inner(id, cancel, &req, emit);
-        if let Err(e) = result {
-            emit(json!({"type": "error", "kind": e.kind(), "message": e.message()}));
+        // A panic in here must not escape: the app waits for `finished` to
+        // free the request, and would wait for ever.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run_inner(id, cancel, &req, &mut *emit)
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => emit(json!({"type": "error", "kind": e.kind(), "message": e.message()})),
+            Err(_) => emit(json!({
+                "type": "error",
+                "kind": "protocol",
+                "message": "Something went wrong inside Cursor Pilot. Try again.",
+            })),
         }
         self.finish_request(id);
         emit(json!({"type": "finished", "id": id}));
@@ -335,7 +361,7 @@ impl Engine {
         req: &Request,
         emit: Emit,
     ) -> Result<(), ApiError> {
-        let settings = self.settings.lock().unwrap().clone();
+        let settings = lock(&self.settings).clone();
         let access = agent::mac_access(&settings.access);
         let mut tools = agent::tool_definitions(&settings);
         tools.push(memory::tool());
@@ -345,28 +371,42 @@ impl Engine {
                 tools.push(agent::background_tool());
             }
         }
-        let system = format!(
-            "{SYSTEM_PROMPT}{}{}",
-            self.memory.prompt(),
-            agent::system_addendum(
-                &settings,
-                &self.home.display().to_string(),
-                &agent::date_string(now()),
-                settings.input != "background",
-                true,
-            )
+        // The settings the system prompt and the tools are made from.
+        let prompt_key = format!(
+            "{}\n{access}\n{}\n{}",
+            settings.model,
+            settings.input != "background",
+            settings.is_anthropic()
         );
-        let (conversation_id, history) = {
-            let mut session = self.session.lock().unwrap();
+        let (conversation_id, history, system) = {
+            let mut session = lock(&self.session);
             if session.is_stale() {
                 *session = Session::new();
             }
-            (session.transcript.id.clone(), session.api_messages.clone())
+            // Written once per conversation and sent unchanged after that,
+            // though it holds the memory and the date: a system prompt that
+            // differs from the one earlier replies were made under makes
+            // the API reject their thinking blocks (and misses the cache).
+            let system = session.system_prompt(&prompt_key, || {
+                format!(
+                    "{SYSTEM_PROMPT}{}{}",
+                    self.memory.prompt(),
+                    agent::system_addendum(
+                        &settings,
+                        &self.home.display().to_string(),
+                        &agent::date_string(now()),
+                        settings.input != "background",
+                        true,
+                    )
+                )
+            });
+            (session.transcript.id.clone(), session.api_messages.clone(), system)
         };
         emit(json!({"type": "started", "id": id, "conversation_id": conversation_id}));
 
+        let history_len = history.len();
         let mut out = ReplyStream::new(&req.screens);
-        let mut messages = history.clone();
+        let mut messages = history;
         let mut content = user_content(req);
         let notes = self.take_job_notes(&conversation_id);
         if !notes.is_empty() {
@@ -375,19 +415,39 @@ impl Engine {
         messages.push(json!({"role": "user", "content": content}));
         let mut steps: Vec<String> = Vec::new();
         let mut finished = None;
+        // The history had to go out without its thinking blocks.
+        let mut stripped = false;
 
         // The agent loop: stream a reply, run the tools it asks for, send the
         // results back, until Claude answers without calling a tool.
         let result = (|| -> Result<(), ApiError> {
             for _ in 0..MAX_ROUNDS {
                 let body = claude::build_body(&settings, &system, &messages, &tools);
-                let reply = claude::stream(
-                    &settings,
-                    &body,
-                    cancel,
-                    |claude::StreamEvent::TextDelta(t)| out.push(t, &mut *emit),
-                )?;
-                let more = matches!(reply.stop_reason.as_deref(), Some("tool_use" | "pause_turn"));
+                let reply = match claude::stream(&settings, &body, cancel, |event| match event {
+                    claude::StreamEvent::TextDelta(t) => out.push(t, &mut *emit),
+                    claude::StreamEvent::Restart => out.restart(&mut *emit),
+                }) {
+                    Ok(reply) => reply,
+                    // The history's thinking blocks no longer verify (the
+                    // settings behind the system prompt or tools changed
+                    // mid-conversation): once, go on without them.
+                    Err(ApiError::Http { status, message })
+                        if !stripped
+                            && claude::is_thinking_binding_error(status, &message)
+                            && claude::strip_thinking(&mut messages) =>
+                    {
+                        stripped = true;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                let stop = reply.stop_reason.clone().unwrap_or_default();
+                let calls_made = reply.content.iter().any(|b| b["type"] == "tool_use");
+                // Cut off at the output limit while calling tools: the
+                // calls can't be run, but each still has to be answered.
+                let cut_off = stop == "max_tokens" && calls_made;
+                let more = !reply.content.is_empty()
+                    && ((stop == "tool_use" && calls_made) || stop == "pause_turn" || cut_off);
                 out.end_segment(!more, &mut *emit);
                 for b in reply
                     .content
@@ -411,61 +471,70 @@ impl Engine {
                     );
                     steps.push(summary);
                 }
-                let stop = reply.stop_reason.clone().unwrap_or_default();
-                messages.push(json!({"role": "assistant", "content": reply.content}));
-                match stop.as_str() {
-                    "tool_use" => {
-                        let blocks = messages.last().unwrap()["content"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
-                        let calls: Vec<Call> = blocks.iter().filter_map(Call::from_block).collect();
-                        if calls.is_empty() {
-                            break;
-                        }
-                        let main = Worker { id: 0, shell: &self.shell };
-                        let results = self.run_calls(
-                            &main,
-                            &settings,
-                            &calls,
-                            access,
-                            cancel,
-                            &mut steps,
-                            &mut *emit,
-                        )?;
-                        let mut results = results;
-                        // What the user said meanwhile reaches the agent now,
-                        // with the results of its last step.
-                        let heard = self.take_inbox(id);
-                        if !heard.is_empty() {
-                            for t in &heard {
-                                emit(json!({"type": "heard_while_working", "id": id, "text": t}));
-                            }
-                            results.push(json!({"type": "text", "text": format!(
-                                "The user said this while you were working (by voice, so read it charitably): \u{201C}{}\u{201D}\n\
-                                 Take it into account now: it may add to the task, change it, ask how it's going, or \
-                                 tell you to stop (then stop and say so briefly). Reply to it in a few words if it \
-                                 needs a reply, and carry on.",
-                                heard.join("\u{201D} \u{201C}")
-                            )}));
-                        }
-                        messages.push(json!({"role": "user", "content": results}));
-                        // Narration while working is read aloud too: it says
-                        // what it's about to do before each step.
-                    }
-                    // A server tool (web search) paused a long turn: send it back to continue.
-                    "pause_turn" => {}
-                    _ => {
-                        finished = Some((reply.stop_reason, reply.usage));
-                        return Ok(());
-                    }
+                let mut content = reply.content;
+                if content.is_empty() {
+                    // An empty message can't be followed by another.
+                    content.push(json!({"type": "text", "text": claude::NO_REPLY}));
                 }
+                messages.push(json!({"role": "assistant", "content": content}));
+                if !more {
+                    finished = Some((reply.stop_reason, reply.usage));
+                    return Ok(());
+                }
+                if stop == "pause_turn" {
+                    // A server tool (web search) paused a long turn: send it back to continue.
+                    continue;
+                }
+                let blocks = messages.last().unwrap()["content"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let calls: Vec<Call> = blocks.iter().filter_map(Call::from_block).collect();
+                let mut results: Vec<Value> = if cut_off {
+                    calls.iter().map(|c| tool_result(c, json!(CUT_OFF), true)).collect()
+                } else {
+                    let main = Worker { id: 0, shell: &self.shell };
+                    self.run_calls(
+                        &main,
+                        &settings,
+                        &calls,
+                        &reply.invalid_inputs,
+                        access,
+                        cancel,
+                        &mut steps,
+                        &mut *emit,
+                    )?
+                };
+                // What the user said meanwhile reaches the agent now,
+                // with the results of its last step.
+                let heard = self.take_inbox(id);
+                if !heard.is_empty() {
+                    for t in &heard {
+                        emit(json!({"type": "heard_while_working", "id": id, "text": t}));
+                    }
+                    results.push(json!({"type": "text", "text": format!(
+                        "The user said this while you were working (by voice, so read it charitably): \u{201C}{}\u{201D}\n\
+                         Take it into account now: it may add to the task, change it, ask how it's going, or \
+                         tell you to stop (then stop and say so briefly). Reply to it in a few words if it \
+                         needs a reply, and carry on.",
+                        heard.join("\u{201D} \u{201C}")
+                    )}));
+                }
+                messages.push(json!({"role": "user", "content": results}));
+                // Narration while working is read aloud too: it says
+                // what it's about to do before each step.
             }
             Err(ApiError::Protocol(format!(
                 "stopped after {MAX_ROUNDS} steps; ask me to continue"
             )))
         })();
-        out.finish(&mut *emit);
+        if matches!(result, Err(ApiError::Cancelled)) {
+            // The user stopped it: nothing more is shown or read aloud (the
+            // half sentence it was in would be spoken after the interrupt).
+            out.finish(&mut |_| {});
+        } else {
+            out.finish(&mut *emit);
+        }
 
         let user_turn = Turn {
             role: "user".into(),
@@ -484,21 +553,50 @@ impl Engine {
             steps: steps.clone(),
         };
         {
-            let mut session = self.session.lock().unwrap();
+            let mut session = lock(&self.session);
             // Another request may have replaced the session meanwhile; then
             // this reply no longer belongs to the live history.
             let same = session.transcript.id == conversation_id
-                && session.api_messages.len() == history.len();
+                && session.api_messages.len() == history_len;
+            // Whether the model will still know of this exchange.
+            let mut kept = false;
             if same {
-                if result.is_ok() {
-                    let new = messages[history.len()..].to_vec();
-                    session.commit_messages(new, user_turn, assistant_turn);
-                } else if !steps.is_empty() || !out.visible.trim().is_empty() {
-                    // An unfinished task can't be replayed (a tool call may be
-                    // unanswered), but the user should still see what happened.
-                    session.record(user_turn, assistant_turn);
+                if stripped {
+                    // It keeps going out the way it was accepted.
+                    session.api_messages = messages[..history_len].to_vec();
+                }
+                match &result {
+                    Ok(()) => {
+                        let new = messages.split_off(history_len);
+                        session.commit_messages(new, user_turn, assistant_turn);
+                        kept = true;
+                    }
+                    Err(e) if !steps.is_empty() || !out.visible.trim().is_empty() => {
+                        // An unfinished task can't be replayed (a tool call
+                        // may be unanswered), but the user should still see
+                        // what happened, and when it was stopped or cut off
+                        // by a passing failure the model keeps the gist, so
+                        // "carry on" or "no, the other one" means something.
+                        // Not while another request is running: it would no
+                        // longer find the history it started from.
+                        let alone = lock(&self.in_flight).iter().all(|(i, _)| *i == id);
+                        if alone && (matches!(e, ApiError::Cancelled) || e.is_transient()) {
+                            let gist = unfinished_exchange(&notes, req, &out.visible, &steps, e);
+                            session.commit_messages(gist, user_turn, assistant_turn);
+                            kept = true;
+                        } else {
+                            session.record(user_turn, assistant_turn);
+                        }
+                    }
+                    Err(_) => {}
                 }
                 let _ = self.store.save(&session.transcript);
+            }
+            if !kept && !notes.is_empty() {
+                // The background reports it carried still have to reach
+                // the agent, with the next message.
+                let again = notes.into_iter().map(|n| (conversation_id.clone(), n));
+                lock(&self.job_notes).extend(again);
             }
         }
         result?;
@@ -523,18 +621,23 @@ impl Engine {
         worker: &Worker,
         settings: &Settings,
         calls: &[Call],
+        invalid: &[String],
         access: bool,
         cancel: &AtomicBool,
         steps: &mut Vec<String>,
         emit: Emit,
     ) -> Result<Vec<Value>, ApiError> {
-        let host = self.host.lock().unwrap().clone();
+        let host = lock(&self.host).clone();
         let mut results: Vec<Option<Value>> = vec![None; calls.len()];
         let mut helpers = Vec::new();
         let mut computer_failed = false;
         for (index, call) in calls.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ApiError::Cancelled);
+            }
+            if invalid.iter().any(|i| i == call.id) {
+                results[index] = Some(tool_result(call, json!(INVALID_INPUT), true));
+                continue;
             }
             let summary = call.summary();
             let kind = call.kind();
@@ -715,11 +818,11 @@ impl Engine {
 
     /// Background tasks' events go to `sink` (none: nowhere).
     pub fn set_job_sink(&self, sink: Option<JobSink>) {
-        *self.job_sink.lock().unwrap() = sink;
+        *lock(&self.job_sink) = sink;
     }
 
     fn job_emit(&self, event: Value) {
-        let sink = self.job_sink.lock().unwrap().clone();
+        let sink = lock(&self.job_sink).clone();
         if let Some(sink) = sink {
             sink(event);
         }
@@ -745,7 +848,7 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
                 }
             }
             "list" => {
-                let jobs = self.jobs.lock().unwrap();
+                let jobs = lock(&self.jobs);
                 if jobs.is_empty() {
                     return (json!("No background tasks yet."), false);
                 }
@@ -766,7 +869,7 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
             }
             "stop" => {
                 let id = input["id"].as_u64().unwrap_or(0) as usize;
-                if id > 0 && self.stop_job(agent::JOB_BASE + id - 1) {
+                if id > 0 && self.stop_job(agent::JOB_BASE.saturating_add(id - 1)) {
                     (json!(format!("Task {id} is stopping.")), false)
                 } else {
                     (json!("No such running task; list them first."), true)
@@ -787,7 +890,7 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let (n, name) = {
-            let mut jobs = self.jobs.lock().unwrap();
+            let mut jobs = lock(&self.jobs);
             if jobs.iter().filter(|j| j.state == "running").count() >= MAX_JOBS {
                 return Err(format!(
                     "{MAX_JOBS} background tasks are already running; wait for one to finish or stop one."
@@ -818,7 +921,12 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
                         relay.job_progress(n, event);
                     }
                 });
-                let report = engine.run_helper(n, name, &format!("job-{n}"), &task, &settings, &cancel, &tx, true);
+                // Even a panic ends the task properly: left "running" it
+                // would spin in the app for ever and use up a slot.
+                let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine.run_helper(n, name, &format!("job-{n}"), &task, &settings, &cancel, &tx, true)
+                }))
+                .unwrap_or_else(|_| Err("it stopped unexpectedly".into()));
                 drop(tx);
                 let _ = forward.join();
                 engine.finish_job(n, report);
@@ -830,7 +938,7 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
     /// A step or note from a background task: shown by its pointer.
     fn job_progress(&self, n: usize, event: Value) {
         let text = event["text"].as_str().unwrap_or("").to_string();
-        if let Some(j) = self.jobs.lock().unwrap().iter_mut().find(|j| j.n == n) {
+        if let Some(j) = lock(&self.jobs).iter_mut().find(|j| j.n == n) {
             if !text.is_empty() {
                 j.status = text.clone();
             }
@@ -842,7 +950,7 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
     /// conversation, and the agent hears about it on the next message there.
     fn finish_job(&self, n: usize, report: Result<String, String>) {
         let (name, title, conversation, state, text) = {
-            let mut jobs = self.jobs.lock().unwrap();
+            let mut jobs = lock(&self.jobs);
             let Some(j) = jobs.iter_mut().find(|j| j.n == n) else { return };
             let (state, text) = match &report {
                 _ if j.cancel.load(Ordering::Relaxed) => ("stopped", "Stopped before it was done.".to_string()),
@@ -863,7 +971,7 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
             steps: vec![format!("{name}: {title}")],
         };
         {
-            let mut session = self.session.lock().unwrap();
+            let mut session = lock(&self.session);
             if session.transcript.id == conversation {
                 session.note(turn);
                 let _ = self.store.save(&session.transcript);
@@ -873,14 +981,14 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
                 let _ = self.store.save(&t);
             }
         }
-        self.job_notes.lock().unwrap().push((
+        lock(&self.job_notes).push((
             conversation,
             format!("[Background task \u{201C}{title}\u{201D} ({name}) {state}. Its report, already shown to the user: {text}]"),
         ));
     }
 
     fn take_job_notes(&self, conversation: &str) -> Vec<String> {
-        let mut notes = self.job_notes.lock().unwrap();
+        let mut notes = lock(&self.job_notes);
         let (mine, rest): (Vec<_>, Vec<_>) = notes.drain(..).partition(|(c, _)| c == conversation);
         *notes = rest;
         mine.into_iter().map(|(_, n)| n).collect()
@@ -888,7 +996,7 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
 
     /// Stops a running background task; false when there's none.
     pub fn stop_job(&self, n: usize) -> bool {
-        match self.jobs.lock().unwrap().iter().find(|j| j.n == n && j.state == "running") {
+        match lock(&self.jobs).iter().find(|j| j.n == n && j.state == "running") {
             Some(j) => {
                 j.cancel.store(true, Ordering::Relaxed);
                 true
@@ -946,9 +1054,16 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
                 .collect::<Vec<_>>()
                 .join(" ");
             let stop = reply.stop_reason.clone().unwrap_or_default();
-            messages.push(json!({"role": "assistant", "content": reply.content}));
+            let calls_made = reply.content.iter().any(|b| b["type"] == "tool_use");
+            // As in the main loop: a reply cut off while calling tools goes
+            // on, its calls answered with an error instead of being run.
+            let cut_off = stop == "max_tokens" && calls_made;
+            let empty = reply.content.is_empty();
+            if !empty {
+                messages.push(json!({"role": "assistant", "content": reply.content}));
+            }
             match stop.as_str() {
-                "tool_use" => {
+                "tool_use" | "max_tokens" if calls_made => {
                     let note = text.trim();
                     if !note.is_empty() {
                         let _ = tx.send(json!({"type": "agent", "phase": "note", "agent": n, "id": call_id, "name": name, "text": agent::clip_words(note, 14)}));
@@ -958,15 +1073,15 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
                         .cloned()
                         .unwrap_or_default();
                     let calls: Vec<Call> = blocks.iter().filter_map(Call::from_block).collect();
-                    if calls.is_empty() {
-                        return Ok(text.trim().to_string());
-                    }
-                    let results = self
-                        .run_calls(&worker, settings, &calls, true, cancel, &mut steps, &mut emit)
-                        .map_err(|e| e.message())?;
+                    let results: Vec<Value> = if cut_off {
+                        calls.iter().map(|c| tool_result(c, json!(CUT_OFF), true)).collect()
+                    } else {
+                        self.run_calls(&worker, settings, &calls, &reply.invalid_inputs, true, cancel, &mut steps, &mut emit)
+                            .map_err(|e| e.message())?
+                    };
                     messages.push(json!({"role": "user", "content": results}));
                 }
-                "pause_turn" => {}
+                "pause_turn" if !empty => {}
                 _ => {
                     let report = text.trim();
                     return Ok(if report.is_empty() {
@@ -989,7 +1104,7 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
         input: &Value,
         cancel: &AtomicBool,
     ) -> (Value, bool) {
-        let mut shell = shell.lock().unwrap();
+        let mut shell = lock(shell);
         if input["restart"] == true {
             *shell = None;
             return (json!("The shell was restarted."), false);
@@ -1001,6 +1116,9 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
             }
         }
         let command = input["command"].as_str().unwrap_or("");
+        if command.trim().is_empty() {
+            return (json!("No command was given."), true);
+        }
         match shell.as_mut().unwrap().run(command, cancel) {
             Ok((out, code)) => {
                 let mut text = if out.trim().is_empty() {
@@ -1019,6 +1137,42 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
             }
         }
     }
+}
+
+/// What the model keeps of an exchange that was stopped or failed midway,
+/// as two plain messages: the question, and what had been said and done.
+fn unfinished_exchange(
+    notes: &[String],
+    req: &Request,
+    said: &str,
+    steps: &[String],
+    error: &ApiError,
+) -> Vec<Value> {
+    let mut question = notes.join("\n");
+    if !question.is_empty() {
+        question.push('\n');
+    }
+    question.push_str(match req.text.trim() {
+        "" => "(asked about the screen)",
+        text => text,
+    });
+    let mut reply = said.trim().to_string();
+    if !reply.is_empty() {
+        reply.push_str("\n\n");
+    }
+    reply.push_str(&match error {
+        ApiError::Cancelled => "(The user stopped me before I finished this.".to_string(),
+        e => format!("(I couldn't finish this: {}.", e.message().trim_end_matches('.')),
+    });
+    if !steps.is_empty() {
+        let from = steps.len().saturating_sub(20);
+        reply.push_str(&format!(" What I had done by then: {}.", steps[from..].join("; ")));
+    }
+    reply.push(')');
+    vec![
+        json!({"role": "user", "content": [{"type": "text", "text": question}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": reply}]}),
+    ]
 }
 
 fn tool_result(call: &Call, content: Value, is_error: bool) -> Value {
@@ -1124,6 +1278,18 @@ impl ReplyStream {
         self.handle(pieces, emit);
         if let Some(s) = self.chunker.finish() {
             self.speak(s, emit);
+        }
+    }
+
+    /// The reply broke off and is being asked for again: what was shown of
+    /// it stays, the sentence it was in is not read aloud, and the new
+    /// attempt starts a new paragraph.
+    fn restart(&mut self, emit: Emit) {
+        self.filter = MarkupFilter::new();
+        self.chunker = SentenceChunker::new();
+        if !self.visible.trim().is_empty() && !self.visible.ends_with("\n\n") {
+            self.visible.push_str("\n\n");
+            emit(json!({"type": "text", "text": "\n\n"}));
         }
     }
 
@@ -1363,5 +1529,371 @@ mod tests {
         let texts: Vec<_> = content.iter().filter_map(|b| b["text"].as_str()).collect();
         assert!(texts.iter().any(|t| t.starts_with("I drew on my screen")));
         assert_eq!(texts.last(), Some(&"What is this I've marked?"));
+    }
+
+    use crate::claude::fake::{self, Reply};
+
+    /// An engine that talks to the fake API, with Mac access off (so the
+    /// one tool is `memory`), and its data folder.
+    fn engine_for(api: &fake::Api) -> (Engine, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cp-engine-{}", uuid::Uuid::new_v4()));
+        let engine = Engine::new(dir.clone());
+        *lock(&engine.settings) = api.settings();
+        (engine, dir)
+    }
+
+    fn ask(engine: &Engine, text: &str) -> Vec<Value> {
+        let (id, cancel) = engine.next_request_id();
+        let mut events = Vec::new();
+        let request = Request { text: text.into(), screens: Vec::new(), sketch: false };
+        engine.run(id, &cancel, request, &mut |e| events.push(e));
+        events
+    }
+
+    fn of_type<'a>(events: &'a [Value], kind: &str) -> Vec<&'a Value> {
+        events.iter().filter(|e| e["type"] == kind).collect()
+    }
+
+    fn history(engine: &Engine) -> Vec<Value> {
+        lock(&engine.session).api_messages.clone()
+    }
+
+    fn remember(id: &str, fact: &str) -> Value {
+        json!({"type": "tool_use", "id": id, "name": "memory", "input": {"action": "remember", "text": fact}})
+    }
+
+    /// What the API demands of a history before it takes another message.
+    fn assert_replayable(messages: &[Value]) {
+        assert_eq!(messages[0]["role"], "user", "a user message comes first");
+        for (i, m) in messages.iter().enumerate() {
+            let content = m["content"].as_array().expect("content blocks");
+            assert!(!content.is_empty(), "message {i} is empty");
+            if i > 0 {
+                assert_ne!(m["role"], messages[i - 1]["role"], "roles alternate at {i}");
+            }
+            for b in content.iter().filter(|b| b["type"] == "text") {
+                assert!(!b["text"].as_str().unwrap().trim().is_empty(), "empty text in message {i}");
+            }
+            let ids = |blocks: &[Value], kind: &str, key: &str| -> Vec<String> {
+                blocks.iter().filter(|b| b["type"] == kind).map(|b| b[key].as_str().unwrap().to_string()).collect()
+            };
+            let calls = ids(content, "tool_use", "id");
+            if !calls.is_empty() {
+                let next = messages.get(i + 1).expect("a tool call is answered");
+                assert_eq!(calls, ids(next["content"].as_array().unwrap(), "tool_result", "tool_use_id"));
+            }
+        }
+        assert_eq!(messages.last().unwrap()["role"], "assistant");
+    }
+
+    #[test]
+    fn a_task_runs_its_tools_and_ends_with_done_then_finished() {
+        let api = fake::Api::start(vec![
+            Reply::Events(fake::events(&[fake::text("Noting that."), remember("toolu_1", "Likes tea.")], "tool_use")),
+            fake::says("Done."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        let (id, cancel) = engine.next_request_id();
+        assert!(engine.tell(id, "and sugar"));
+        let mut events = Vec::new();
+        let request = Request { text: "Remember I like tea".into(), screens: Vec::new(), sketch: false };
+        engine.run(id, &cancel, request, &mut |e| events.push(e));
+
+        let kinds: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds.first(), Some(&"started"));
+        assert_eq!(&kinds[kinds.len() - 2..], ["done", "finished"]);
+        assert_eq!(kinds.iter().filter(|k| **k == "finished" || **k == "done").count(), 2);
+        assert_eq!(events[events.len() - 2]["text"], "Noting that.\n\nDone.");
+        assert_eq!(engine.memory().list()[0].text, "Likes tea.");
+        // The second request answers the call, and passes on what was said meanwhile.
+        let results = api.request(1)["messages"][2]["content"].clone();
+        assert_eq!(results[0]["tool_use_id"], "toolu_1");
+        assert!(results[1]["text"].as_str().unwrap().contains("and sugar"));
+        assert_eq!(of_type(&events, "heard_while_working").len(), 1);
+        assert!(lock(&engine.inbox).is_empty());
+        assert!(!engine.tell(id, "too late"), "the request is over");
+        assert_replayable(&history(&engine));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_system_prompt_stays_the_same_through_a_conversation() {
+        let api = fake::Api::start(vec![
+            Reply::Events(fake::events(&[remember("toolu_1", "Likes tea.")], "tool_use")),
+            fake::says("Noted."),
+            fake::says("Sure."),
+            fake::says("Hello again."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        ask(&engine, "Remember I like tea");
+        ask(&engine, "Thanks");
+        // The memory changed after the first request; the prompt replies
+        // were produced under did not, and the history only grew.
+        assert!(!api.request(0)["system"].to_string().contains("Likes tea."));
+        assert_eq!(api.request(2)["system"], api.request(0)["system"]);
+        assert_eq!(api.request(2)["tools"], api.request(0)["tools"]);
+        let (earlier, later) = (api.request(1), api.request(2));
+        let sent = earlier["messages"].as_array().unwrap();
+        assert_eq!(&later["messages"].as_array().unwrap()[..sent.len()], &sent[..]);
+        // A new conversation starts from the memory as it is now.
+        engine.new_conversation();
+        ask(&engine, "Hi");
+        assert!(api.request(3)["system"].to_string().contains("Likes tea."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_reply_cut_off_in_a_tool_call_is_answered_not_left_hanging() {
+        let cut = json!({"type": "tool_use", "id": "toolu_1", "name": "memory", "partial": "{\"action\": \"remember\", \"text\": \"Likes t"});
+        let api = fake::Api::start(vec![
+            Reply::Events(fake::events(&[fake::text("Saving it."), cut.clone()], "max_tokens")),
+            // Complete JSON this time, but the reply still hit the limit.
+            Reply::Events(fake::events(&[remember("toolu_2", "Likes tea.")], "max_tokens")),
+            // Broken input in a reply that otherwise ended normally.
+            Reply::Events(fake::events(&[{ let mut c = cut; c["id"] = json!("toolu_3"); c }], "tool_use")),
+            fake::says("I'll keep it short."),
+            fake::says("Yes."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        let events = ask(&engine, "Remember I like tea");
+        assert!(of_type(&events, "error").is_empty(), "{events:?}");
+        assert_eq!(of_type(&events, "done").len(), 1);
+        for (request, id, why) in [(1, "toolu_1", CUT_OFF), (2, "toolu_2", CUT_OFF), (3, "toolu_3", INVALID_INPUT)] {
+            let messages = api.request(request)["messages"].clone();
+            let result = &messages[messages.as_array().unwrap().len() - 1]["content"][0];
+            assert_eq!(result["tool_use_id"], id);
+            assert_eq!((result["is_error"].as_bool(), result["content"].as_str()), (Some(true), Some(why)));
+        }
+        assert!(engine.memory().list().is_empty(), "none of the three calls ran");
+        assert_replayable(&history(&engine));
+        // The conversation goes on: the next request is accepted.
+        assert_eq!(of_type(&ask(&engine, "Still there?"), "done").len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_empty_reply_does_not_leave_an_empty_message() {
+        let api = fake::Api::start(vec![
+            Reply::Events(fake::events(&[], "end_turn")),
+            Reply::Events(fake::events(&[fake::text("")], "tool_use")),
+            fake::says("Here."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        assert_eq!(of_type(&ask(&engine, "Hm"), "done").len(), 1);
+        assert_replayable(&history(&engine));
+        // "tool_use" with no call in it is an answer, not 300 more rounds.
+        assert_eq!(of_type(&ask(&engine, "Hm?"), "done").len(), 1);
+        assert_eq!(api.request_count(), 2);
+        assert_eq!(of_type(&ask(&engine, "Hello?"), "done")[0]["text"], "Here.");
+        assert_replayable(&history(&engine));
+        assert_replayable(&api.request(2)["messages"].as_array().unwrap()[..4]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_history_whose_thinking_is_refused_goes_on_without_it() {
+        let thinking = json!({"type": "thinking", "thinking": "", "signature": "sig"});
+        let refused = "messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.";
+        let api = fake::Api::start(vec![
+            Reply::Events(fake::events(&[thinking, fake::text("Hi.")], "end_turn")),
+            Reply::Refused(refused),
+            fake::says("Still here."),
+            fake::says("Yes."),
+            // With no thinking left to take out, the same refusal is an error.
+            Reply::Refused(refused),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        ask(&engine, "Hello");
+        assert!(history(&engine)[1]["content"].to_string().contains("thinking"), "kept as received");
+        let events = ask(&engine, "Are you there?");
+        assert!(of_type(&events, "error").is_empty(), "{events:?}");
+        assert_eq!(of_type(&events, "done")[0]["text"], "Still here.");
+        assert!(api.request(1)["messages"].to_string().contains("thinking"));
+        assert!(!api.request(2)["messages"].to_string().contains("thinking"));
+        assert_eq!(api.request(2)["messages"][1]["content"], json!([{"type": "text", "text": "Hi."}]));
+        // And it stays that way, so the next request isn't refused again.
+        ask(&engine, "Good");
+        assert_eq!(api.request_count(), 4);
+        assert!(!api.request(3)["messages"].to_string().contains("thinking"));
+        assert_replayable(&history(&engine));
+        assert_eq!(of_type(&ask(&engine, "Again"), "error").len(), 1);
+        assert_eq!(api.request_count(), 5);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stopping_is_prompt_and_quiet_and_the_gist_is_kept() {
+        let api = fake::Api::start(vec![
+            Reply::Stalled(fake::starts("Sure. The way to do that is to open")),
+            fake::says("Okay."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        let engine = Arc::new(engine);
+        let (id, cancel) = engine.next_request_id();
+        let stopper = engine.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            stopper.cancel(id);
+        });
+        let started = std::time::Instant::now();
+        let mut events = Vec::new();
+        let request = Request { text: "How do I export this?".into(), screens: Vec::new(), sketch: false };
+        engine.run(id, &cancel, request, &mut |e| events.push(e));
+        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+        // The sentence that was complete was read aloud as it came; the half
+        // one it was in is not blurted out after the stop.
+        let spoken: Vec<&str> = of_type(&events, "speak").iter().map(|e| e["text"].as_str().unwrap()).collect();
+        assert_eq!(spoken, ["Sure."]);
+        let kinds: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(&kinds[kinds.len() - 2..], ["error", "finished"]);
+        assert_eq!(events[events.len() - 2]["kind"], "cancelled");
+        assert!(!engine.tell(id, "wait"));
+        // The model still knows what was asked and how far it got.
+        let kept = history(&engine);
+        assert_replayable(&kept);
+        assert_eq!(kept[0]["content"][0]["text"], "How do I export this?");
+        let gist = kept[1]["content"][0]["text"].as_str().unwrap();
+        assert!(gist.starts_with("Sure. The way to do that is to open"), "{gist}");
+        assert!(gist.ends_with("(The user stopped me before I finished this.)"), "{gist}");
+        assert_eq!(of_type(&ask(&engine, "Carry on"), "done").len(), 1);
+        assert_eq!(api.request(1)["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(engine.store().load(&engine.current_conversation_id()).unwrap().turns.len(), 4);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_task_cut_off_by_a_passing_failure_keeps_its_gist() {
+        let mut replies = vec![Reply::Events(fake::events(
+            &[fake::text("Noting that."), remember("toolu_1", "Likes tea.")],
+            "tool_use",
+        ))];
+        let tries = claude::MAX_RETRIES as usize + 1;
+        replies.extend((0..tries).map(|_| Reply::Status(529, "overloaded_error", vec![])));
+        replies.push(fake::says("It is saved."));
+        let api = fake::Api::start(replies);
+        let (engine, dir) = engine_for(&api);
+        lock(&engine.job_notes).push((engine.current_conversation_id(), "[Background task done.]".into()));
+        let events = ask(&engine, "Remember I like tea");
+        assert_eq!(of_type(&events, "error")[0]["kind"], "overloaded");
+        assert_eq!(api.request_count(), 1 + tries, "the failing round was retried");
+        let kept = history(&engine);
+        assert_replayable(&kept);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0]["content"][0]["text"], "[Background task done.]\nRemember I like tea");
+        let gist = kept[1]["content"][0]["text"].as_str().unwrap();
+        assert!(gist.contains("I couldn't finish this: API error 529"), "{gist}");
+        assert!(gist.contains("What I had done by then: Remembered \u{201C}Likes tea.\u{201D}."), "{gist}");
+        assert_eq!(of_type(&ask(&engine, "Did it work?"), "done")[0]["text"], "It is saved.");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_request_is_not_kept_and_its_task_reports_come_again() {
+        let api = fake::Api::start(vec![
+            Reply::Events(fake::events(&[fake::text("Hm.")], "pause_turn")),
+            Reply::Refused("messages: too long"),
+            fake::says("Fine."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        lock(&engine.job_notes).push((engine.current_conversation_id(), "[Background task done.]".into()));
+        let events = ask(&engine, "Go on");
+        assert_eq!(of_type(&events, "error")[0]["kind"], "http");
+        // Shown to the user, but not sent again: it may be what the API refused.
+        assert!(history(&engine).is_empty());
+        assert_eq!(engine.store().load(&engine.current_conversation_id()).unwrap().turns.len(), 2);
+        ask(&engine, "And now?");
+        assert_eq!(api.request(2)["messages"][0]["content"][0]["text"], "[Background task done.]");
+        assert!(lock(&engine.job_notes).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_dropped_reply_restarts_without_reading_the_broken_sentence() {
+        let api = fake::Api::start(vec![
+            Reply::Dropped(fake::starts("First part. And then the")),
+            fake::says("First part. And then the rest."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        let events = ask(&engine, "Tell me");
+        let spoken: Vec<&str> = of_type(&events, "speak").iter().map(|e| e["text"].as_str().unwrap()).collect();
+        assert_eq!(spoken, ["First part.", "First part.", "And then the rest."]);
+        assert_eq!(of_type(&events, "done").len(), 1);
+        assert_eq!(history(&engine)[1]["content"], json!([{"type": "text", "text": "First part. And then the rest."}]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_panic_still_ends_the_request_and_leaves_the_engine_usable() {
+        let api = fake::Api::start(vec![fake::says("Fine.")]);
+        let (engine, dir) = engine_for(&api);
+        let (id, cancel) = engine.next_request_id();
+        let mut events = Vec::new();
+        let request = Request { text: "Hi".into(), screens: Vec::new(), sketch: false };
+        engine.run(id, &cancel, request, &mut |e| {
+            if e["type"] == "started" {
+                panic!("the app's side blew up");
+            }
+            events.push(e)
+        });
+        let kinds: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["error", "finished"]);
+        assert!(lock(&engine.in_flight).is_empty());
+
+        // A lock some thread panicked under doesn't take later calls down.
+        let engine = Arc::new(engine);
+        let other = engine.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = other.settings.lock().unwrap();
+            panic!("while holding the settings");
+        })
+        .join();
+        assert!(engine.settings.is_poisoned());
+        assert_eq!(engine.base_url(), api.url);
+        assert_eq!(of_type(&ask(&engine, "Hi"), "done")[0]["text"], "Fine.");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn notes_for_a_stopped_request_are_turned_away() {
+        let (engine, dir) = engine_for(&fake::Api::start(Vec::new()));
+        let (id, cancel) = engine.next_request_id();
+        assert!(engine.tell(id, "one"));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(!engine.tell(id, "two"));
+        engine.finish_request(id);
+        assert!(lock(&engine.inbox).is_empty(), "nothing left behind");
+        // A task number no task has: no overflow, just no such task.
+        let stop = json!({"action": "stop", "id": u64::MAX});
+        assert!(engine.background(&stop, &Settings::default()).1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_helper_goes_on_after_a_cut_off_call_and_reports_back() {
+        let delegate = json!({"type": "tool_use", "id": "toolu_d", "name": "delegate", "input": {"task": "List the files", "title": "listing files"}});
+        let cut = json!({"type": "tool_use", "id": "toolu_h", "name": "bash", "partial": "{\"command\": \"ls -la /very/long"});
+        let api = fake::Api::start(vec![
+            Reply::Events(fake::events(&[fake::text("I'll get help."), delegate], "tool_use")),
+            // The helper's own requests.
+            Reply::Events(fake::events(&[cut], "max_tokens")),
+            Reply::Status(529, "overloaded_error", vec![]),
+            fake::says("Three files."),
+            // Back in the main loop.
+            fake::says("There are three."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        lock(&engine.settings).access = "on".into();
+        let events = ask(&engine, "What's in there?");
+        assert!(of_type(&events, "error").is_empty(), "{events:?}");
+        let helper = api.request(3);
+        assert_eq!(helper["messages"][0]["content"], "List the files");
+        assert_eq!(helper["messages"][2]["content"][0]["content"], CUT_OFF);
+        let report = &api.request(4)["messages"][2]["content"][0];
+        assert_eq!((report["tool_use_id"].as_str(), report["content"].as_str()), (Some("toolu_d"), Some("Three files.")));
+        let phases: Vec<&str> = of_type(&events, "agent").iter().map(|e| e["phase"].as_str().unwrap()).collect();
+        assert_eq!(phases, ["start", "end"]);
+        assert_eq!(of_type(&events, "done")[0]["text"], "I'll get help.\n\nThere are three.");
+        assert_replayable(&history(&engine));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

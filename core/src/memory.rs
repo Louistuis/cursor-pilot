@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::lock;
+
 /// Oldest facts go first beyond this.
 const MAX_FACTS: usize = 200;
 const MAX_CHARS: usize = 300;
@@ -35,7 +37,7 @@ impl Memory {
     }
 
     pub fn list(&self) -> Vec<Fact> {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = lock(&self.lock);
         self.read()
     }
 
@@ -61,7 +63,7 @@ impl Memory {
         if text.is_empty() {
             return Err("Nothing to remember: text is empty.".into());
         }
-        let _guard = self.lock.lock().unwrap();
+        let _guard = lock(&self.lock);
         let mut facts = self.read();
         if let Some(f) = facts.iter().find(|f| f.text.eq_ignore_ascii_case(&text)) {
             return Ok(format!("Already remembered as {}.", f.id));
@@ -86,7 +88,7 @@ impl Memory {
         if what.is_empty() {
             return 0;
         }
-        let _guard = self.lock.lock().unwrap();
+        let _guard = lock(&self.lock);
         let mut facts = self.read();
         let before = facts.len();
         let needle = what.to_lowercase();
@@ -99,7 +101,7 @@ impl Memory {
     }
 
     pub fn clear(&self) {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = lock(&self.lock);
         let _ = fs::remove_file(&self.path);
     }
 

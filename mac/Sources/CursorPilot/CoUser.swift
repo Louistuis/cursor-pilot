@@ -20,6 +20,11 @@ enum HumanInput {
 
     static var location: CGPoint { CGEvent(source: nil)?.location ?? .zero }
 
+    /// Bumped when the task is stopped: text being typed ends where it is
+    /// and a wait for the user is over, instead of carrying on after Stop.
+    private static var stops = 0
+    static func stop() { stops += 1 }
+
     // MARK: Taking turns
 
     /// Has the user moved the pointer since the agent last did?
@@ -35,7 +40,8 @@ enum HumanInput {
         overlay.state.activity = "You've got it. I'll wait"
         defer { overlay.state.activity = nil }
         let deadline = Date().addingTimeInterval(120)
-        while Date() < deadline {
+        let began = stops
+        while Date() < deadline, stops == began {
             let idle = [CGEventType.mouseMoved, .leftMouseDown, .keyDown, .scrollWheel, .leftMouseDragged]
                 .map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }
                 .min() ?? 99
@@ -154,7 +160,9 @@ enum HumanInput {
     static func type(_ text: String) async {
         let long = text.count > 120
         var sinceBreak = 0
+        let began = stops
         for ch in text {
+            guard stops == began else { return }
             if ch == "\n" || ch == "\t" {
                 tap(ch == "\n" ? kVK_Return : kVK_Tab)
             } else {

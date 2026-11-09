@@ -194,6 +194,10 @@ final class AppModel: ObservableObject {
     /// Pointing and drawings waiting for the voice to reach their sentence.
     private var heldVisuals: [(sentence: Int, show: () -> Void)] = []
     private var activeRequest: UInt64?
+    /// Bumped whenever what's running is stopped or replaced. A request's
+    /// events still on their way after that (the core confirms a cancel a
+    /// moment later) must not touch what came next.
+    private var requestSerial = 0
     /// The last request is over and saved (its reply may still be playing).
     @Published private(set) var requestFinished = true
     private var resetTask: Task<Void, Never>?
@@ -404,18 +408,25 @@ final class AppModel: ObservableObject {
     /// Screens captured the moment the talk key went down, so the question
     /// leaves the instant you let go instead of waiting for a capture.
     private var precapture: (task: Task<[ScreenShotPayload], Never>, at: Date)?
+    /// Counts the times you start talking, so a transcript that comes back
+    /// after you've started again doesn't cut in on that.
+    private var listenTurn = 0
+    /// The talk key is down, from the press until it comes up or is called off.
+    private var wantsToListen = false
 
     func beginListening(open: Bool = false) {
         if usesLiveVoice {
             beginLiveTalk()
             return
         }
+        listenTurn += 1
         // It's working: talk to it without stopping the work.
         if requestActive, activeRequest != nil {
             beginTalkingOverTask(open: open)
             return
         }
         interrupt()
+        wantsToListen = true
         openMic = open
         openMicSince = Date()
         heardSpeechAt = nil
@@ -429,6 +440,9 @@ final class AppModel: ObservableObject {
                 showError("Cursor Pilot can't hear you yet: run \(Setup.hint).")
                 return
             }
+            // The key came up before this ran (a tap while the app was
+            // busy): starting now would leave the mic open with no key held.
+            guard wantsToListen else { return }
             do {
                 heardText = ""
                 try voice.start(locales: resolvedListenLocales, echoCancel: handsFree)
@@ -442,8 +456,27 @@ final class AppModel: ObservableObject {
 
     /// The talk chord was part of another shortcut: drop it quietly.
     func cancelListening() {
+        if usesLiveVoice {
+            // The live voice's mic was opened too: close it, and send nothing.
+            LiveVoice.shared.cancelTalk()
+            LiveVoice.shared.micSink = nil
+            voice.endListen()
+            overlay.state.hearing = nil
+            if phase == .listening { setPhase(.idle) }
+            return
+        }
+        wantsToListen = false
         voice.cancel()
-        if phase == .listening { setPhase(.idle) }
+        guard phase == .listening else { return }
+        if talkingOverTask {
+            // It was working when the key went down: back to that, not to idle.
+            talkingOverTask = false
+            overlay.state.hearing = nil
+            setPhase(requestActive ? phaseBeforeTalk : .idle)
+            refreshWorking()
+        } else {
+            setPhase(.idle)
+        }
     }
 
     /// The microphone button in Home and the notch: click to talk, click
@@ -462,16 +495,31 @@ final class AppModel: ObservableObject {
             LiveVoice.shared.micSink = nil
             voice.endListen()
             clearHearing()
-            if phase == .listening { setPhase(.thinking) }
+            if phase == .listening {
+                setPhase(.thinking)
+                // Nothing may come back (a tap of the key, a dropped
+                // connection): it doesn't stay thinking for ever.
+                resetTask?.cancel()
+                resetTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(8))
+                    guard !Task.isCancelled, let self, self.phase == .thinking, !self.requestActive,
+                          !self.speakingNow else { return }
+                    self.setPhase(.idle)
+                }
+            }
             return
         }
+        wantsToListen = false
         guard phase == .listening else { return }
         openMic = false
         if talkingOverTask {
             await endTalkingOverTask()
             return
         }
+        let turn = listenTurn
         let text = await voice.stop()
+        // The key went down again meanwhile: that's the question now.
+        guard turn == listenTurn else { return }
         if let language = voice.lastLanguage { speaker.fallbackLanguage = language }
         guard !text.isEmpty else {
             setPhase(.idle)
@@ -484,7 +532,10 @@ final class AppModel: ObservableObject {
 
     /// Sends a question, optionally with screenshots of every display.
     func ask(_ text: String, includeScreen: Bool) async {
-        interrupt()
+        // The live voice keeps talking: this may be its own request.
+        interrupt(hushLive: false)
+        let serial = requestSerial
+        let call = liveCall
         guard hasAPIKey else {
             showError("Add your \(providerName) API key in Cursor Pilot's Settings first.")
             return
@@ -533,11 +584,38 @@ final class AppModel: ObservableObject {
             }
         }
 
+        // Stopped, or something else was asked, while the screen was captured.
+        guard serial == requestSerial else {
+            dropLiveCall(call)
+            return
+        }
         requestFinished = false
         let id = core.send(CoreRequest(text: text, screens: screens, sketch: sketch && !screens.isEmpty)) { [weak self] event in
-            self?.handle(event)
+            guard let self else { return }
+            if serial == requestSerial { handle(event) } else { handleStale(event, liveCall: call) }
         }
         activeRequest = id
+    }
+
+    /// An event from a request that was stopped or replaced: nothing of it
+    /// shows or is said any more. What it saved is picked up when it ends.
+    private func handleStale(_ event: CoreEvent, liveCall call: String?) {
+        guard case .finished = event else { return }
+        dropLiveCall(call)
+        refreshConversations()
+        reloadOpenTranscript()
+        refreshMemory()
+        if ink.hasStrokes { ink.fadeStrokes(after: 20) }
+    }
+
+    /// The live voice's request was stopped before Claude answered it: the
+    /// voice is told, so it isn't left waiting for the answer.
+    private func dropLiveCall(_ call: String?) {
+        guard let call, call == liveCall else { return }
+        LiveVoice.shared.finishTask(callID: call, output: "It couldn't finish: it was stopped.")
+        liveCall = nil
+        liveLines = []
+        liveFailure = nil
     }
 
     private func handle(_ event: CoreEvent) {
@@ -749,7 +827,10 @@ final class AppModel: ObservableObject {
         }
         resetTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
-            guard !Task.isCancelled, let self, self.requestFinished, !self.speaker.isSpeaking else { return }
+            // Not while you're talking again (the live voice's talk key
+            // doesn't go through `interrupt`).
+            guard !Task.isCancelled, let self, self.requestFinished, !self.speaker.isSpeaking,
+                  self.phase != .listening else { return }
             self.setPhase(.idle)
             // Explained: the board and 3D view go after a while to look at them.
             self.board.closeSoon()
@@ -813,7 +894,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func interrupt(keepingVoice: Bool = false) {
+    func interrupt(keepingVoice: Bool = false, hushLive: Bool = true) {
+        // Whatever the stopped request still sends is ignored from here on,
+        // and typing under way ends where it is.
+        requestSerial += 1
+        HumanInput.stop()
+        // Stop means the live voice goes quiet too.
+        if hushLive { LiveVoice.shared.hush() }
         CursorTakeover.end()
         drawQueue?.cancel()
         drawQueue = nil
@@ -828,6 +915,12 @@ final class AppModel: ObservableObject {
         overlay.state.activityIcon = nil
         activeRequest = nil
         requestActive = false
+        requestFinished = true
+        // What was said for the stopped task goes with it, and a board it
+        // was drawing is kept as far as it got.
+        notesForAgent = []
+        talkingOverTask = false
+        keepBoard()
         speakingNow = false
         backgroundWork = false
         overlay.state.hearing = nil
@@ -913,7 +1006,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func stopSpeaking() { speaker.stop() }
+    func stopSpeaking() {
+        speaker.stop()
+        // `stop` doesn't report idle, so what follows the last sentence is
+        // done here: the caption goes, the mic closes, the phase settles.
+        speakingNow = false
+        stopBargeWatch()
+        releaseVisuals(upTo: .max)
+        settleIfDone()
+    }
 
     var isSpeaking: Bool { speaker.isSpeaking }
 
@@ -945,10 +1046,10 @@ final class AppModel: ObservableObject {
         // It talks as it works (saying each step before it does it) without
         // leaving the notch; it comes down for the answer or to use the pointer.
         let working = requestActive && !liveSteps.isEmpty && !pointer && !recent
-        if backgroundWork != working {
-            backgroundWork = working
-            refreshGlow()
-        }
+        if backgroundWork != working { backgroundWork = working }
+        // Also when only the steps changed: the frame calms down once the
+        // first step is under way, whether or not the buddy moved.
+        refreshGlow()
     }
 
     private var lastScreenStepAt: Date?
@@ -1027,10 +1128,16 @@ final class AppModel: ObservableObject {
     private func endTalkingOverTask() async {
         talkingOverTask = false
         clearHearing()
+        let turn = listenTurn
         let text = await voice.stop()
-        if requestActive { setPhase(phaseBeforeTalk) }
-        refreshWorking()
-        guard !text.isEmpty else { return }
+        if turn == listenTurn {
+            // The task may have ended while you talked: with nothing said,
+            // there's nothing left to listen for or show.
+            if requestActive { setPhase(phaseBeforeTalk) } else if text.isEmpty { setPhase(.idle) }
+            refreshWorking()
+        }
+        // Talking again already, and the task is over: that's the question now.
+        guard !text.isEmpty, turn == listenTurn || requestActive else { return }
         passToAgent(text)
     }
 
@@ -1072,6 +1179,8 @@ final class AppModel: ObservableObject {
         let live = LiveVoice.shared
         live.handsFree = handsFree
         live.pressTalk(key: openAIKey)
+        // Cutting in on its answer starts the countdown back to idle: not now.
+        resetTask?.cancel()
         overlay.state.caption = ""
         overlay.state.spoken = nil
         if requestActive {
@@ -1154,7 +1263,10 @@ final class AppModel: ObservableObject {
                 heardText = text
                 if phase == .listening { overlay.state.caption = text }
             case .level(let level):
-                guard phase == .listening || talkingOverTask || requestActive else { return }
+                // Only while the waveform shows (hands-free, the mic is open
+                // all through a task: publishing every buffer then would
+                // redraw the buddy and the notch some 20 times a second).
+                guard phase == .listening || talkingOverTask || overlay.state.hearing != nil else { return }
                 overlay.state.level = level
                 glow.level = level
             case .speakingStarted:
@@ -1167,8 +1279,14 @@ final class AppModel: ObservableObject {
                 }
             case .saying(let text, let heard):
                 guard !text.isEmpty else { return }
-                overlay.state.spoken = Self.karaoke(text, heard: heard)
-                if !requestActive { overlay.state.caption = captionText(text) }
+                // This comes 20 times a second; the word moves on about
+                // three times a second. Only a change is published.
+                let spoken = Self.karaoke(text, heard: heard)
+                if overlay.state.spoken != spoken { overlay.state.spoken = spoken }
+                if !requestActive {
+                    let caption = captionText(text)
+                    if overlay.state.caption != caption { overlay.state.caption = caption }
+                }
             case .speakingEnded:
                 speakingNow = false
                 if !requestActive {
@@ -1276,6 +1394,7 @@ final class AppModel: ObservableObject {
     /// front (background tasks carry on) and listens.
     private func bargeIn() {
         bargeWatch = false
+        listenTurn += 1
         voice.restartRecording()
         if requestActive, activeRequest != nil {
             // It's working: it stops talking and listens; the work carries on.

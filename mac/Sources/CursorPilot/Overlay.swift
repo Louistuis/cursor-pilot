@@ -85,6 +85,9 @@ final class OverlayController: NSObject {
         var duration: CFTimeInterval
         /// Into the notch (true), out of it (false), or neither.
         var docking: Bool?
+        /// How far in it was when a flight out began (1 from rest; less
+        /// when it turns round on its way up), so it grows back from there.
+        var dockStart: CGFloat = 1
     }
 
     private var enabled = false
@@ -183,7 +186,10 @@ final class OverlayController: NSObject {
         if distance > 2 {
             let d = min(0.5, 0.16 + Double(distance) / 3600)
             fly(to: start, duration: d)
+            leaveNotch()
             try? await Task.sleep(for: .seconds(d))
+        } else {
+            leaveNotch()
         }
         state.penInk = ink
         begin()
@@ -215,6 +221,11 @@ final class OverlayController: NSObject {
             isPointing = false
             state.pointLabel = nil
             fly(to: NSEvent.mouseLocation, duration: 0.14)
+            leaveNotch()
+        } else if let spot = parkedAt {
+            // The work still goes on in the background: back up into the notch.
+            fly(to: spot, duration: 0.6)
+            flight?.docking = true
         } else {
             fly(to: followPoint(), duration: 0.28)
         }
@@ -234,7 +245,23 @@ final class OverlayController: NSObject {
         guard distance > 1.5 else { return }
         let duration = min(0.6, 0.16 + Double(distance) / 3400)
         fly(to: target, duration: duration)
+        leaveNotch()
         try? await Task.sleep(for: .seconds(duration + 0.02))
+    }
+
+    /// The buddy is needed on screen while it was in the notch, or shrinking
+    /// on its way there: it grows back on the flight taking it out. (Only a
+    /// flight out of the notch did that, so one that started any other way
+    /// left it small and faint, with its words going to the notch.)
+    private func leaveNotch() {
+        guard state.dock != 0 || state.docked else { return }
+        if state.docked { state.docked = false }
+        if flight != nil {
+            flight?.docking = false
+            flight?.dockStart = state.dock
+        } else {
+            setDock(0)
+        }
     }
 
     /// A ring at the tip where the agent clicked.
@@ -302,7 +329,7 @@ final class OverlayController: NSObject {
             anchor = onCursor ? lerp(f.from, to, ease(t)) : arc(from: f.from, to: to, t: ease(t))
             switch f.docking {
             case true?: setDock(smooth((t - 0.35) / 0.65))
-            case false?: setDock(1 - smooth(t / 0.55))
+            case false?: setDock(f.dockStart * (1 - smooth(t / 0.55)))
             case nil: break
             }
             if t >= 1 {
@@ -314,13 +341,22 @@ final class OverlayController: NSObject {
         } else if now >= holdUntil, !targets.isEmpty {
             let (target, label) = targets.removeFirst()
             fly(to: target, duration: 0.6)
+            leaveNotch()
             isPointing = true
             state.pointLabel = label.isEmpty ? nil : label
             holdUntil = now + 0.6 + 2.4
         } else if isPointing, now >= holdUntil {
             isPointing = false
             state.pointLabel = nil
-            if !agentDriving { fly(to: followPoint(), duration: 0.35) }
+            if agentDriving {
+                // Stays where the agent left its pointer.
+            } else if let spot = parkedAt {
+                // The work still goes on in the background: back up into the notch.
+                fly(to: spot, duration: 0.6)
+                flight?.docking = true
+            } else {
+                fly(to: followPoint(), duration: 0.35)
+            }
         } else if agentDriving {
             // Stay where the agent left its pointer.
         } else if let spot = parkedAt, !isPointing {
@@ -381,17 +417,26 @@ final class OverlayController: NSObject {
         let from = parkedAt
         parkedAt = spot
         wake()
-        guard !onCursor, !agentDriving, pen == nil else { return }
+        // Going up: the agent is done with its pointer for now. (Left where
+        // it last clicked, the buddy just faded there and never docked.)
+        if spot != nil { agentDriving = false }
+        // Out on screen for the agent, the pen or to point: it stays, and
+        // goes up or home from where it is when that's done.
+        guard !onCursor, !agentDriving, pen == nil, !isPointing else { return }
         if let spot {
             fly(to: spot, duration: 0.6)
             flight?.docking = true
         } else if let from {
             // Out of the notch, where it was resting (asleep, it may have
-            // been put back by the cursor meanwhile).
-            anchor = from
-            lastAnchor = from
+            // been put back by the cursor meanwhile). Still in the air, it
+            // turns round from where it is instead of jumping to the notch.
+            if flight == nil {
+                anchor = from
+                lastAnchor = from
+            }
             fly(to: followPoint(), duration: 0.5)
             flight?.docking = false
+            flight?.dockStart = state.dock
             if state.docked { state.docked = false }
         }
     }

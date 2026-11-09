@@ -19,6 +19,9 @@ final class VoiceInput {
     private var listeners: [any Listener] = []
     private var texts: [String] = []
     private var isRunning = false
+    /// Counts listening sessions, so words and levels still on their way
+    /// from one that ended don't land in the next.
+    private var session = 0
 
     /// On-device models that are ready, by locale identifier.
     private var models: [String: ModelPlan] = [:]
@@ -121,9 +124,14 @@ final class VoiceInput {
 
     private func makeListeners(locales: [Locale], format: AVAudioFormat) -> [any Listener] {
         var made: [any Listener] = []
+        session += 1
+        let session = session
         for (i, locale) in locales.enumerated() {
             let onText: @Sendable (String) -> Void = { [weak self] text in
-                Task { @MainActor in self?.heard(text, from: i) }
+                Task { @MainActor in
+                    guard let self, self.session == session else { return }
+                    self.heard(text, from: i)
+                }
             }
             if #available(macOS 26, *), let plan = models[locale.identifier],
                let listener = try? ModernListener(plan: plan, input: format, onText: onText) {
@@ -158,11 +166,16 @@ final class VoiceInput {
 
         let sinks = made.map(\.sink)
         let recorder = recorder
+        let session = session
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             for sink in sinks { sink(buffer) }
             recorder.append(buffer)
             let level = Self.level(of: buffer)
-            Task { @MainActor in self?.onLevel?(level) }
+            Task { @MainActor in
+                // A level from before listening ended would leave the waveform up.
+                guard let self, self.isRunning, self.session == session else { return }
+                self.onLevel?(level)
+            }
         }
         engine.prepare()
         do {
@@ -179,6 +192,8 @@ final class VoiceInput {
         guard isRunning else { return "" }
         isRunning = false
         stopAudio()
+        // Taken now: the next recording may begin while the recognizers settle.
+        let audio = recorder.take()
         let all = listeners
         listeners = []
         let heard = await withTaskGroup(of: (Int, Heard).self) { group in
@@ -193,14 +208,14 @@ final class VoiceInput {
             UserDefaults.standard.set(lastLanguage, forKey: "lastHeardLanguage")
         }
         let quick = best.map { heard[$0].text } ?? ""
-        return await finalText(quick: quick, language: best.map { heard[$0].language }, listening: all.count)
+        return await finalText(quick: quick, language: best.map { heard[$0].language }, listening: all.count, audio: audio)
     }
 
     /// The transcript to send: written by MAI-Transcribe or Whisper from
     /// the recording when that engine is on, Apple's live one otherwise or
     /// when it fails.
-    private func finalText(quick: String, language: String?, listening: Int) async -> String {
-        let audio = recorder.take()
+    private func finalText(quick: String, language: String?, listening: Int,
+                           audio: (samples: [Float], rate: Int, peak: Float)) async -> String {
         let seconds = Double(audio.samples.count) / Double(max(audio.rate, 1))
         // Too short, or too quiet to be speech.
         guard seconds >= 0.35, audio.peak > 0.015 else { return quick }
@@ -322,7 +337,7 @@ extension VoiceInput {
         for l in all { heard.append(await l.finish()) }
         let best = Self.pick(heard)
         let text = await finalText(quick: best.map { heard[$0].text } ?? "", language: best.map { heard[$0].language },
-                                   listening: all.count)
+                                   listening: all.count, audio: recorder.take())
         return (text, heard)
     }
 }

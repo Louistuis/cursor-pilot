@@ -52,6 +52,12 @@ final class LiveVoice {
 
     /// A reply is being generated; further replies wait for it.
     private var responseActive = false
+    /// That reply was cut off (you talked over it, or pressed Stop): what
+    /// still arrives of it is neither played nor shown.
+    private var cutOff = false
+    /// Counts presses of the talk key, so the end of one press can't close
+    /// the mic on the next.
+    private var talkPress = 0
     private var pending: [Pending] = []
     private enum Pending { case line(String), answer(callID: String, output: String) }
 
@@ -135,6 +141,7 @@ final class LiveVoice {
         gate.open = false
         connected = false
         responseActive = false
+        cutOff = false
         pending = []
         stopPlayback(truncate: false)
         stopAudio()
@@ -267,6 +274,7 @@ final class LiveVoice {
 
     /// The talk key went down: you can talk, and talk over it.
     func pressTalk(key: String) {
+        talkPress += 1
         connect(key: key)
         startAudio()
         if speaking || responseActive { cutIn() }
@@ -277,13 +285,31 @@ final class LiveVoice {
     /// The talk key came up: what you said is sent and it answers.
     func releaseTalk() {
         guard gate.open, !handsFree else { return }
+        let press = talkPress
         // A moment for the last words to arrive.
         Task {
             try? await Task.sleep(for: .milliseconds(160))
+            // The key is down again (or the press was called off): that one
+            // decides what happens to the mic now.
+            guard press == talkPress else { return }
             gate.open = false
             send(["type": "input_audio_buffer.commit"])
             send(["type": "response.create"])
         }
+    }
+
+    /// The talk key turned out to be part of another shortcut: the mic
+    /// closes and nothing is sent.
+    func cancelTalk() {
+        talkPress += 1
+        guard gate.open, !handsFree else { return }
+        gate.open = false
+        send(["type": "input_audio_buffer.clear"])
+    }
+
+    /// Stops what it's saying now, and the reply it's working on (Stop).
+    func hush() {
+        if speaking || responseActive { cutIn() }
     }
 
     /// Hands-free: the mic stays on and the model hears when you talk.
@@ -347,7 +373,10 @@ final class LiveVoice {
 
     /// You talked over it: stop the voice where you cut in.
     private func cutIn() {
-        if responseActive { send(["type": "response.cancel"]) }
+        if responseActive {
+            send(["type": "response.cancel"])
+            cutOff = true
+        }
         stopPlayback(truncate: true)
     }
 
@@ -367,17 +396,23 @@ final class LiveVoice {
             }
         case "response.created":
             responseActive = true
+            cutOff = false
         case "response.output_audio.delta":
-            guard let b64 = event["delta"] as? String, let data = Data(base64Encoded: b64) else { return }
+            guard !cutOff, let b64 = event["delta"] as? String, let data = Data(base64Encoded: b64) else { return }
             play(data, item: event["item_id"] as? String)
         case "response.output_audio_transcript.delta":
-            guard let id = event["item_id"] as? String else { return }
+            guard !cutOff, let id = event["item_id"] as? String else { return }
             if said[id] == nil { saidOrder.append(id) }
             said[id, default: Said()].text += event["delta"] as? String ?? ""
         case "conversation.item.input_audio_transcription.completed":
             if let heard = event["transcript"] as? String, !heard.isEmpty { onEvent?(.heard(heard)) }
         case "input_audio_buffer.speech_started":
-            if handsFree { stopPlayback(truncate: true) }
+            if handsFree {
+                // The server drops the reply it was giving (interrupt_response);
+                // the rest of its audio, already on the way, isn't played.
+                if responseActive { cutOff = true }
+                stopPlayback(truncate: true)
+            }
         case "response.done":
             responseActive = false
             let response = event["response"] as? [String: Any]
