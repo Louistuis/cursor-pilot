@@ -61,6 +61,10 @@ pub struct Settings {
     /// and keyboard) or "background" (its own pointer).
     #[serde(default)]
     pub input: String,
+    /// What it calls the user, e.g. "Boss" or "Boss, King" (the first is
+    /// the usual one); empty: no title.
+    #[serde(default)]
+    pub address: String,
 }
 
 impl Default for Settings {
@@ -74,6 +78,7 @@ impl Default for Settings {
             max_tokens: 16_000,
             access: "off".into(),
             input: "person".into(),
+            address: String::new(),
         }
     }
 }

@@ -57,7 +57,8 @@ enum TestHooks {
         }
         // `-CPLiveTest out.json`: connects the live voice with the saved OpenAI
         // key, sends typed lines instead of speech, and writes what came back
-        // (events, transcripts, tool calls, errors). Plays its voice.
+        // (events, transcripts, tool calls, errors). Plays its voice, unless
+        // `-CPLiveQuiet YES` is given too.
         if let out = defaults.string(forKey: "CPLiveMicCheck") {
             let d = await LiveVoice.shared.micCheck(seconds: 3)
             write(d, to: out)
@@ -86,6 +87,7 @@ enum TestHooks {
         let model = AppModel.shared
         await model.loadAPIKey()
         let live = LiveVoice.shared
+        live.muted = UserDefaults.standard.bool(forKey: "CPLiveQuiet")
         var said: [String] = [], heard: [String] = [], tasks: [String] = [], errors: [String] = []
         var spoke = 0
         // How far into its words the caption is, a few times a second: it
@@ -114,7 +116,17 @@ enum TestHooks {
         try? await Task.sleep(for: .seconds(8))
         live.sendText("What's the biggest file in my Downloads folder?", key: model.openAIKey)
         try? await Task.sleep(for: .seconds(14))
+        // The connection goes away, and a background task's report comes in:
+        // a new connection says it, and still knows what was said before.
+        let before = said.count
+        live.simulateDrop()
+        live.relay("The passport form is renewed and saved in Downloads as passport.pdf.", report: true, key: model.openAIKey)
+        try? await Task.sleep(for: .seconds(12))
+        let reported = Array(said.dropFirst(before))
+        live.sendText("Which file did I ask you about a moment ago?", key: model.openAIKey)
+        try? await Task.sleep(for: .seconds(10))
         write(["connected": live.connected, "said": said, "heard": heard, "tasks": tasks, "errors": errors,
+               "reported": reported, "diagnostics": live.diagnostics()["steps"] ?? [],
                "spoke": spoke, "pace": pace.enumerated().filter { $0.offset % 6 == 0 }.map(\.element), "events": live.log, "seconds": Date().timeIntervalSince(started)], to: out)
         live.disconnect()
     }
@@ -178,6 +190,17 @@ enum TestHooks {
         for j in model.jobs {
             log.append(["t": (Date().timeIntervalSince(started) * 10).rounded() / 10,
                         "job": [j.id, j.name, j.title, j.state, j.status]])
+        }
+        // What came of them goes back to the agent, which tells you: its
+        // words (two minutes at most).
+        if !model.jobs.isEmpty {
+            let deadline = Date().addingTimeInterval(120)
+            try? await Task.sleep(for: .seconds(1))
+            while !model.requestFinished || model.core.reportsWaiting, Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            log.append(["t": (Date().timeIntervalSince(started) * 10).rounded() / 10, "report": model.replyText,
+                        "waiting": model.core.reportsWaiting])
         }
         // Let the helpers' cursors finish and fade.
         try? await Task.sleep(for: .seconds(2.5))

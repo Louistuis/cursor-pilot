@@ -82,7 +82,21 @@ Settings › Speech picks the engine that hears you and reads replies:
   committed on release), or turn on hands-free for semantic VAD with cut-in;
   talking over it truncates its reply where you cut in. OpenRouter has no
   realtime model or WebSocket, so this needs the OpenAI key and credits.
-  `-CPLiveTest out.json` checks the connection with typed lines.
+  `-CPLiveTest out.json` checks the connection with typed lines (silently
+  with `-CPLiveQuiet YES`).
+  With the live voice chosen, everything is said by it: the answer to a
+  typed question and the agent's report on a finished background task are
+  passed to it as system messages to tell, instead of being read by another
+  voice.
+  The connection is looked after: OpenAI ends a session after an hour, and a
+  new network or a sleeping Mac ends it sooner. It is checked with a ping
+  every few seconds, replaced in a quiet moment after 50 minutes, reopened
+  when it drops (hands-free, or with something still to say) and on the
+  next press when it has gone stale, and each new connection is told the
+  last things said, so the conversation carries on. When the audio device
+  changes (headphones, another sample rate) the mic tap is rebuilt for it.
+  With the talk key, the mic and its echo cancellation rest after two quiet
+  minutes.
   Following OpenAI's voice guidance: the prompt uses its sections (Role and
   Objective, Personality and Tone, Language with English default and Norwegian
   on a substantive Norwegian utterance, Verbosity, Preambles, Tools, Unclear

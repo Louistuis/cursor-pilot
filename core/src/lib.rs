@@ -213,6 +213,13 @@ pub unsafe extern "C" fn cp_core_tell(core: *mut CPCore, id: u64, text: *const c
     core.engine.tell(id, text)
 }
 
+/// Whether a background task has finished without the user being told:
+/// send a request with `handback` set and the agent reports on it.
+#[no_mangle]
+pub unsafe extern "C" fn cp_core_reports_waiting(core: *mut CPCore) -> bool {
+    core.as_ref().is_some_and(|c| c.engine.reports_waiting())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn cp_core_new_conversation(core: *mut CPCore) {
     if let Some(core) = core.as_ref() {

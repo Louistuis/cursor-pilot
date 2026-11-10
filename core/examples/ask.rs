@@ -20,6 +20,7 @@ fn main() {
         text: question,
         screens: Vec::new(),
         sketch: false,
+        handback: false,
     };
     engine.run(id, &AtomicBool::new(false), request, &mut |event| {
         println!("{event}")

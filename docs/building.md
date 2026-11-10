@@ -40,6 +40,7 @@ Debug launch flags, for design work:
 | `-CPSkipKeychain YES` | does not read the saved API key (no keychain prompt) |
 | `-CPOpenHome settings` | opens Home on `settings`, `drawings` or `chat` |
 | `-CPHomeDemo chat:0,find:word` | puts Home in a state: `chat:N` opens the Nth newest chat, `find:word`, `palette`, `slash`, `hover`, `side` |
+| `-CPLiveTest out.json -CPLiveQuiet YES` | talks to the live voice with typed lines: a hello, a task, a dropped connection, a background report and a question about what was said before; `-CPLiveQuiet` plays it at no volume |
 | `-CPBuddyDemo listening` | holds the buddy in `listening`, `thinking` or `answering` |
 | `-CPAsk "question"` | asks a typed question at launch, without screenshots |
 | `-CPRenderArrowPreview file.png` | renders the buddy arrow large and at real size to a PNG, then quits |

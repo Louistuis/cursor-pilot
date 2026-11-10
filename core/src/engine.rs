@@ -20,12 +20,17 @@ use crate::speech::SentenceChunker;
 use crate::lock;
 
 pub const SYSTEM_PROMPT: &str = "\
-You are Cursor Pilot, a friendly helper that lives next to the user's mouse cursor on their Mac. \
+You are Cursor Pilot, the user's own AI on their Mac, in the mould of Jarvis: composed, quick, \
+capable and loyal, with a dry sense of humour you use sparingly. The user is in charge and you are \
+their right hand: you take the order, get it done and report back. Stay a step ahead: when you notice \
+something they'd want to know (a problem, a risk, the obvious next move), say it in a few words or \
+offer to handle it, without waiting to be asked. Be confident and exact. No gushing, no long \
+apologies, and no asking permission for what they already told you to do. \
 The user talks to you by voice or texts you from a chat that looks like Messages, and your reply \
-is read aloud. Write like a capable friend texting back: short, warm and natural, usually one or two \
-short sentences, with no markdown, lists or headings, and no code blocks unless the user asks for code. \
-Skip preambles and pleasantries. A blank line between thoughts sends them as separate messages, so use \
-one only where a real texter would. Go longer only when the user asks for detail. \
+is read aloud. Keep it short and natural, usually one or two short sentences, with no markdown, lists \
+or headings, and no code blocks unless the user asks for code. Skip preambles. A blank line between \
+thoughts sends them as separate messages, so use one only where a real texter would. Go longer only \
+when the user asks for detail. \
 Reply in the language the user just used; they may switch languages between messages. Spoken \
 questions come through speech recognition and can contain misheard words, so go with the most \
 likely meaning instead of the literal text.
@@ -103,6 +108,33 @@ lights it up. Use a board or a model when it truly helps, not for quick answers.
 If the user drew on their screen, their freehand pen strokes are visible in the screenshot; \
 they are the user's own marks pointing at what they mean, not part of any app.";
 
+/// How it addresses the user, for the system prompt: `address` is the
+/// title or titles from Settings ("Boss", or "Boss, King"), the first
+/// being the usual one. Empty: no title.
+pub fn address_prompt(address: &str) -> String {
+    let titles: Vec<&str> = address
+        .split(',')
+        .map(|t| t.trim().trim_matches(|c| c == '"' || c == '\u{201C}' || c == '\u{201D}'))
+        .filter(|t| !t.is_empty() && t.chars().count() <= 24)
+        .take(4)
+        .collect();
+    let Some(first) = titles.first() else { return String::new() };
+    let others = match &titles[1..] {
+        [] => String::new(),
+        rest => format!(
+            " Now and then, for a change, say {} instead.",
+            rest.iter().map(|t| format!("\u{201C}{t}\u{201D}")).collect::<Vec<_>>().join(" or ")
+        ),
+    };
+    format!(
+        "\n\nYou address the user as your superior: call them \u{201C}{first}\u{201D}, the way Jarvis says \
+\u{201C}sir\u{201D}. Use it when you take an order (\u{201C}Right away, {first}.\u{201D}), when you report back \
+(\u{201C}Done, {first}.\u{201D}), when you greet them and when you bring news: at most once in a reply, and not \
+in every reply, so it sounds like respect and never like a tic.{others} Keep the title as it is in every \
+language (\u{201C}Skal bli, {first}.\u{201D})."
+    )
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 pub struct Rect {
     pub x: f64,
@@ -133,7 +165,24 @@ pub struct Request {
     /// The user drew on the screen before asking.
     #[serde(default)]
     pub sketch: bool,
+    /// Not a question: background tasks have finished, and the agent tells
+    /// the user what came of them (nothing happens when none has).
+    #[serde(default)]
+    pub handback: bool,
 }
+
+/// What the agent is asked to do with finished tasks' reports when the
+/// user hasn't said anything.
+const REPORT_BACK: &str = "[Report back to the user now, in your own voice, the way you'd brief them in \
+person: what came of it and anything they need to know or decide, in one to three short sentences. Leave \
+out how it was done unless that matters. Show a link, a picture or a chart from the report when it helps. \
+Don't mention this note, and don't say an agent wrote to you: to the user it is all your work.]";
+/// The same, when the reports come along with something the user said.
+const REPORT_TOO: &str = "[The user hasn't heard this yet. Tell them what came of it in a sentence or \
+two, before or after you deal with what they say next.]";
+/// And when they arrive while the agent is in the middle of other work.
+const REPORT_LATER: &str = "[This came in while you were working, and the user hasn't heard it yet. Tell \
+them what came of it in a sentence or two when you answer.]";
 
 /// Tool rounds one request may take before it is stopped.
 const MAX_ROUNDS: usize = 300;
@@ -169,6 +218,31 @@ struct Job {
     status: String,
 }
 
+/// A finished background task's report, on its way to the agent, who
+/// tells the user.
+#[derive(Debug, Clone)]
+struct JobNote {
+    conversation: String,
+    /// What the agent is told.
+    text: String,
+    /// The task as a step of the reply that reports it ("Nova: renewing the form").
+    label: String,
+    /// The report as a chat message of its own: shown instead, if the
+    /// agent doesn't get to tell the user. None once the user has it (or
+    /// stopped the task themselves).
+    turn: Option<Turn>,
+}
+
+impl JobNote {
+    /// The note as the agent reads it once the user has seen the report.
+    fn shown(mut self) -> Self {
+        if self.turn.take().is_some() {
+            self.text.push_str("\n[The user has now seen this report in the chat, but hasn't heard it.]");
+        }
+        self
+    }
+}
+
 /// Where background tasks' events go: the app, outside any request.
 pub type JobSink = Arc<dyn Fn(Value) + Send + Sync>;
 
@@ -195,8 +269,8 @@ pub struct Engine {
     this: Weak<Engine>,
     jobs: Mutex<Vec<Job>>,
     job_sink: Mutex<Option<JobSink>>,
-    /// Finished tasks' reports, by conversation, for the agent's next turn there.
-    job_notes: Mutex<Vec<(String, String)>>,
+    /// Finished tasks' reports, for the agent's next turn.
+    job_notes: Mutex<Vec<JobNote>>,
 }
 
 pub type Emit<'a> = &'a mut dyn FnMut(Value);
@@ -373,15 +447,29 @@ impl Engine {
         }
         // The settings the system prompt and the tools are made from.
         let prompt_key = format!(
-            "{}\n{access}\n{}\n{}",
+            "{}\n{access}\n{}\n{}\n{}",
             settings.model,
             settings.input != "background",
-            settings.is_anthropic()
+            settings.is_anthropic(),
+            settings.address
         );
+        let handback = req.handback;
+        if handback && !self.reports_waiting() {
+            // Already told along with something else: nothing to report.
+            return Ok(());
+        }
         let (conversation_id, history, system) = {
             let mut session = lock(&self.session);
-            if session.is_stale() {
+            // A report on a task this conversation started carries it on,
+            // however long the task took.
+            let reports_here =
+                handback && lock(&self.job_notes).iter().any(|n| n.conversation == session.transcript.id);
+            if session.is_stale() && !reports_here {
                 *session = Session::new();
+            }
+            // Before the history gets slow to send, or too big to be taken.
+            if session.is_long() {
+                session.compact();
             }
             // Written once per conversation and sent unchanged after that,
             // though it holds the memory and the date: a system prompt that
@@ -389,7 +477,8 @@ impl Engine {
             // the API reject their thinking blocks (and misses the cache).
             let system = session.system_prompt(&prompt_key, || {
                 format!(
-                    "{SYSTEM_PROMPT}{}{}",
+                    "{SYSTEM_PROMPT}{}{}{}",
+                    address_prompt(&settings.address),
                     self.memory.prompt(),
                     agent::system_addendum(
                         &settings,
@@ -402,15 +491,37 @@ impl Engine {
             });
             (session.transcript.id.clone(), session.api_messages.clone(), system)
         };
+        // Reporting back takes the reports of tasks from other chats too:
+        // each of those chats gets its report as a message of its own.
+        let mut notes = self.take_job_notes(&conversation_id, handback);
+        if handback && notes.is_empty() {
+            return Ok(());
+        }
+        for n in notes.iter_mut().filter(|n| n.conversation != conversation_id) {
+            if let (Some(turn), Some(mut t)) = (n.turn.take(), self.store.load(&n.conversation)) {
+                t.updated_at = now();
+                t.turns.push(turn);
+                let _ = self.store.save(&t);
+            }
+            n.conversation = conversation_id.clone();
+            n.text.insert_str(0, "[From an earlier conversation.] ");
+        }
         emit(json!({"type": "started", "id": id, "conversation_id": conversation_id}));
 
         let history_len = history.len();
         let mut out = ReplyStream::new(&req.screens);
         let mut messages = history;
-        let mut content = user_content(req);
-        let notes = self.take_job_notes(&conversation_id);
+        let mut content = if handback { Vec::new() } else { user_content(req) };
         if !notes.is_empty() {
-            content.insert(0, json!({"type": "text", "text": notes.join("\n")}));
+            let mut text = note_text(&notes);
+            if handback {
+                text.push_str("\n\n");
+                text.push_str(REPORT_BACK);
+            } else if notes.iter().any(|n| n.turn.is_some()) {
+                text.push('\n');
+                text.push_str(REPORT_TOO);
+            }
+            content.insert(0, json!({"type": "text", "text": text}));
         }
         messages.push(json!({"role": "user", "content": content}));
         let mut steps: Vec<String> = Vec::new();
@@ -520,6 +631,12 @@ impl Engine {
                         heard.join("\u{201D} \u{201C}")
                     )}));
                 }
+                // So does a background task that finished meanwhile.
+                let arrived = self.take_job_notes(&conversation_id, false);
+                if !arrived.is_empty() {
+                    results.push(json!({"type": "text", "text": format!("{}\n{REPORT_LATER}", note_text(&arrived))}));
+                    notes.extend(arrived);
+                }
                 messages.push(json!({"role": "user", "content": results}));
                 // Narration while working is read aloud too: it says
                 // what it's about to do before each step.
@@ -544,13 +661,16 @@ impl Engine {
             points: Vec::new(),
             steps: Vec::new(),
         };
+        // The tasks it reports on show as steps of this reply.
+        let labels: Vec<String> = notes.iter().filter(|n| !n.label.is_empty()).map(|n| n.label.clone()).collect();
+        let note_texts: Vec<String> = notes.iter().map(|n| n.text.clone()).collect();
         let assistant_turn = Turn {
             role: "assistant".into(),
             text: out.visible.trim().to_string(),
             at: now(),
             screens: 0,
             points: out.labels.clone(),
-            steps: steps.clone(),
+            steps: labels.iter().chain(steps.iter()).cloned().collect(),
         };
         {
             let mut session = lock(&self.session);
@@ -568,9 +688,17 @@ impl Engine {
                 match &result {
                     Ok(()) => {
                         let new = messages.split_off(history_len);
-                        session.commit_messages(new, user_turn, assistant_turn);
+                        if handback {
+                            let title = labels.first().map(String::as_str).unwrap_or("Background task");
+                            session.commit_report(new, assistant_turn, title);
+                        } else {
+                            session.commit_messages(new, user_turn, assistant_turn);
+                        }
                         kept = true;
                     }
+                    // Reporting back didn't work out: the reports go into
+                    // the chat as they were written (below).
+                    Err(_) if handback => {}
                     Err(e) if !steps.is_empty() || !out.visible.trim().is_empty() => {
                         // An unfinished task can't be replayed (a tool call
                         // may be unanswered), but the user should still see
@@ -581,7 +709,7 @@ impl Engine {
                         // longer find the history it started from.
                         let alone = lock(&self.in_flight).iter().all(|(i, _)| *i == id);
                         if alone && (matches!(e, ApiError::Cancelled) || e.is_transient()) {
-                            let gist = unfinished_exchange(&notes, req, &out.visible, &steps, e);
+                            let gist = unfinished_exchange(&note_texts, req, &out.visible, &steps, e);
                             session.commit_messages(gist, user_turn, assistant_turn);
                             kept = true;
                         } else {
@@ -590,13 +718,22 @@ impl Engine {
                     }
                     Err(_) => {}
                 }
+                if result.is_err() {
+                    // The agent didn't get to tell the user what the
+                    // background tasks came to: the chat shows their reports.
+                    for n in notes.iter_mut() {
+                        if let Some(turn) = n.turn.clone() {
+                            session.note(turn);
+                            *n = n.clone().shown();
+                        }
+                    }
+                }
                 let _ = self.store.save(&session.transcript);
             }
             if !kept && !notes.is_empty() {
                 // The background reports it carried still have to reach
                 // the agent, with the next message.
-                let again = notes.into_iter().map(|n| (conversation_id.clone(), n));
-                lock(&self.job_notes).extend(again);
+                lock(&self.job_notes).extend(notes);
             }
         }
         result?;
@@ -838,8 +975,8 @@ impl Engine {
                 match self.start_job(task, title.clone(), settings) {
                     Ok((n, name)) => (
                         json!(format!(
-                            "{name} is on it in the background (task {}). The user sees its pointer and gets its report \
-when it's done; you'll be told on their next message. Tell the user in a few words, then carry on.",
+                            "{name} is on it in the background (task {}). The user sees its pointer; its report comes \
+back to you when it's done, and you tell the user then. Say in a few words that it's under way, then carry on.",
                             n - agent::JOB_BASE + 1
                         )),
                         false,
@@ -946,8 +1083,9 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
         self.job_emit(json!({"type": "job", "phase": event["phase"], "job": n, "name": event["name"], "text": text, "kind": event["kind"]}));
     }
 
-    /// A background task is over: its report goes to the user and into its
-    /// conversation, and the agent hears about it on the next message there.
+    /// A background task is over: its report goes back to the agent, who
+    /// tells the user (the app asks for that with a `handback` request, and
+    /// otherwise it rides along with the user's next message).
     fn finish_job(&self, n: usize, report: Result<String, String>) {
         let (name, title, conversation, state, text) = {
             let mut jobs = lock(&self.jobs);
@@ -961,7 +1099,6 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
             j.status = text.clone();
             (j.name, j.title.clone(), j.conversation.clone(), state, text)
         };
-        self.job_emit(json!({"type": "job", "phase": "end", "job": n, "name": name, "title": title, "state": state, "ok": state == "done", "text": text}));
         let turn = Turn {
             role: "assistant".into(),
             text: text.clone(),
@@ -970,7 +1107,9 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
             points: Vec::new(),
             steps: vec![format!("{name}: {title}")],
         };
-        {
+        let note = if state == "stopped" {
+            // Stopped on the user's say-so: it's noted in the chat, and
+            // there is nothing to report.
             let mut session = lock(&self.session);
             if session.transcript.id == conversation {
                 session.note(turn);
@@ -980,18 +1119,38 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
                 t.turns.push(turn);
                 let _ = self.store.save(&t);
             }
-        }
-        lock(&self.job_notes).push((
-            conversation,
-            format!("[Background task \u{201C}{title}\u{201D} ({name}) {state}. Its report, already shown to the user: {text}]"),
-        ));
+            JobNote {
+                conversation,
+                text: format!("[Background task \u{201C}{title}\u{201D} ({name}) was stopped before it was done.]"),
+                label: String::new(),
+                turn: None,
+            }
+        } else {
+            let how = if state == "done" { "is back from" } else { "couldn't finish" };
+            JobNote {
+                conversation,
+                text: format!("[{name}, your background agent, {how} \u{201C}{title}\u{201D}. Its report to you:\n{text}]"),
+                label: format!("{name}: {title}"),
+                turn: Some(turn),
+            }
+        };
+        // In place before the app hears of it and asks for the report.
+        lock(&self.job_notes).push(note);
+        self.job_emit(json!({"type": "job", "phase": "end", "job": n, "name": name, "title": title, "state": state, "ok": state == "done", "text": text}));
     }
 
-    fn take_job_notes(&self, conversation: &str) -> Vec<String> {
+    /// A background task has finished and the user hasn't been told what
+    /// came of it: time for a `handback` request, once the agent is free.
+    pub fn reports_waiting(&self) -> bool {
+        lock(&self.job_notes).iter().any(|n| n.turn.is_some())
+    }
+
+    /// The reports waiting for the agent in `conversation`, or all of them.
+    fn take_job_notes(&self, conversation: &str, all: bool) -> Vec<JobNote> {
         let mut notes = lock(&self.job_notes);
-        let (mine, rest): (Vec<_>, Vec<_>) = notes.drain(..).partition(|(c, _)| c == conversation);
+        let (mine, rest): (Vec<_>, Vec<_>) = notes.drain(..).partition(|n| all || n.conversation == conversation);
         *notes = rest;
-        mine.into_iter().map(|(_, n)| n).collect()
+        mine
     }
 
     /// Stops a running background task; false when there's none.
@@ -1137,6 +1296,11 @@ when it's done; you'll be told on their next message. Tell the user in a few wor
             }
         }
     }
+}
+
+/// Finished tasks' reports as the agent reads them.
+fn note_text(notes: &[JobNote]) -> String {
+    notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>().join("\n")
 }
 
 /// What the model keeps of an exchange that was stopped or failed midway,
@@ -1524,6 +1688,7 @@ mod tests {
                 jpeg_b64: String::new(),
             }],
             sketch: true,
+            handback: false,
         };
         let content = user_content(&req);
         let texts: Vec<_> = content.iter().filter_map(|b| b["text"].as_str()).collect();
@@ -1545,7 +1710,34 @@ mod tests {
     fn ask(engine: &Engine, text: &str) -> Vec<Value> {
         let (id, cancel) = engine.next_request_id();
         let mut events = Vec::new();
-        let request = Request { text: text.into(), screens: Vec::new(), sketch: false };
+        let request = Request { text: text.into(), screens: Vec::new(), sketch: false, handback: false };
+        engine.run(id, &cancel, request, &mut |e| events.push(e));
+        events
+    }
+
+    /// A finished background task's note for the live conversation; with
+    /// `report`, one the user hasn't been told about yet.
+    fn note(engine: &Engine, text: &str, report: Option<&str>) {
+        let turn = report.map(|r| Turn {
+            role: "assistant".into(),
+            text: r.into(),
+            at: now(),
+            screens: 0,
+            points: Vec::new(),
+            steps: vec!["Nova: the form".into()],
+        });
+        lock(&engine.job_notes).push(JobNote {
+            conversation: engine.current_conversation_id(),
+            text: text.into(),
+            label: if report.is_some() { "Nova: the form".into() } else { String::new() },
+            turn,
+        });
+    }
+
+    fn report_back(engine: &Engine) -> Vec<Value> {
+        let (id, cancel) = engine.next_request_id();
+        let mut events = Vec::new();
+        let request = Request { text: String::new(), screens: Vec::new(), sketch: false, handback: true };
         engine.run(id, &cancel, request, &mut |e| events.push(e));
         events
     }
@@ -1596,7 +1788,7 @@ mod tests {
         let (id, cancel) = engine.next_request_id();
         assert!(engine.tell(id, "and sugar"));
         let mut events = Vec::new();
-        let request = Request { text: "Remember I like tea".into(), screens: Vec::new(), sketch: false };
+        let request = Request { text: "Remember I like tea".into(), screens: Vec::new(), sketch: false, handback: false };
         engine.run(id, &cancel, request, &mut |e| events.push(e));
 
         let kinds: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
@@ -1737,7 +1929,7 @@ mod tests {
         });
         let started = std::time::Instant::now();
         let mut events = Vec::new();
-        let request = Request { text: "How do I export this?".into(), screens: Vec::new(), sketch: false };
+        let request = Request { text: "How do I export this?".into(), screens: Vec::new(), sketch: false, handback: false };
         engine.run(id, &cancel, request, &mut |e| events.push(e));
         assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
         // The sentence that was complete was read aloud as it came; the half
@@ -1772,7 +1964,7 @@ mod tests {
         replies.push(fake::says("It is saved."));
         let api = fake::Api::start(replies);
         let (engine, dir) = engine_for(&api);
-        lock(&engine.job_notes).push((engine.current_conversation_id(), "[Background task done.]".into()));
+        note(&engine, "[Background task done.]", None);
         let events = ask(&engine, "Remember I like tea");
         assert_eq!(of_type(&events, "error")[0]["kind"], "overloaded");
         assert_eq!(api.request_count(), 1 + tries, "the failing round was retried");
@@ -1795,7 +1987,7 @@ mod tests {
             fake::says("Fine."),
         ]);
         let (engine, dir) = engine_for(&api);
-        lock(&engine.job_notes).push((engine.current_conversation_id(), "[Background task done.]".into()));
+        note(&engine, "[Background task done.]", None);
         let events = ask(&engine, "Go on");
         assert_eq!(of_type(&events, "error")[0]["kind"], "http");
         // Shown to the user, but not sent again: it may be what the API refused.
@@ -1805,6 +1997,132 @@ mod tests {
         assert_eq!(api.request(2)["messages"][0]["content"][0]["text"], "[Background task done.]");
         assert!(lock(&engine.job_notes).is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_finished_task_is_handed_back_and_the_agent_tells_the_user() {
+        let api = fake::Api::start(vec![
+            fake::says("On it."),
+            fake::says("The form is renewed, Boss. It's in Downloads."),
+            fake::says("Yes."),
+        ]);
+        let (engine, dir) = engine_for(&api);
+        lock(&engine.settings).address = "Boss, King".into();
+        ask(&engine, "Renew the form in the background");
+        assert!(!engine.reports_waiting());
+        note(&engine, "[Nova is back. Its report to you:\nSaved as form.pdf]", Some("Saved as form.pdf"));
+        assert!(engine.reports_waiting());
+        let events = report_back(&engine);
+        assert!(of_type(&events, "error").is_empty(), "{events:?}");
+        assert!(!engine.reports_waiting());
+        // Said by the agent, in its own words.
+        let spoken: Vec<&str> = of_type(&events, "speak").iter().map(|e| e["text"].as_str().unwrap()).collect();
+        assert_eq!(spoken, ["The form is renewed, Boss.", "It's in Downloads."]);
+        let sent = api.request(1);
+        assert!(sent["system"].to_string().contains("call them \u{201C}Boss\u{201D}"), "{}", sent["system"]);
+        assert!(sent["system"].to_string().contains("say \u{201C}King\u{201D} instead"));
+        let told = sent["messages"][2]["content"].as_array().unwrap();
+        assert_eq!(told.len(), 1, "no question and no screenshot: {told:?}");
+        let told = told[0]["text"].as_str().unwrap();
+        assert!(told.starts_with("[Nova is back.") && told.ends_with(REPORT_BACK), "{told}");
+        // The chat shows the agent's words with the task as a step, not the raw report.
+        let turns = engine.store().load(&engine.current_conversation_id()).unwrap().turns;
+        assert_eq!(turns.len(), 3);
+        assert_eq!((turns[2].role.as_str(), turns[2].text.as_str()), ("assistant", "The form is renewed, Boss. It's in Downloads."));
+        assert_eq!(turns[2].steps, ["Nova: the form"]);
+        assert_replayable(&history(&engine));
+        assert!(lock(&engine.job_notes).is_empty());
+        // Nothing left to report: no request is made, and nothing is said.
+        let events = report_back(&engine);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "finished");
+        assert_eq!(api.request_count(), 2);
+        assert_eq!(of_type(&ask(&engine, "Good?"), "done")[0]["text"], "Yes.");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_report_the_agent_cannot_give_is_shown_as_written_and_comes_again() {
+        let api = fake::Api::start(vec![Reply::Refused("messages: too long"), fake::says("It's saved as form.pdf.")]);
+        let (engine, dir) = engine_for(&api);
+        note(&engine, "[Nova is back. Its report to you:\nSaved as form.pdf]", Some("Saved as form.pdf"));
+        let events = report_back(&engine);
+        assert_eq!(of_type(&events, "error").len(), 1);
+        let turns = engine.store().load(&engine.current_conversation_id()).unwrap().turns;
+        assert_eq!(turns.len(), 1);
+        assert_eq!((turns[0].text.as_str(), turns[0].steps.clone()), ("Saved as form.pdf", vec!["Nova: the form".to_string()]));
+        assert!(history(&engine).is_empty());
+        assert!(!engine.reports_waiting(), "it isn't tried over and over");
+        // The agent hears of it with the next message, and that it was shown.
+        ask(&engine, "Anything new?");
+        let told = api.request(1)["messages"][0]["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(told.contains("Saved as form.pdf") && told.contains("has now seen this report"), "{told}");
+        assert!(!told.contains(REPORT_TOO));
+        let turns = engine.store().load(&engine.current_conversation_id()).unwrap().turns;
+        assert_eq!(turns.len(), 3, "the report isn't shown twice");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_report_that_meets_a_question_is_told_with_the_answer() {
+        let api = fake::Api::start(vec![fake::says("Half past two. And the form is renewed.")]);
+        let (engine, dir) = engine_for(&api);
+        note(&engine, "[Nova is back. Its report to you:\nSaved as form.pdf]", Some("Saved as form.pdf"));
+        ask(&engine, "What time is it?");
+        let content = api.request(0)["messages"][0]["content"].clone();
+        assert!(content[0]["text"].as_str().unwrap().ends_with(REPORT_TOO));
+        assert_eq!(content[1]["text"], "What time is it?");
+        let turns = engine.store().load(&engine.current_conversation_id()).unwrap().turns;
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].steps, ["Nova: the form"]);
+        assert!(lock(&engine.job_notes).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_long_talk_about_the_screen_goes_on_with_a_short_history() {
+        use crate::conversation::MAX_HISTORY_IMAGES;
+        // One screenshot more than the history may hold, and then one more question.
+        let last = MAX_HISTORY_IMAGES + 1;
+        let replies = (0..=last).map(|i| fake::says(&format!("a{i}"))).collect();
+        let api = fake::Api::start(replies);
+        let (engine, dir) = engine_for(&api);
+        let shot = || ScreenShot {
+            label: String::new(),
+            has_cursor: true,
+            frame: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            image_w: 100.0,
+            image_h: 100.0,
+            jpeg_b64: "abcd".into(),
+        };
+        let conversation = engine.current_conversation_id();
+        for i in 0..=last {
+            let (id, cancel) = engine.next_request_id();
+            let request = Request { text: format!("q{i}"), screens: vec![shot()], sketch: false, handback: false };
+            engine.run(id, &cancel, request, &mut |_| {});
+        }
+        assert_eq!(engine.current_conversation_id(), conversation, "still the same chat");
+        let images = |n: usize| api.request(n)["messages"].to_string().matches("\"image\"").count();
+        assert_eq!(images(last - 1), MAX_HISTORY_IMAGES + 1);
+        // Rebuilt from its text, with the new screenshot only.
+        assert_eq!(images(last), 1);
+        let sent = api.request(last)["messages"].clone();
+        let sent_messages = sent.as_array().unwrap();
+        assert_replayable(&sent_messages[..sent_messages.len() - 1]);
+        assert_eq!(sent_messages.last().unwrap()["role"], "user");
+        assert!(sent.to_string().contains(&format!("a{}", last - 1)));
+        assert_eq!(engine.store().load(&conversation).unwrap().turns.len(), 2 * (last + 1));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_title_it_uses_comes_from_settings() {
+        assert_eq!(address_prompt(""), "");
+        assert_eq!(address_prompt(" , "), "");
+        let one = address_prompt("Boss");
+        assert!(one.contains("call them \u{201C}Boss\u{201D}") && !one.contains("instead"), "{one}");
+        let two = address_prompt("\u{201C}Boss\u{201D}, King , Chief");
+        assert!(two.contains("say \u{201C}King\u{201D} or \u{201C}Chief\u{201D} instead"), "{two}");
     }
 
     #[test]
@@ -1828,7 +2146,7 @@ mod tests {
         let (engine, dir) = engine_for(&api);
         let (id, cancel) = engine.next_request_id();
         let mut events = Vec::new();
-        let request = Request { text: "Hi".into(), screens: Vec::new(), sketch: false };
+        let request = Request { text: "Hi".into(), screens: Vec::new(), sketch: false, handback: false };
         engine.run(id, &cancel, request, &mut |e| {
             if e["type"] == "started" {
                 panic!("the app's side blew up");

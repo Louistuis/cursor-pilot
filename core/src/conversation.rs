@@ -11,9 +11,15 @@ use serde_json::{json, Value};
 /// Start a fresh conversation after this much silence.
 pub const IDLE_RESET_SECS: u64 = 15 * 60;
 /// History is append-only (thinking blocks must be replayed unchanged), so
-/// instead of trimming old turns we start over once a session gets long.
+/// instead of trimming old turns the history is rebuilt from the text of
+/// the latest turns once it gets long (see `Session::compact`).
 /// Agent tasks add a message pair per tool round, so this is generous.
 pub const MAX_API_MESSAGES: usize = 160;
+/// Screenshots the history may hold, and their size as sent, before it is
+/// rebuilt: every request sends all of them again, so a long talk about
+/// the screen would get slower with each question and end up refused.
+pub const MAX_HISTORY_IMAGES: usize = 16;
+pub const MAX_HISTORY_IMAGE_BYTES: usize = 6 << 20;
 /// Turns replayed when a saved conversation is resumed.
 const RESUME_TURNS: usize = 20;
 
@@ -132,8 +138,27 @@ impl Session {
 
     pub fn is_stale(&self) -> bool {
         !self.transcript.turns.is_empty()
-            && (now().saturating_sub(self.transcript.updated_at) > IDLE_RESET_SECS
-                || self.api_messages.len() >= MAX_API_MESSAGES)
+            && now().saturating_sub(self.transcript.updated_at) > IDLE_RESET_SECS
+    }
+
+    /// The history has grown long, or heavy with screenshots.
+    pub fn is_long(&self) -> bool {
+        if self.api_messages.len() >= MAX_API_MESSAGES {
+            return true;
+        }
+        let (mut images, mut bytes) = (0, 0);
+        for m in &self.api_messages {
+            weigh(m, &mut images, &mut bytes);
+        }
+        images > MAX_HISTORY_IMAGES || bytes > MAX_HISTORY_IMAGE_BYTES
+    }
+
+    /// Carries the conversation on with a short history: the text of its
+    /// latest turns, as when a saved conversation is resumed. Old
+    /// screenshots, tool results and thinking go; the chat keeps everything.
+    pub fn compact(&mut self) {
+        let transcript = std::mem::replace(&mut self.transcript, Session::new().transcript);
+        *self = Session::resume(transcript);
     }
 
     pub fn commit(
@@ -161,6 +186,16 @@ impl Session {
     pub fn note(&mut self, turn: Turn) {
         self.transcript.updated_at = now();
         self.transcript.turns.push(turn);
+    }
+
+    /// Appends an exchange the user didn't start (the agent reporting back
+    /// on a background task): its messages, and only the agent's turn.
+    pub fn commit_report(&mut self, messages: Vec<Value>, assistant_turn: Turn, title: &str) {
+        self.api_messages.extend(messages);
+        if self.transcript.title.is_empty() {
+            self.transcript.title = title_from(title);
+        }
+        self.note(assistant_turn);
     }
 
     pub fn record(&mut self, user_turn: Turn, assistant_turn: Turn) {
@@ -237,6 +272,23 @@ impl Store {
             && id.len() <= 64
             && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
         ok.then(|| self.dir.join(format!("{id}.json")))
+    }
+}
+
+/// Counts the images in a message and the size of their data.
+fn weigh(v: &Value, images: &mut usize, bytes: &mut usize) {
+    match v {
+        Value::Array(items) => items.iter().for_each(|i| weigh(i, images, bytes)),
+        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("image") => {
+            *images += 1;
+            *bytes += map["source"]["data"].as_str().map_or(0, str::len);
+        }
+        Value::Object(map) => {
+            if let Some(content) = map.get("content") {
+                weigh(content, images, bytes);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -354,6 +406,52 @@ mod tests {
         let all = serde_json::to_string(&s.api_messages).unwrap();
         assert!(all.contains("a3\\n\\nsecond report"), "{all}");
         assert_eq!(s.api_messages[0]["content"][0]["text"], "q2");
+    }
+
+    #[test]
+    fn a_history_heavy_with_screenshots_is_rebuilt_from_its_text() {
+        let turn = |role: &str, text: &str| Turn {
+            role: role.into(),
+            text: text.into(),
+            at: 1,
+            screens: 1,
+            points: vec![],
+            steps: vec![],
+        };
+        let shot = json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "abcd"}});
+        let mut s = Session::new();
+        for i in 0..=MAX_HISTORY_IMAGES {
+            assert!(!s.is_long(), "after {i} screenshots");
+            // In the question, or in a tool's result.
+            let messages = if i % 2 == 0 {
+                vec![
+                    json!({"role": "user", "content": [shot.clone(), {"type": "text", "text": format!("q{i}")}]}),
+                    json!({"role": "assistant", "content": [{"type": "text", "text": format!("a{i}")}]}),
+                ]
+            } else {
+                vec![
+                    json!({"role": "user", "content": [{"type": "text", "text": format!("q{i}")}]}),
+                    json!({"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "computer", "input": {}}]}),
+                    json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": [shot.clone()]}]}),
+                    json!({"role": "assistant", "content": [{"type": "text", "text": format!("a{i}")}]}),
+                ]
+            };
+            s.commit_messages(messages, turn("user", &format!("q{i}")), turn("assistant", &format!("a{i}")));
+        }
+        assert!(s.is_long());
+        let (id, turns) = (s.transcript.id.clone(), s.transcript.turns.len());
+        s.compact();
+        assert!(!s.is_long() && !s.is_stale());
+        // The same conversation, with everything still in the chat.
+        assert_eq!((s.transcript.id.clone(), s.transcript.turns.len()), (id, turns));
+        assert_eq!(s.api_messages.len(), RESUME_TURNS);
+        assert!(!serde_json::to_string(&s.api_messages).unwrap().contains("image"));
+        assert_eq!(s.api_messages.last().unwrap()["content"][0]["text"], format!("a{MAX_HISTORY_IMAGES}"));
+        // One huge screenshot counts by its size.
+        let mut s = Session::new();
+        let big = json!({"type": "image", "source": {"type": "base64", "data": "x".repeat(MAX_HISTORY_IMAGE_BYTES + 1)}});
+        s.commit_messages(vec![json!({"role": "user", "content": [big]})], turn("user", "q"), turn("assistant", "a"));
+        assert!(s.is_long());
     }
 
     #[test]

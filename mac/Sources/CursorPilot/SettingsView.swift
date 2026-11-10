@@ -132,6 +132,10 @@ struct SettingsView: View {
             }
 
             Section("Talking") {
+                TextField(text: $model.address, prompt: Text("Boss")) {
+                    Text("What it calls you")
+                    Text("A title or a few, the usual one first, like “Boss, King”. Leave it empty for none.")
+                }
                 Picker("Hold to talk", selection: $model.talkKey) {
                     Text("Control + Option (⌃⌥)").tag(AppModel.TalkKey.controlOption)
                     Text("Custom shortcut").tag(AppModel.TalkKey.custom)

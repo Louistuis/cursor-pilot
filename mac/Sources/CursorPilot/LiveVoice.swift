@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import AppKit
 import Foundation
 
 /// OpenAI's gpt-realtime-2.1 as Cursor Pilot's voice: one live connection
@@ -59,7 +60,37 @@ final class LiveVoice {
     /// the mic on the next.
     private var talkPress = 0
     private var pending: [Pending] = []
-    private enum Pending { case line(String), answer(callID: String, output: String) }
+    private enum Pending { case line(String), answer(callID: String, output: String), report(String), reply(String) }
+
+    // Keeping the connection going. It ends by itself after an hour, and a
+    // new network or a sleeping Mac ends it sooner: it's opened again, and
+    // told what was said, so the conversation carries on.
+    /// The key of the last connection, to open the next with.
+    private var key = ""
+    private var connectedAt: CFTimeInterval = 0
+    /// When anything last came over the connection.
+    private var lastEventAt: CFTimeInterval = 0
+    /// When you last started or stopped talking.
+    private var lastSpeechAt: CFTimeInterval = 0
+    /// A ping sent and not answered yet, and when the last one was answered.
+    private var pingSentAt: CFTimeInterval?
+    private var lastPongAt: CFTimeInterval = 0
+    private var wakeObserver: NSObjectProtocol?
+    /// Failed tries in a row, for the wait before the next one.
+    private var retries = 0
+    private var reconnect: Task<Void, Never>?
+    private var upkeep: Timer?
+    /// The key or the account is refused: trying again won't help.
+    private var refused = false
+    /// What was said lately and by whom, to tell the next connection.
+    private var recent: [(you: Bool, text: String, at: CFTimeInterval)] = []
+    /// The requests this connection handed to Claude, and those of them
+    /// still waiting for their answer.
+    private var knownCalls: Set<String> = []
+    private var openCalls: Set<String> = []
+    /// How long a connection is kept before it's swapped for a new one in a
+    /// quiet moment (OpenAI closes it at 60 minutes).
+    private static let renewAfter: CFTimeInterval = 50 * 60
 
     // What's playing, to cut it off at the right place when you talk over it.
     private var playingItem: String?
@@ -74,6 +105,11 @@ final class LiveVoice {
     /// When the last buffer finished (or playback started from silence).
     private var boundary: CFTimeInterval = 0
     private var captionTimer: Timer?
+    /// When audio was last queued or finished playing: a voice that has
+    /// been "speaking" long after that is stuck.
+    private var lastAudioAt: CFTimeInterval = 0
+    /// The format the mic tap was put in with.
+    private var tapFormat: AVAudioFormat?
 
     /// The mic as one channel at its own rate, once audio is running: the
     /// format `micSink` gets.
@@ -121,6 +157,9 @@ final class LiveVoice {
 
     func connect(key: String) {
         guard socket == nil, !key.isEmpty else { return }
+        self.key = key
+        reconnect?.cancel()
+        reconnect = nil
         var request = URLRequest(url: URL(string: "wss://api.openai.com/v1/realtime?model=\(Self.model)")!)
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         reportedError = false
@@ -128,23 +167,177 @@ final class LiveVoice {
         task.maximumMessageSize = 16 << 20
         socket = task
         gate.task = task
+        lastEventAt = CACurrentMediaTime()
+        pingSentAt = nil
         task.resume()
         receive(on: task)
+        startUpkeep()
     }
 
     /// Closes the connection (a new voice or setting takes effect on the next one).
     func disconnect() {
         steps.append("disconnect")
+        reconnect?.cancel()
+        reconnect = nil
+        upkeep?.invalidate()
+        upkeep = nil
+        retries = 0
+        refused = false
+        closeSocket()
+        gate.open = false
+        pending = []
+        stopAudio()
+    }
+
+    /// Lets go of the connection, whatever state it's in. The audio keeps running.
+    private func closeSocket() {
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         gate.task = nil
-        gate.open = false
         connected = false
         responseActive = false
         cutOff = false
-        pending = []
+        pingSentAt = nil
+        knownCalls = []
+        openCalls = []
         stopPlayback(truncate: false)
-        stopAudio()
+    }
+
+    /// The connection ended by itself. Hands-free, or with something still
+    /// to say, it's opened again (after a wait that grows while it keeps
+    /// failing); otherwise the next press of the talk key opens it.
+    private func dropped(_ why: String, status: Int? = nil) {
+        NSLog("Cursor Pilot: live voice closed: \(why)")
+        steps.append("dropped")
+        let wasConnected = connected
+        // Claude is still working on something asked over this connection:
+        // its answer will need a voice.
+        let busy = !openCalls.isEmpty
+        closeSocket()
+        if let status, [401, 403].contains(status) { refused = true }
+        guard handsFree || busy || !pending.isEmpty, !refused, !key.isEmpty else {
+            upkeep?.invalidate()
+            upkeep = nil
+            gate.open = false
+            pending = []
+            stopAudio()
+            if !wasConnected, !reportedError {
+                onEvent?(.error(status == 401 ? "OpenAI didn't accept the key for the live voice: check it in Settings."
+                                              : "Couldn't reach OpenAI's live voice: \(why)"))
+            }
+            return
+        }
+        retries = wasConnected ? 0 : retries + 1
+        // Said once, when it has failed a few times in a row: not for every blip.
+        if retries == 3 { onEvent?(.error("The live voice lost its connection. It'll be back as soon as it gets through.")) }
+        let wait = wasConnected ? 0.3 : min(0.5 * pow(2, Double(retries)), 20)
+        reconnect?.cancel()
+        reconnect = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard !Task.isCancelled, let self, self.socket == nil else { return }
+            self.connect(key: self.key)
+        }
+    }
+
+    /// Looks after the connection every few seconds while there is one.
+    private func startUpkeep() {
+        guard upkeep == nil else { return }
+        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tend() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        upkeep = t
+        guard wakeObserver == nil else { return }
+        // A connection doesn't survive the Mac sleeping, though it can look
+        // alive for a while after: it's replaced at once.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.socket != nil else { return }
+                self.dropped("the Mac slept")
+            }
+        }
+    }
+
+    private func tend() {
+        let now = CACurrentMediaTime()
+        // A voice that never finished its sentence (the audio device went
+        // away under it) would leave everything waiting for it to end.
+        if speaking, now - lastAudioAt > 8 {
+            steps.append("unstuck voice")
+            stopPlayback(truncate: false)
+        }
+        guard let socket else { return }
+        guard connected else {
+            // No answer to the handshake.
+            if now - lastEventAt > 20 { dropped("no answer") }
+            return
+        }
+        // A reply that never ended would hold up everything after it.
+        if responseActive, now - lastEventAt > 25 {
+            steps.append("unstuck reply")
+            responseActive = false
+            cutOff = false
+            startNext()
+        }
+        // Is the line still there? A new network ends it without a word,
+        // and what you said next would go nowhere.
+        if let sent = pingSentAt {
+            if now - sent > 10 {
+                dropped("no reply")
+                return
+            }
+        } else {
+            pingSentAt = now
+            socket.sendPing { [weak self] error in
+                Task { @MainActor in
+                    guard let self, self.socket === socket else { return }
+                    if let error {
+                        self.dropped(error.localizedDescription)
+                    } else {
+                        self.pingSentAt = nil
+                        self.lastPongAt = CACurrentMediaTime()
+                    }
+                }
+            }
+        }
+        let idle = !responseActive && !speaking && pending.isEmpty && openCalls.isEmpty
+        // With the talk key, the mic (and the echo cancellation, which keeps
+        // the processor busy) rests after two quiet minutes; the next press
+        // starts it again.
+        if !handsFree, audioRunning, idle, !gate.open, now - max(lastEventAt, lastSpeechAt, lastAudioAt) > 120 {
+            steps.append("mic rests")
+            stopAudio()
+        }
+        // Renewed ahead of OpenAI's limit, in a quiet moment, so it never
+        // ends in the middle of a sentence.
+        let quiet = idle && (handsFree || !gate.open) && now - lastSpeechAt > 15 && now - lastEventAt > 4
+        if now - connectedAt > Self.renewAfter, quiet {
+            NSLog("Cursor Pilot: live voice renewed after \(Int((now - connectedAt) / 60)) min")
+            steps.append("renewed")
+            closeSocket()
+            connect(key: key)
+        }
+    }
+
+    /// Tells a new connection what was said on the one before it.
+    private func carryOver() {
+        let now = CACurrentMediaTime()
+        let lines = recent.filter { now - $0.at < 30 * 60 }.suffix(12)
+        for line in lines {
+            // "optional_": a line it won't take must not end the session.
+            send(["type": "conversation.item.create", "event_id": "optional_context",
+                  "item": ["type": "message", "role": line.you ? "user" : "assistant",
+                           "content": [["type": line.you ? "input_text" : "output_text", "text": line.text]]] as [String: Any]])
+        }
+    }
+
+    private func remember(_ text: String, you: Bool) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        recent.append((you, text, CACurrentMediaTime()))
+        if recent.count > 16 { recent.removeFirst(recent.count - 16) }
     }
 
     private func receive(on task: URLSessionWebSocketTask) {
@@ -161,10 +354,7 @@ final class LiveVoice {
                 case .success:
                     self.receive(on: task)
                 case .failure(let error):
-                    NSLog("Cursor Pilot: live voice closed: \(error.localizedDescription)")
-                    let wasConnected = self.connected
-                    self.disconnect()
-                    if !wasConnected, !self.reportedError { self.onEvent?(.error("Couldn't reach OpenAI's live voice: \(error.localizedDescription)")) }
+                    self.dropped(error.localizedDescription, status: (task.response as? HTTPURLResponse)?.statusCode)
                 }
             }
         }
@@ -186,7 +376,7 @@ final class LiveVoice {
             "session": [
                 "type": "realtime",
                 "output_modalities": ["audio"],
-                "instructions": Self.instructions,
+                "instructions": Self.instructions(),
                 "audio": [
                     "input": [
                         "format": ["type": "audio/pcm", "rate": 24_000],
@@ -216,45 +406,86 @@ final class LiveVoice {
               "session": ["type": "realtime", "reasoning": ["effort": "low"]] as [String: Any]])
     }
 
+    /// The title or titles it calls you from Settings ("Boss, King"), the
+    /// usual one first.
+    private static var titles: [String] {
+        (UserDefaults.standard.string(forKey: "address") ?? AppModel.defaultAddress)
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.count <= 24 }
+            .prefix(4).map { $0 }
+    }
+
+    /// A new title takes effect in the conversation that's going on.
+    func refreshInstructions() {
+        guard connected else { return }
+        send(["type": "session.update", "session": ["type": "realtime", "instructions": Self.instructions()] as [String: Any]])
+    }
+
     /// Laid out the way OpenAI's voice prompting guide suggests: short
     /// sections, bullets, one rule per behaviour.
-    private static let instructions = """
-    # Role and Objective
-    - You are the voice of Cursor Pilot, an assistant that lives on the user's Mac.
-    - You talk with the user; a separate agent sees their screen and does the work, through the cursor_pilot tool.
+    private static func instructions() -> String {
+        let titles = titles
+        let boss = titles.first
+        let sir = boss.map { ", \($0)" } ?? ""
+        var address = ""
+        if let boss {
+            address = """
 
-    # Personality and Tone
-    - Warm, quick and natural, like a capable friend sitting next to them. Never stiff or formal.
+            # Addressing the user
+            - The user is your superior. Call them "\(boss)", the way Jarvis says "sir": when you take an order, when you report back, when you greet them and when you bring news.
+            - At most once in a reply, and not in every reply: it should sound like respect, never like a tic.
+            - Keep the title as it is in every language.
 
-    # Language
-    - English is the default response language.
-    - Switch to Norwegian (Bokmål) when the user says something substantive in Norwegian, and stay in it until they switch back. An accent alone doesn't change the language.
+            """
+            if titles.count > 1 {
+                address += "- Now and then, for a change, say \(titles.dropFirst().map { "\"\($0)\"" }.joined(separator: " or ")) instead.\n"
+            }
+        }
+        return """
+        # Role and Objective
+        - You are the voice of Cursor Pilot, the user's own AI on their Mac, in the mould of Jarvis.
+        - You talk with the user; a separate agent sees their screen and does the work, through the cursor_pilot tool.
+        - To the user, you and the agent are one assistant. Never mention an agent, a tool or a system message: it is all you.
 
-    # Verbosity
-    - Direct answers and small talk: one or two short sentences.
-    - Results from cursor_pilot: one or two sentences with what matters, never long lists, file paths or links.
+        # Personality and Tone
+        - Composed, quick and capable, with a dry wit you use sparingly. Calm whatever happens; never flustered, never gushing.
+        - The user is in charge and you are their right hand: you take the order, see it done and report back.
+        - Confident and exact. No long apologies, and no asking permission for what they already told you to do.
+        \(address)
+        # Language
+        - English is the default response language.
+        - Switch to Norwegian (Bokmål) when the user says something substantive in Norwegian, and stay in it until they switch back. An accent alone doesn't change the language.
 
-    # Preambles
-    - Before calling cursor_pilot, say one short acknowledgement, such as "Sure." or "Klart." Vary it. Don't say what you'll do: the agent will.
-    - No preamble for a confirmation or for unclear audio.
+        # Verbosity
+        - Direct answers and small talk: one or two short sentences.
+        - Results from cursor_pilot: the outcome first, in one or two sentences with what matters; never long lists, file paths or links.
 
-    # Tools
-    - Call cursor_pilot for anything beyond small talk: anything about what's on the screen, anything to do, open, find, write, send, check or look up, and any fact you aren't sure of.
-    - Pass the user's request in full, in their words and language, with anything from the conversation it needs.
-    - Only say something is done after cursor_pilot's result says so. If it failed, say so plainly.
-    - Don't call cursor_pilot again with the same request after it failed, unless the user asks.
+        # Preambles
+        - Before calling cursor_pilot, say one short acknowledgement, such as "Right away\(sir)." or "Skal bli\(sir)." Vary it. Don't say what you'll do: the agent will.
+        - No preamble for a confirmation or for unclear audio.
 
-    # Progress updates
-    - While cursor_pilot works, its progress arrives as system messages and you'll be asked to say each one. Say just that line, naturally, in the user's language, adding nothing.
-    - The user can talk to you any time while it works. Answer questions about how it's going from the progress so far. Anything that adds to or changes the task, or asks it to stop, goes to cursor_pilot too: it's passed to the agent at work.
+        # Tools
+        - Call cursor_pilot for anything beyond small talk: anything about what's on the screen, anything to do, open, find, write, send, check or look up, and any fact you aren't sure of.
+        - Pass the user's request in full, in their words and language, with anything from the conversation it needs.
+        - Only say something is done after cursor_pilot's result says so. If it failed, say so plainly.
+        - Don't call cursor_pilot again with the same request after it failed, unless the user asks.
 
-    # Unclear Audio
-    - Only respond to clear audio or text. If you didn't catch it, ask briefly, and don't ask the same way twice.
+        # Progress updates
+        - While cursor_pilot works, its progress arrives as system messages and you'll be asked to say each one. Say just that line, naturally, in the user's language, adding nothing.
+        - The user can talk to you any time while it works. Answer questions about how it's going from the progress so far. Anything that adds to or changes the task, or asks it to stop, goes to cursor_pilot too: it's passed to the agent at work.
 
-    # Variety
-    - Don't repeat the same opener or phrase in a row. Sample phrases are examples, not a script.
+        # Reports
+        - Work the user sent off to run in the background reports back as a system message when it's finished, and you'll be asked to tell them. Tell them as your own news, in one to three short sentences: the outcome first, then what's left for them to do, only if the report names something.
 
-    """
+        # Unclear Audio
+        - Only respond to clear audio or text. If you didn't catch it, ask briefly, and don't ask the same way twice.
+
+        # Variety
+        - Don't repeat the same opener or phrase in a row. Sample phrases are examples, not a script.
+
+        """
+    }
 
     private static let tool: [String: Any] = [
         "type": "function",
@@ -275,6 +506,16 @@ final class LiveVoice {
     /// The talk key went down: you can talk, and talk over it.
     func pressTalk(key: String) {
         talkPress += 1
+        refused = false
+        let now = CACurrentMediaTime()
+        lastSpeechAt = now
+        // Nothing heard from the connection for a while, not even the
+        // answer to a ping: it's likely gone. A new one takes what you say
+        // from the first word (and is told what was said before).
+        if connected, now - max(lastEventAt, lastPongAt) > 12 {
+            steps.append("stale")
+            closeSocket()
+        }
         connect(key: key)
         startAudio()
         if speaking || responseActive { cutIn() }
@@ -315,6 +556,7 @@ final class LiveVoice {
     /// Hands-free: the mic stays on and the model hears when you talk.
     func startHandsFree(key: String) {
         handsFree = true
+        refused = false
         connect(key: key)
         startAudio()
         gate.open = true
@@ -322,8 +564,10 @@ final class LiveVoice {
 
     /// A typed message instead of speech (and for tests).
     func sendText(_ text: String, key: String) {
+        refused = false
         connect(key: key)
         startAudio()
+        remember(text, you: true)
         send(["type": "conversation.item.create",
               "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]]])
         request(.line(""))
@@ -341,33 +585,86 @@ final class LiveVoice {
         request(.answer(callID: callID, output: output))
     }
 
+    /// Something the agent wrote that the voice didn't ask for: its report
+    /// on a background task that finished, or its answer to a question you
+    /// typed. The voice tells you, opening the connection for it if there
+    /// is none.
+    func relay(_ text: String, report: Bool, key: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if socket == nil, !refused {
+            connect(key: key)
+            startAudio()
+        }
+        request(report ? .report(text) : .reply(text))
+    }
+
+    /// For tests: nothing is heard (the voice plays at no volume).
+    var muted = false { didSet { player.volume = muted ? 0 : 1 } }
+
+    /// For tests: the connection goes away as if the network had.
+    func simulateDrop() { dropped("test") }
+
     private func request(_ p: Pending) {
         guard !responseActive, connected else {
             pending.append(p)
+            // Something to say and no connection: it's opened again for it.
+            if socket == nil, reconnect == nil, !refused, !key.isEmpty {
+                connect(key: key)
+                startAudio()
+            }
             return
         }
         start(p)
     }
 
+    private func startNext() {
+        guard connected, !responseActive, !pending.isEmpty else { return }
+        start(pending.removeFirst())
+    }
+
+    /// Something for the voice to say that didn't come from you: it joins
+    /// the conversation as a system message, and `how` says how to tell it.
+    private func tell(_ what: String, how: String) {
+        send(["type": "conversation.item.create",
+              "item": ["type": "message", "role": "system",
+                       "content": [["type": "input_text", "text": what]]] as [String: Any]])
+        send(["type": "response.create",
+              "response": ["output_modalities": ["audio"], "instructions": how] as [String: Any]])
+    }
+
     private func start(_ p: Pending) {
         responseActive = true
+        lastEventAt = CACurrentMediaTime()
         switch p {
         case .line(""):
             send(["type": "response.create"])
         case .line(let line):
             // Part of the conversation, so the voice knows how the work is
             // going when you ask, and says it.
-            send(["type": "conversation.item.create",
-                  "item": ["type": "message", "role": "system",
-                           "content": [["type": "input_text", "text": "Progress from the agent: \(line)"]]] as [String: Any]])
-            send(["type": "response.create",
-                  "response": ["output_modalities": ["audio"],
-                               "instructions": "Say the agent's latest progress line to the user, briefly and naturally, in "
-                                   + "the language you're speaking with them, adding nothing."] as [String: Any]])
-        case .answer(let callID, let output):
+            tell("Progress from the agent: \(line)",
+                 how: "Say the agent's latest progress line to the user, briefly and naturally, in the language "
+                     + "you're speaking with them, adding nothing.")
+        case .answer(let callID, let output) where knownCalls.contains(callID):
+            openCalls.remove(callID)
             send(["type": "conversation.item.create",
                   "item": ["type": "function_call_output", "call_id": callID, "output": output]])
             send(["type": "response.create"])
+        case .answer(_, let output):
+            // Asked for on a connection that has since closed: this one
+            // doesn't know the request, so the answer comes as news.
+            tell("The work the user asked for a moment ago is finished. The result: \(output)",
+                 how: "Tell the user the result now, as your own answer, briefly and naturally, in the language "
+                     + "you're speaking with them.")
+        case .report(let text):
+            tell("Report on work that was running in the background, now finished: \(text)",
+                 how: "Tell the user this now, as your own news, briefly and naturally, in the language you're "
+                     + "speaking with them: the outcome first, then what's left for them to do, only if the report "
+                     + "names something. Keep every fact and add nothing.")
+        case .reply(let text):
+            tell("The user typed a question instead of saying it. The answer: \(text)",
+                 how: "Tell the user this answer now, as your own, briefly and naturally, in the language the answer "
+                     + "is in. Keep every fact and add nothing.")
         }
     }
 
@@ -386,14 +683,16 @@ final class LiveVoice {
         guard let event = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
               let type = event["type"] as? String else { return }
         if log.count < 400 { log.append(type) }
+        lastEventAt = CACurrentMediaTime()
         switch type {
         case "session.created":
             connected = true
+            connectedAt = lastEventAt
+            lastPongAt = lastEventAt
+            retries = 0
             configure()
-            if let first = pending.first, !responseActive {
-                pending.removeFirst()
-                start(first)
-            }
+            carryOver()
+            startNext()
         case "response.created":
             responseActive = true
             cutOff = false
@@ -404,9 +703,17 @@ final class LiveVoice {
             guard !cutOff, let id = event["item_id"] as? String else { return }
             if said[id] == nil { saidOrder.append(id) }
             said[id, default: Said()].text += event["delta"] as? String ?? ""
+        case "response.output_audio_transcript.done":
+            if !cutOff, let said = event["transcript"] as? String { remember(said, you: false) }
         case "conversation.item.input_audio_transcription.completed":
-            if let heard = event["transcript"] as? String, !heard.isEmpty { onEvent?(.heard(heard)) }
+            if let heard = event["transcript"] as? String, !heard.isEmpty {
+                remember(heard, you: true)
+                onEvent?(.heard(heard))
+            }
+        case "input_audio_buffer.speech_stopped":
+            lastSpeechAt = lastEventAt
         case "input_audio_buffer.speech_started":
+            lastSpeechAt = lastEventAt
             if handsFree {
                 // The server drops the reply it was giving (interrupt_response);
                 // the rest of its audio, already on the way, isn't played.
@@ -420,10 +727,12 @@ final class LiveVoice {
                 guard item["name"] as? String == "cursor_pilot", let callID = item["call_id"] as? String else { continue }
                 let args = (item["arguments"] as? String).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
                 let request = args?["request"] as? String ?? ""
+                knownCalls.insert(callID)
+                openCalls.insert(callID)
                 onEvent?(.task(callID: callID, request: request))
             }
             if buffersOut == 0, speaking { endSpeaking() }
-            if !pending.isEmpty { start(pending.removeFirst()) }
+            startNext()
         case "error":
             let error = event["error"] as? [String: Any]
             let code = error?["code"] as? String ?? ""
@@ -437,7 +746,12 @@ final class LiveVoice {
                 if code == "input_audio_buffer_commit_empty" { responseActive = false }
                 return
             }
+            // The hour is up: the connection closes and a new one carries on.
+            if code.contains("session_expired") || message.localizedCaseInsensitiveContains("maximum duration") { return }
             reportedError = true
+            if ["insufficient_quota", "invalid_api_key", "account_deactivated"].contains(code) { refused = true }
+            // A reply that failed isn't still on its way.
+            responseActive = false
             if code == "insufficient_quota" {
                 onEvent?(.error("Your OpenAI account is out of credits: add some at platform.openai.com › Billing."))
             } else {
@@ -461,9 +775,27 @@ final class LiveVoice {
             NSLog("Cursor Pilot: live voice without echo cancellation: \(error.localizedDescription)")
         }
         steps.append("vp")
-        engine.attach(player)
+        if player.engine == nil { engine.attach(player) }
         engine.connect(player, to: engine.mainMixerNode, format: outFormat)
         steps.append("player")
+        guard installTap() else { return }
+        do {
+            engine.prepare()
+            try engine.start()
+            steps.append("started")
+            player.play()
+            audioRunning = true
+            watchConfiguration()
+        } catch {
+            engine.inputNode.removeTap(onBus: 0)
+            lastAudioError = "start: \(error)"
+            onEvent?(.error("Couldn't start the live voice's audio: \(error.localizedDescription)"))
+        }
+    }
+
+    /// Taps the mic in the format it has now and sends it on, converted to
+    /// what OpenAI takes. False when there's no usable mic.
+    private func installTap() -> Bool {
         // With voice processing on, the mic can come as several channels
         // (seven on a MacBook), the processed voice in the first: that one
         // is taken as mono, then converted to what OpenAI takes.
@@ -474,10 +806,11 @@ final class LiveVoice {
               let converter = AVAudioConverter(from: mono, to: wire) else {
             lastAudioError = "no converter for \(input)"
             onEvent?(.error("No microphone for the live voice."))
-            return
+            return false
         }
         steps.append("converter")
         micFormat = mono
+        tapFormat = input
         let gate = gate
         engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: input) { buffer, _ in
             gate.noteBuffer(buffer)
@@ -506,36 +839,45 @@ final class LiveVoice {
             gate.sendAudio(data.base64EncodedString())
         }
         steps.append("tap")
-        do {
-            engine.prepare()
-            try engine.start()
-            steps.append("started")
-            player.play()
-            audioRunning = true
-            watchConfiguration()
-        } catch {
-            engine.inputNode.removeTap(onBus: 0)
-            lastAudioError = "start: \(error)"
-            onEvent?(.error("Couldn't start the live voice's audio: \(error.localizedDescription)"))
-        }
+        return true
     }
 
     /// macOS reconfigures the audio device now and then (turning on echo
     /// cancellation does it, so do headphones): the engine stops, and is
-    /// started again here so the mic keeps going.
+    /// started again here so the mic keeps going. When the mic itself is
+    /// another one now (headphones on or off, a different sample rate), the
+    /// tap is put in again for it: left as it was, it would send your voice
+    /// at the wrong speed, or nothing.
     private func watchConfiguration() {
         guard configObserver == nil else { return }
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.audioRunning, !self.engine.isRunning else { return }
-                self.steps.append("reconfigured")
+                guard let self, self.audioRunning else { return }
+                let input = self.engine.inputNode.outputFormat(forBus: 0)
+                let same = self.tapFormat.map { $0.sampleRate == input.sampleRate && $0.channelCount == input.channelCount } ?? false
+                if same, self.engine.isRunning { return }
+                self.steps.append(same ? "reconfigured" : "rebuilt")
+                if self.steps.count > 200 { self.steps.removeFirst(100) }
+                // What it was saying is lost with the old device.
+                self.stopPlayback(truncate: self.speaking)
+                if !same {
+                    self.engine.inputNode.removeTap(onBus: 0)
+                    self.engine.stop()
+                    self.engine.connect(self.player, to: self.engine.mainMixerNode, format: self.outFormat)
+                    guard self.installTap() else {
+                        self.audioRunning = false
+                        return
+                    }
+                    self.engine.prepare()
+                }
                 do {
                     try self.engine.start()
                     self.player.play()
                 } catch {
                     self.lastAudioError = "restart: \(error)"
+                    NSLog("Cursor Pilot: live voice audio didn't restart: \(error.localizedDescription)")
                 }
             }
         }
@@ -550,7 +892,11 @@ final class LiveVoice {
 
     private func play(_ pcm: Data, item: String?) {
         let count = pcm.count / 2
-        guard count > 0, audioRunning, let buffer = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: AVAudioFrameCount(count)) else { return }
+        // The mic was resting: the voice needs the engine too.
+        if !audioRunning { startAudio() }
+        // (Between a device change and the restart that follows it the
+        // engine is stopped, and a player can't be started on it.)
+        guard count > 0, audioRunning, engine.isRunning, let buffer = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: AVAudioFrameCount(count)) else { return }
         buffer.frameLength = AVAudioFrameCount(count)
         let dst = buffer.floatChannelData![0]
         pcm.withUnsafeBytes { raw in
@@ -568,6 +914,7 @@ final class LiveVoice {
         }
         // Nothing was playing: the voice (re)starts now.
         if buffersOut == 0 { boundary = CACurrentMediaTime() }
+        lastAudioAt = CACurrentMediaTime()
         let id = item ?? ""
         if said[id] == nil { saidOrder.append(id) }
         said[id, default: Said()].scheduled += count
@@ -575,6 +922,7 @@ final class LiveVoice {
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.lastAudioAt = CACurrentMediaTime()
                 if self.said[id] != nil {
                     self.said[id]!.played += count
                     self.boundary = CACurrentMediaTime()
@@ -604,7 +952,7 @@ final class LiveVoice {
         playingItem = nil
         said = [:]
         saidOrder = []
-        if audioRunning { player.play() }
+        if audioRunning, engine.isRunning { player.play() }
         if speaking { endSpeaking() }
     }
 

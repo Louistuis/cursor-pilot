@@ -53,6 +53,9 @@ curl -fsSL https://cursorpilot.lou15.com/install.sh | bash
 
 ## What it does
 
+- **Your own Jarvis.** Composed, quick and a step ahead, it takes the order,
+  gets it done and reports back, and it calls you "Boss" (or whatever you
+  choose in Settings).
 - **Answers about what's on your screen.** Ask out loud from any app. It sees
   every display, answers in a natural voice, and its glass buddy cursor flies
   over to point, circle or draw on the thing you mean.
@@ -64,7 +67,8 @@ curl -fsSL https://cursorpilot.lou15.com/install.sh | bash
   its own so yours stays free.
 - **Works while you keep talking.** Bigger jobs go to background agents, up to
   three at once, and you can talk to it mid-task to add to or change what it's
-  doing.
+  doing. They never talk to you themselves: each reports back to the one
+  assistant you talk to, which tells you what came of it in its own voice.
 - **Lives in the notch.** When the work doesn't need your screen, the buddy
   waits in the notch, which lights up while it works. Live captions follow its
   voice word by word.

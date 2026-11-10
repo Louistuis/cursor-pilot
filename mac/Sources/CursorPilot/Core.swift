@@ -12,11 +12,13 @@ struct CoreSettings: Encodable {
     var access: String
     /// How it works on the Mac: "person" or "background".
     var input: String
+    /// What it calls you: "Boss", or a few titles with the usual one first.
+    var address: String
 
     enum CodingKeys: String, CodingKey {
         case apiKey = "api_key"
         case baseURL = "base_url"
-        case model, effort, access, input
+        case model, effort, access, input, address
     }
 }
 
@@ -44,6 +46,8 @@ struct CoreRequest: Encodable {
     var screens: [ScreenShotPayload]
     /// The user drew on the screen before asking.
     var sketch = false
+    /// Not a question: the agent reports on background tasks that finished.
+    var handback = false
 }
 
 struct DrawingRecord: Decodable, Identifiable, Hashable {
@@ -227,6 +231,9 @@ final class Core: @unchecked Sendable {
     func attachJobs() { cp_core_set_job_callback(handle, coreJobCallback, nil) }
 
     func stopJob(_ job: Int) { _ = cp_core_stop_job(handle, UInt64(job)) }
+
+    /// A background task finished and you haven't been told what came of it.
+    var reportsWaiting: Bool { cp_core_reports_waiting(handle) }
 
     func newConversation() { cp_core_new_conversation(handle) }
 

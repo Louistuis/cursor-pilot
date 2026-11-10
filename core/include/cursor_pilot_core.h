@@ -34,6 +34,10 @@ void cp_core_set_job_callback(CPCore *core, CPEventCallback callback, void *ctx)
 /* Stops a background task by its agent number; false when none is running. */
 bool cp_core_stop_job(CPCore *core, uint64_t job);
 
+/* True when a background task has finished and the user hasn't been told:
+   a request with "handback": true has the agent report on it. */
+bool cp_core_reports_waiting(CPCore *core);
+
 void cp_core_new_conversation(CPCore *core);
 char *cp_core_current_conversation(CPCore *core);
 char *cp_core_list_conversations(CPCore *core);

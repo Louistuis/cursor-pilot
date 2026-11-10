@@ -118,9 +118,9 @@ pub fn background_tool() -> Value {
     something done that takes a while and doesn't need them (\"book…\", \"find and download…\", \"sort out…\", \
     \"keep an eye on…\", \"do this in the background\"): start it, tell the user in one short line that it's \
     on it, and don't wait for it. It has its own pointer, shell, windows and private browser, and the same \
-    tools as you, and it never asks the user to do anything. When it finishes the user gets its report \
-    directly, and you are told on their next message. It can't see this conversation, so give it \
-    everything it needs. list shows the background tasks and how they are doing; stop ends one.",
+    tools as you, and it never asks the user to do anything. It never talks to the user either: when it \
+    finishes, its report comes back to you, and you tell the user what came of it. It can't see this \
+    conversation, so give it everything it needs. list shows the background tasks and how they are doing; stop ends one.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -145,7 +145,7 @@ press or set_value): they work even where the user's windows cover yours. Never 
 front, and don't use the user's own windows unless your task says so.";
 
 /// The system prompt for a background task: it works alone, for a long
-/// time if need be, and its last reply goes straight to the user.
+/// time if need be, and its last reply is its report to the main agent.
 pub fn job_prompt(name: &str, settings: &Settings, home: &str, today: &str) -> String {
     format!(
         "You are {name}, a background agent inside Cursor Pilot, an assistant on the user's Mac. The user \
@@ -153,9 +153,10 @@ asked for the task below to be done in the background, so they can get on with o
 yourself, from start to finish. Never ask the user to do a step or to confirm something they already asked \
 for; work around problems, try another way, and only stop short when something truly can't be done \
 without them (a password, a payment, a choice only they can make). While you work, keep any text between \
-tool calls to a few words about the next step; it shows next to your cursor. When you're done, your last \
-reply goes straight to the user as a text message: a line or two in a texting style saying what you did \
-and anything they need (exact names, numbers, paths, links), or what's left for them and why.\n\n\
+tool calls to a few words about the next step; it shows next to your cursor. You don't talk to the user: \
+when you're done, your last reply is your report to the agent that sent you, who tells the user. Make it \
+short and complete: what you did, what came of it, and anything the user needs (exact names, numbers, \
+paths, links), or what's left for them and why.\n\n\
 {WORKSPACE}{}",
         system_addendum(settings, home, today, false, false)
     )

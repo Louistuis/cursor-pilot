@@ -147,9 +147,14 @@ until you turn it on. Tools, all run by the app on your Mac:
   agent that does all of it on its own while you carry on and keep talking.
   It works like a helper (own cursor, shell, windows and private browser)
   but outlives the request: the main agent answers at once, a card in Home
-  shows what the task is doing with a stop button, and when it's done you
-  hear a sound, its report lands in the chat and is read aloud, and the
-  main agent is told on your next message. Up to three run at once.
+  shows what the task is doing with a stop button. It never talks to you:
+  when it's done you hear a sound and its report goes back to the main
+  agent (a request with `handback` set, sent as soon as nothing else is
+  being asked or said), which tells you what came of it in its own words
+  and voice, the live voice included. A report that arrives while you're
+  asking something, or while the agent is at work, rides along with that
+  instead; if the agent can't be reached, the report shows in the chat as
+  written. Up to three run at once.
 - **web_search** and **web_fetch** (reads a page in full) on the models
   that support them.
 - **plan** (ours): a checklist Claude keeps for tasks with several steps;

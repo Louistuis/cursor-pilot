@@ -72,6 +72,22 @@ final class AppModel: ObservableObject {
     @Published var model: String { didSet { defaults.set(model, forKey: "model"); configureCore() } }
     @Published var effort: String { didSet { defaults.set(effort, forKey: "effort"); configureCore() } }
     @Published var speakReplies: Bool { didSet { defaults.set(speakReplies, forKey: "speakReplies") } }
+    /// What it calls you: one title or a few ("Boss, King"), the usual one first.
+    @Published var address: String {
+        didSet {
+            defaults.set(address, forKey: "address")
+            // Once you've stopped typing.
+            addressApply?.cancel()
+            addressApply = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(700))
+                guard !Task.isCancelled, let self else { return }
+                configureCore()
+                LiveVoice.shared.refreshInstructions()
+            }
+        }
+    }
+    static let defaultAddress = "Boss, King"
+    private var addressApply: Task<Void, Never>?
     @Published var showBuddy: Bool { didSet { defaults.set(showBuddy, forKey: "showBuddy"); applyBuddyVisibility() } }
     @Published var showNotch: Bool { didSet { defaults.set(showNotch, forKey: "showNotch"); applyNotchVisibility() } }
     @Published var showGlow: Bool { didSet { defaults.set(showGlow, forKey: "showGlow"); glow.enabled = showGlow } }
@@ -217,6 +233,7 @@ final class AppModel: ObservableObject {
         model = defaults.string(forKey: "model") ?? Self.models[0]
         effort = defaults.string(forKey: "effort") ?? "low"
         speakReplies = defaults.object(forKey: "speakReplies") as? Bool ?? true
+        address = defaults.string(forKey: "address") ?? Self.defaultAddress
         showBuddy = defaults.object(forKey: "showBuddy") as? Bool ?? true
         showNotch = defaults.object(forKey: "showNotch") as? Bool ?? true
         showGlow = defaults.object(forKey: "showGlow") as? Bool ?? true
@@ -269,6 +286,7 @@ final class AppModel: ObservableObject {
                                                   word: NSRange(location: (spoken.sentence as NSString).length, length: 0))
             }
             settleIfDone()
+            deliverReports()
         }
         speaker.onSentence = { [weak self] number, text in
             guard let self else { return }
@@ -380,7 +398,8 @@ final class AppModel: ObservableObject {
     private func configureCore() {
         core.configure(CoreSettings(apiKey: activeKey,
                                     baseURL: usesAbliteration ? "https://api.abliteration.ai" : "https://api.anthropic.com",
-                                    model: model, effort: effort, access: macAccess ? "on" : "off", input: inputMode))
+                                    model: model, effort: effort, access: macAccess ? "on" : "off", input: inputMode,
+                                    address: address))
     }
 
     /// Gets the chosen speech engine ready: the cloud's key and voice list,
@@ -532,16 +551,41 @@ final class AppModel: ObservableObject {
 
     /// Sends a question, optionally with screenshots of every display.
     func ask(_ text: String, includeScreen: Bool) async {
+        await submit(text, includeScreen: includeScreen, report: false)
+    }
+
+    /// Background tasks never talk to you themselves: when one finishes,
+    /// its report goes back to the agent, which tells you what came of it
+    /// in its own words and voice, as soon as nothing else is being asked,
+    /// done or said.
+    private func deliverReports() {
+        guard !requestActive, requestFinished, !speakingNow, !speaker.isSpeaking, phase != .listening,
+              notesForAgent.isEmpty, hasAPIKey, core.reportsWaiting else { return }
+        Task { await submit("", includeScreen: false, report: true) }
+    }
+
+    /// With the live voice, everything said is said by it: what the agent
+    /// writes when the voice didn't ask for it (the answer to a typed
+    /// question, a report on a background task) is collected and passed on,
+    /// instead of being read by another voice.
+    private enum LiveRelay { case answer, report }
+    private var liveRelay: LiveRelay?
+
+    private func submit(_ text: String, includeScreen: Bool, report: Bool) async {
         // The live voice keeps talking: this may be its own request.
         interrupt(hushLive: false)
         let serial = requestSerial
-        let call = liveCall
+        let call = report ? nil : liveCall
         guard hasAPIKey else {
             showError("Add your \(providerName) API key in Cursor Pilot's Settings first.")
             return
         }
-        Sounds.play(.send)
-        overlay.state.readAlong = speakReplies && liveCall == nil
+        if !report { Sounds.play(.send) }
+        if call == nil, usesLiveVoice, speakReplies {
+            liveRelay = report ? .report : .answer
+            liveLines = []
+        }
+        overlay.state.readAlong = speakReplies && liveCall == nil && liveRelay == nil
         heardText = text
         replyText = ""
         scenesShown = 0
@@ -590,7 +634,8 @@ final class AppModel: ObservableObject {
             return
         }
         requestFinished = false
-        let id = core.send(CoreRequest(text: text, screens: screens, sketch: sketch && !screens.isEmpty)) { [weak self] event in
+        let request = CoreRequest(text: text, screens: screens, sketch: sketch && !screens.isEmpty, handback: report)
+        let id = core.send(request) { [weak self] event in
             guard let self else { return }
             if serial == requestSerial { handle(event) } else { handleStale(event, liveCall: call) }
         }
@@ -641,7 +686,7 @@ final class AppModel: ObservableObject {
         case .speak(let sentence):
             // The live voice says Claude's lines itself: progress before a
             // step, and the answer at the end.
-            if liveCall != nil {
+            if liveCall != nil || liveRelay != nil {
                 liveLines.append(sentence)
                 return
             }
@@ -693,7 +738,7 @@ final class AppModel: ObservableObject {
             switch step.phase {
             case "start":
                 liveSteps.append(step)
-                if liveCall != nil, !liveLines.isEmpty {
+                if liveCall != nil || liveRelay != nil, !liveLines.isEmpty {
                     LiveVoice.shared.say(liveLines.joined(separator: " "))
                     liveLines = []
                 }
@@ -730,6 +775,14 @@ final class AppModel: ObservableObject {
                 liveLines = []
                 liveFailure = nil
             }
+            if let relay = liveRelay {
+                let text = liveLines.joined(separator: " ")
+                if lastError == nil, !text.isEmpty {
+                    LiveVoice.shared.relay(text, report: relay == .report, key: openAIKey)
+                }
+                liveRelay = nil
+                liveLines = []
+            }
             requestActive = false
             backgroundWork = false
             overlay.state.activity = nil
@@ -753,6 +806,10 @@ final class AppModel: ObservableObject {
                 let leftover = notesForAgent.joined(separator: " ")
                 notesForAgent = []
                 Task { await self.ask(leftover, includeScreen: true) }
+            } else {
+                // A background task that finished meanwhile is reported now
+                // (after the voice, when something is still to be said).
+                deliverReports()
             }
         }
     }
@@ -773,8 +830,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// A background task's progress, and its report when it's over: a sound,
-    /// the report in the chat, and read aloud unless something else is going on.
+    /// A background task's progress, and its end: a sound, and its report
+    /// goes back to the agent, which tells you (see `deliverReports`).
     func handle(job e: JobEvent) {
         let cursors = HelperCursors.shared
         let i = jobs.firstIndex { $0.id == e.job }
@@ -793,9 +850,7 @@ final class AppModel: ObservableObject {
             Sounds.play(e.state == "failed" ? .error : .done)
             refreshConversations()
             reloadOpenTranscript()
-            if e.state != "stopped", phase == .idle, speakReplies, !speaker.isSpeaking {
-                speak(captionText(e.text))
-            }
+            deliverReports()
             // The card stays a moment so the report can be read, then goes.
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(12))
@@ -831,10 +886,13 @@ final class AppModel: ObservableObject {
             // doesn't go through `interrupt`).
             guard !Task.isCancelled, let self, self.requestFinished, !self.speaker.isSpeaking,
                   self.phase != .listening else { return }
+            // The live voice is still saying it: this runs again when it's done.
+            guard !(self.usesLiveVoice && self.speakingNow) else { return }
             self.setPhase(.idle)
             // Explained: the board and 3D view go after a while to look at them.
             self.board.closeSoon()
             self.scenes.closeSoon()
+            self.deliverReports()
         }
     }
 
@@ -916,6 +974,7 @@ final class AppModel: ObservableObject {
         activeRequest = nil
         requestActive = false
         requestFinished = true
+        liveRelay = nil
         // What was said for the stopped task goes with it, and a board it
         // was drawing is kept as far as it got.
         notesForAgent = []
@@ -1292,6 +1351,7 @@ final class AppModel: ObservableObject {
                 if !requestActive {
                     requestFinished = true
                     settleIfDone()
+                    deliverReports()
                 }
             case .task(let callID, let request) where requestActive && liveCall != nil:
                 // Already working: it's passed on, and the voice says so.
