@@ -94,7 +94,11 @@ Settings › Speech picks the engine that hears you and reads replies:
   when it drops (hands-free, or with something still to say) and on the
   next press when it has gone stale, and each new connection is told the
   last things said, so the conversation carries on. When the audio device
-  changes (headphones, another sample rate) the mic tap is rebuilt for it.
+  changes (headphones, another sample rate) the mic tap and the way out are
+  rebuilt for it. With voice processing on, the engine's mixer is connected
+  to the output in the device's own format: left at its 44.1 kHz default it
+  fails to start (`-10875`) on any device at another rate, such as AirPods.
+  A start that still fails is tried again, then without echo cancellation.
   With the talk key, the mic and its echo cancellation rest after two quiet
   minutes.
   Following OpenAI's voice guidance: the prompt uses its sections (Role and

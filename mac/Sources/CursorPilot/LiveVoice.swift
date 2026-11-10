@@ -108,8 +108,11 @@ final class LiveVoice {
     /// When audio was last queued or finished playing: a voice that has
     /// been "speaking" long after that is stuck.
     private var lastAudioAt: CFTimeInterval = 0
-    /// The format the mic tap was put in with.
+    /// The formats the mic tap and the way out were set up with.
     private var tapFormat: AVAudioFormat?
+    private var wayOutFormat: AVAudioFormat?
+    /// A start that failed is being tried again.
+    private var audioRetry: Task<Void, Never>?
 
     /// The mic as one channel at its own rate, once audio is running: the
     /// format `micSink` gets.
@@ -132,6 +135,7 @@ final class LiveVoice {
         d["inputChannels"] = f.channelCount
         d["inputCommon"] = f.commonFormat.rawValue
         d["voiceProcessing"] = engine.inputNode.isVoiceProcessingEnabled
+        d["outputRate"] = wayOutFormat?.sampleRate ?? 0
         d["audioRunning"] = audioRunning
         d["engineRunning"] = engine.isRunning
         d["error"] = lastAudioError ?? ""
@@ -765,32 +769,88 @@ final class LiveVoice {
     // MARK: Audio
 
     private func startAudio() {
-        guard !audioRunning else { return }
+        guard !audioRunning, audioRetry == nil else { return }
         steps.append("start")
+        setEchoCancellation(true)
+        steps.append("vp")
         do {
-            try engine.inputNode.setVoiceProcessingEnabled(true)
-            engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration =
-                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+            try runEngine()
+        } catch {
+            // The device may be in the middle of changing (headphones that
+            // switch to their microphone mode do that): once more in a
+            // moment, and failing that, without echo cancellation, which
+            // any device can do.
+            NSLog("Cursor Pilot: live voice audio didn't start (\(error.localizedDescription)); trying again")
+            steps.append("start failed")
+            audioRetry = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self, !Task.isCancelled else { return }
+                self.audioRetry = nil
+                do {
+                    try self.runEngine()
+                } catch {
+                    self.steps.append("without vp")
+                    self.setEchoCancellation(false)
+                    do {
+                        try self.runEngine()
+                    } catch {
+                        self.lastAudioError = "start: \(error)"
+                        self.onEvent?(.error("Couldn't start the live voice's audio: \(error.localizedDescription)"))
+                    }
+                }
+            }
+        }
+    }
+
+    private func setEchoCancellation(_ on: Bool) {
+        do {
+            try engine.inputNode.setVoiceProcessingEnabled(on)
+            if on {
+                engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                    AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+            }
         } catch {
             NSLog("Cursor Pilot: live voice without echo cancellation: \(error.localizedDescription)")
         }
-        steps.append("vp")
-        if player.engine == nil { engine.attach(player) }
-        engine.connect(player, to: engine.mainMixerNode, format: outFormat)
+    }
+
+    /// Wires the engine for the devices as they are now and starts it.
+    private func runEngine() throws {
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        connectWayOut()
         steps.append("player")
-        guard installTap() else { return }
+        guard installTap() else { throw CocoaError(.featureUnsupported) }
+        engine.prepare()
         do {
-            engine.prepare()
             try engine.start()
-            steps.append("started")
-            player.play()
-            audioRunning = true
-            watchConfiguration()
         } catch {
             engine.inputNode.removeTap(onBus: 0)
-            lastAudioError = "start: \(error)"
-            onEvent?(.error("Couldn't start the live voice's audio: \(error.localizedDescription)"))
+            throw error
         }
+        steps.append("started")
+        player.play()
+        audioRunning = true
+        lastAudioError = nil
+        watchConfiguration()
+    }
+
+    /// The voice's way out: player, mixer, output. With voice processing on,
+    /// the mixer doesn't follow the output device by itself: it stays at
+    /// 44.1 kHz, and when the device runs at another rate (AirPods, most
+    /// displays and audio interfaces) the engine refuses to start (error
+    /// -10875). So the mixer is connected in the output's own format.
+    private func connectWayOut() {
+        // The device's own format, read from the output side: the side
+        // facing the mixer only says what the mixer was last connected with.
+        let device = engine.outputNode.outputFormat(forBus: 0)
+        if player.engine == nil { engine.attach(player) }
+        engine.connect(player, to: engine.mainMixerNode, format: outFormat)
+        guard device.sampleRate > 0, device.channelCount > 0,
+              let out = AVAudioFormat(standardFormatWithSampleRate: device.sampleRate, channels: device.channelCount)
+        else { return }
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: out)
+        wayOutFormat = out
     }
 
     /// Taps the mic in the format it has now and sends it on, converted to
@@ -856,34 +916,38 @@ final class LiveVoice {
             MainActor.assumeIsolated {
                 guard let self, self.audioRunning else { return }
                 let input = self.engine.inputNode.outputFormat(forBus: 0)
-                let same = self.tapFormat.map { $0.sampleRate == input.sampleRate && $0.channelCount == input.channelCount } ?? false
+                let out = self.engine.outputNode.outputFormat(forBus: 0)
+                func alike(_ a: AVAudioFormat?, _ b: AVAudioFormat) -> Bool {
+                    a.map { $0.sampleRate == b.sampleRate && $0.channelCount == b.channelCount } ?? false
+                }
+                let same = alike(self.tapFormat, input) && alike(self.wayOutFormat, out)
                 if same, self.engine.isRunning { return }
                 self.steps.append(same ? "reconfigured" : "rebuilt")
                 if self.steps.count > 200 { self.steps.removeFirst(100) }
                 // What it was saying is lost with the old device.
                 self.stopPlayback(truncate: self.speaking)
-                if !same {
-                    self.engine.inputNode.removeTap(onBus: 0)
-                    self.engine.stop()
-                    self.engine.connect(self.player, to: self.engine.mainMixerNode, format: self.outFormat)
-                    guard self.installTap() else {
-                        self.audioRunning = false
-                        return
-                    }
-                    self.engine.prepare()
-                }
                 do {
-                    try self.engine.start()
-                    self.player.play()
+                    if same {
+                        try self.engine.start()
+                        self.player.play()
+                    } else {
+                        self.audioRunning = false
+                        try self.runEngine()
+                    }
                 } catch {
+                    // As at the start: once more when the device has settled.
+                    self.audioRunning = false
                     self.lastAudioError = "restart: \(error)"
                     NSLog("Cursor Pilot: live voice audio didn't restart: \(error.localizedDescription)")
+                    self.startAudio()
                 }
             }
         }
     }
 
     private func stopAudio() {
+        audioRetry?.cancel()
+        audioRetry = nil
         guard audioRunning else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
